@@ -330,7 +330,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].display_status, "失败")
         self.assertTrue(sessions[0].state_activity.failed_event)
 
-    def test_failed_session_event_overrides_open_hook_turn(self) -> None:
+    def test_failed_session_event_without_terminal_event_keeps_open_hook_turn_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             proc = root / "proc"
@@ -355,7 +355,7 @@ class MonitorTests(unittest.TestCase):
             )
 
         self.assertEqual(len(sessions), 1)
-        self.assertEqual(sessions[0].display_status, "失败")
+        self.assertEqual(sessions[0].display_status, "运行中")
         self.assertTrue(sessions[0].state_activity.failed_event)
 
     def test_same_cwd_new_session_does_not_inherit_old_success_hook_state(self) -> None:
