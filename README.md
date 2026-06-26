@@ -126,8 +126,8 @@ PYTHONPATH=src python3 -m codex_cli_monitor --codex-home ~/.codex
 
 Windows 前端在 `windows/CodexMonitorWidget`。它是一个轻量原生 Win32 小型矩形
 桌面悬浮窗，会轮询 `/api/sessions`，并按目录分组显示无表头表格：每行第一列是
-目录名，第二列是该目录下一个或多个 Codex 进程状态圆点。它不依赖 .NET Runtime
-或 Electron。
+目录名，第二列是该目录下一个或多个抗锯齿 Codex 进程状态圆点。它不依赖 .NET
+Runtime 或 Electron。
 
 圆点颜色：
 

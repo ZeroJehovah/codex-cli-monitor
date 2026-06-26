@@ -22,6 +22,7 @@
 #define MAX_SESSIONS 128
 #define DOT_SIZE 14
 #define DOT_GAP 8
+#define DOT_EDGE_SAMPLES 4
 #define PADDING_X 10
 #define PADDING_Y 1
 #define ROW_HEIGHT 26
@@ -906,19 +907,62 @@ static void show_context_menu(HWND hwnd, POINT point) {
     PostMessageW(hwnd, WM_NULL, 0, 0);
 }
 
-static void fill_dot(HDC hdc, const RECT *rect, COLORREF color) {
-    HBRUSH brush = CreateSolidBrush(color);
-    HGDIOBJ old_brush = SelectObject(hdc, brush);
-    HPEN pen = CreatePen(PS_SOLID, 1, color);
-    HGDIOBJ old_pen = SelectObject(hdc, pen);
-    Ellipse(hdc, rect->left, rect->top, rect->right, rect->bottom);
-    SelectObject(hdc, old_pen);
-    SelectObject(hdc, old_brush);
-    DeleteObject(pen);
-    DeleteObject(brush);
+static int blend_component(int foreground, int background, int alpha) {
+    return (foreground * alpha + background * (255 - alpha) + 127) / 255;
 }
 
-static void draw_status_dot(HDC hdc, const RECT *rect, const char *status) {
+static COLORREF blend_color(COLORREF foreground, COLORREF background, int alpha) {
+    int red = blend_component(GetRValue(foreground), GetRValue(background), alpha);
+    int green = blend_component(GetGValue(foreground), GetGValue(background), alpha);
+    int blue = blend_component(GetBValue(foreground), GetBValue(background), alpha);
+    return RGB(red, green, blue);
+}
+
+static void fill_dot(HDC hdc, const RECT *rect, COLORREF color, COLORREF background) {
+    int width = rect->right - rect->left;
+    int height = rect->bottom - rect->top;
+    int diameter = width < height ? width : height;
+    double center_x;
+    double center_y;
+    double radius;
+    double radius_squared;
+    int total_samples = DOT_EDGE_SAMPLES * DOT_EDGE_SAMPLES;
+    int x;
+    int y;
+    if (width <= 0 || height <= 0 || diameter <= 0) {
+        return;
+    }
+    center_x = rect->left + width / 2.0;
+    center_y = rect->top + height / 2.0;
+    radius = diameter / 2.0;
+    radius_squared = radius * radius;
+    for (y = rect->top; y < rect->bottom; y++) {
+        for (x = rect->left; x < rect->right; x++) {
+            int inside_samples = 0;
+            int sample_y;
+            for (sample_y = 0; sample_y < DOT_EDGE_SAMPLES; sample_y++) {
+                int sample_x;
+                double py = y + (sample_y + 0.5) / DOT_EDGE_SAMPLES;
+                double dy = py - center_y;
+                for (sample_x = 0; sample_x < DOT_EDGE_SAMPLES; sample_x++) {
+                    double px = x + (sample_x + 0.5) / DOT_EDGE_SAMPLES;
+                    double dx = px - center_x;
+                    if (dx * dx + dy * dy <= radius_squared) {
+                        inside_samples++;
+                    }
+                }
+            }
+            if (inside_samples == total_samples) {
+                SetPixelV(hdc, x, y, color);
+            } else if (inside_samples > 0) {
+                int alpha = (inside_samples * 255 + total_samples / 2) / total_samples;
+                SetPixelV(hdc, x, y, blend_color(color, background, alpha));
+            }
+        }
+    }
+}
+
+static void draw_status_dot(HDC hdc, const RECT *rect, const char *status, COLORREF row_background) {
     if (is_running_status(status)) {
         int pulse = running_pulse_level();
         int expand = 2 + pulse / 50;
@@ -928,11 +972,11 @@ static void draw_status_dot(HDC hdc, const RECT *rect, const char *status) {
         COLORREF core_color = RGB(37 + pulse * 38 / 100, 99 + pulse * 56 / 100, 235 + pulse * 20 / 100);
         InflateRect(&halo, expand, expand);
         InflateRect(&core, -(1 - pulse / 100), -(1 - pulse / 100));
-        fill_dot(hdc, &halo, halo_color);
-        fill_dot(hdc, &core, core_color);
+        fill_dot(hdc, &halo, halo_color, row_background);
+        fill_dot(hdc, &core, core_color, halo_color);
         return;
     }
-    fill_dot(hdc, rect, status_color(status));
+    fill_dot(hdc, rect, status_color(status), row_background);
 }
 
 static void paint_widget(HWND hwnd, HDC hdc) {
@@ -962,12 +1006,14 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         char display_name[512];
         wchar_t display_name_wide[512];
         int dot;
+        COLORREF row_color = RGB(34, 34, 34);
         row_rect.left = 1;
         row_rect.top = PADDING_Y + row * ROW_HEIGHT;
         row_rect.right = client.right - 1;
         row_rect.bottom = row_rect.top + ROW_HEIGHT;
         if (row % 2 == 1) {
-            row_background = CreateSolidBrush(RGB(39, 39, 39));
+            row_color = RGB(39, 39, 39);
+            row_background = CreateSolidBrush(row_color);
             FillRect(hdc, &row_rect, row_background);
             DeleteObject(row_background);
         }
@@ -982,7 +1028,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         for (dot = 0; dot < g_app.rows[row].session_count; dot++) {
             int session_index = g_app.rows[row].session_indexes[dot];
             RECT rect = dot_rect(row, dot);
-            draw_status_dot(hdc, &rect, g_app.sessions[session_index].status);
+            draw_status_dot(hdc, &rect, g_app.sessions[session_index].status, row_color);
         }
     }
     SelectObject(hdc, old_font);
