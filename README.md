@@ -41,7 +41,7 @@ JSON 里仍保留 `inferred_status` 诊断字段，里面可能出现 `waiting_u
 
 安装后，在每个正在运行或新打开的 Codex CLI 里执行 `/hooks`，按提示 review/trust 新 hook。这个步骤是 Codex 的安全机制。
 
-信任后，监控会优先使用 hook 事件判断状态：`SessionStart` 视为 `未运行`，用户提交后到 `Stop` 前视为 `运行中`，`Stop` 后结合 session JSONL 末尾事件判断 `成功` 或 `失败`。没有 hook 事件的旧会话会继续使用 sidecar 信号降级推断。
+信任后，监控会优先使用 hook 事件判断状态：`SessionStart` 视为 `未运行`，用户提交后到 `Stop` 前视为 `运行中`，`Stop` 后结合 session JSONL 末尾事件判断 `成功` 或 `失败`。同一工作目录下的多个 Codex 进程会按 Codex PID 和进程启动时间隔离，避免新会话继承旧会话的完成状态。没有 hook 事件的旧会话会继续使用 sidecar 信号降级推断。
 
 直接在项目目录运行：
 

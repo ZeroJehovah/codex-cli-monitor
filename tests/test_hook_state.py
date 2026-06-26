@@ -20,7 +20,7 @@ class HookStateTests(unittest.TestCase):
 
             states = summarize_hook_events(load_hook_events(path))
 
-        state = states[str(Path("/work/a").resolve())]
+        state = states[str(Path("/work/a").resolve())][0]
         self.assertTrue(state.in_turn)
         self.assertEqual(state.active_tool_count, 1)
         self.assertEqual(state.last_tool, "Bash")
@@ -34,10 +34,25 @@ class HookStateTests(unittest.TestCase):
 
             states = summarize_hook_events(load_hook_events(path))
 
-        state = states[str(Path("/work/a").resolve())]
+        state = states[str(Path("/work/a").resolve())][0]
         self.assertFalse(state.in_turn)
         self.assertEqual(state.active_tool_count, 0)
         self.assertEqual(state.last_event, "stop")
+
+    def test_same_cwd_keeps_separate_codex_parent_process_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.jsonl"
+            append_hook_event("user_prompt_submit", cwd="/work/a", ppid=100, path=path)
+            append_hook_event("stop", cwd="/work/a", ppid=100, path=path)
+            append_hook_event("session_start", cwd="/work/a", ppid=200, path=path)
+
+            states = summarize_hook_events(load_hook_events(path))
+
+        states_for_cwd = states[str(Path("/work/a").resolve())]
+        self.assertEqual({state.codex_pid for state in states_for_cwd}, {100, 200})
+        latest = states_for_cwd[0]
+        self.assertEqual(latest.codex_pid, 200)
+        self.assertEqual(latest.last_event, "session_start")
 
 
 if __name__ == "__main__":

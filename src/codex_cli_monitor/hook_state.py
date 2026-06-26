@@ -42,6 +42,7 @@ class HookSessionState:
     in_turn: bool
     active_tool_count: int = 0
     last_tool: str | None = None
+    codex_pid: int | None = None
     source: str | None = None
 
     def to_dict(self) -> dict:
@@ -53,6 +54,7 @@ class HookSessionState:
             "in_turn": self.in_turn,
             "active_tool_count": self.active_tool_count,
             "last_tool": self.last_tool,
+            "codex_pid": self.codex_pid,
             "source": self.source,
         }
 
@@ -72,15 +74,17 @@ def append_hook_event(
     event: str,
     tool: str | None = None,
     cwd: str | None = None,
+    ppid: int | None = None,
+    timestamp: float | None = None,
     path: Path | None = None,
 ) -> None:
     log_path = path or default_hook_log_path()
     payload = {
         "schema_version": 1,
         "event": event,
-        "timestamp": time.time(),
+        "timestamp": time.time() if timestamp is None else timestamp,
         "pid": os.getpid(),
-        "ppid": os.getppid(),
+        "ppid": os.getppid() if ppid is None else ppid,
         "cwd": cwd or os.getcwd(),
         "tool": tool,
     }
@@ -131,38 +135,46 @@ def load_hook_events(
 
 def summarize_hook_events(
     events: Iterable[HookEvent],
-) -> dict[str, HookSessionState]:
-    states: dict[str, HookSessionState] = {}
-    active_tools: dict[str, int] = {}
-    in_turn: dict[str, bool] = {}
+) -> dict[str, tuple[HookSessionState, ...]]:
+    states: dict[tuple[str, int | None], HookSessionState] = {}
+    active_tools: dict[tuple[str, int | None], int] = {}
+    in_turn: dict[tuple[str, int | None], bool] = {}
 
     for event in sorted(events, key=lambda item: item.timestamp):
         cwd = _normalize_path(event.cwd)
         if cwd is None:
             continue
+        key = (cwd, event.ppid)
         if event.event in {"session_start", "user_prompt_submit"}:
-            in_turn[cwd] = event.event == "user_prompt_submit"
-            active_tools[cwd] = 0
+            in_turn[key] = event.event == "user_prompt_submit"
+            active_tools[key] = 0
         elif event.event == "pre_tool_use":
-            in_turn[cwd] = True
-            active_tools[cwd] = active_tools.get(cwd, 0) + 1
+            in_turn[key] = True
+            active_tools[key] = active_tools.get(key, 0) + 1
         elif event.event == "post_tool_use":
-            active_tools[cwd] = max(0, active_tools.get(cwd, 0) - 1)
-            in_turn[cwd] = True
+            active_tools[key] = max(0, active_tools.get(key, 0) - 1)
+            in_turn[key] = True
         elif event.event == "stop":
-            in_turn[cwd] = False
-            active_tools[cwd] = 0
+            in_turn[key] = False
+            active_tools[key] = 0
 
-        states[cwd] = HookSessionState(
+        states[key] = HookSessionState(
             cwd=cwd,
             updated_at=event.timestamp,
             last_event=event.event,
-            in_turn=in_turn.get(cwd, False),
-            active_tool_count=active_tools.get(cwd, 0),
+            in_turn=in_turn.get(key, False),
+            active_tool_count=active_tools.get(key, 0),
             last_tool=event.tool,
+            codex_pid=event.ppid,
             source=event.source,
         )
-    return states
+    grouped: dict[str, list[HookSessionState]] = {}
+    for state in states.values():
+        grouped.setdefault(state.cwd, []).append(state)
+    return {
+        cwd: tuple(sorted(items, key=lambda item: item.updated_at, reverse=True))
+        for cwd, items in grouped.items()
+    }
 
 
 def _optional_str(value: object) -> str | None:
