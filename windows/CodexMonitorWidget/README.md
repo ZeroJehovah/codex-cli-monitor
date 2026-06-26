@@ -21,4 +21,8 @@ x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
 The widget polls `http://localhost:8765/api/sessions` by default. To use another
 endpoint, pass it as the first argument or set `CODEX_MONITOR_API_URL`.
 
+The floating panel is a headerless table grouped by directory. Each row shows
+the directory name in the first column and one or more process status dots in
+the second column.
+
 Right-click the floating widget and choose Exit to close it.
