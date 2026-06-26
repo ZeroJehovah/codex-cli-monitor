@@ -8,6 +8,8 @@
 - 根据 Codex hooks、进程树、CPU 变化、网络连接和 Codex 本地状态文件，判断会话状态。
 - 区分“确定事实”和“推断状态”，不会把推断结果当成 Codex 内部真实状态。
 - 支持 JSON 输出，方便接入脚本或面板。
+- 支持常驻后台 HTTP API，供桌面前端轮询当前 Codex 会话状态。
+- 提供 Windows 小型悬浮窗前端，用状态圆点展示每个 Codex 进程。
 - 提供可选的同名 `codex` shim，用来记录启动元数据后再透明执行真正的 Codex CLI。
 
 ## 大概原理
@@ -67,10 +69,90 @@ PYTHONPATH=src python3 -m codex_cli_monitor --sample-window 0
 PYTHONPATH=src python3 -m codex_cli_monitor --watch 2
 ```
 
+常驻后台运行 API 服务：
+
+```bash
+PYTHONPATH=src python3 -m codex_cli_monitor --daemon
+```
+
+默认监听：
+
+```text
+http://127.0.0.1:8765
+```
+
+停止后台服务：
+
+```bash
+PYTHONPATH=src python3 -m codex_cli_monitor --stop
+```
+
+前台运行 API 服务，便于调试：
+
+```bash
+PYTHONPATH=src python3 -m codex_cli_monitor --serve --host 127.0.0.1 --port 8765
+```
+
+查询会话状态：
+
+```bash
+curl http://127.0.0.1:8765/api/sessions
+```
+
+API 会返回每个 Codex 进程的主状态、目录和启动时间，示例字段如下：
+
+```json
+{
+  "session_count": 1,
+  "sessions": [
+    {
+      "pid": 1234,
+      "status": "运行中",
+      "directory": "/work/project",
+      "started_at": 1782475200.0,
+      "started_at_iso": "2026-06-26T12:00:00Z"
+    }
+  ]
+}
+```
+
 指定 Codex 本地状态目录：
 
 ```bash
 PYTHONPATH=src python3 -m codex_cli_monitor --codex-home ~/.codex
+```
+
+## Windows 悬浮窗
+
+Windows 前端在 `windows/CodexMonitorWidget`。它是一个小型矩形桌面悬浮窗，会轮询
+`/api/sessions`，并按 Codex 进程数量动态调整宽度。
+
+圆点颜色：
+
+- 灰色：`未运行`
+- 蓝色：`运行中`
+- 绿色：`成功`
+- 红色：`失败`
+
+悬浮窗始终置顶，可以拖动位置。鼠标移到圆点上会显示 PID、状态、目录和启动时间。
+
+在 Windows 上运行：
+
+```powershell
+dotnet run --project .\windows\CodexMonitorWidget\CodexMonitorWidget.csproj
+```
+
+默认连接 `http://localhost:8765/api/sessions`。如果 API 地址不同，可以传入第一个参数：
+
+```powershell
+dotnet run --project .\windows\CodexMonitorWidget\CodexMonitorWidget.csproj -- http://127.0.0.1:8765
+```
+
+也可以设置环境变量：
+
+```powershell
+$env:CODEX_MONITOR_API_URL = "http://127.0.0.1:8765"
+dotnet run --project .\windows\CodexMonitorWidget\CodexMonitorWidget.csproj
 ```
 
 ## 可选 shim
