@@ -20,6 +20,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].confirmed_status, "open")
         self.assertEqual(sessions[0].inference.status, "waiting_user_likely")
+        self.assertEqual(sessions[0].display_status, "未运行")
 
     def test_classifies_descendant_as_tool_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -32,6 +33,7 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].inference.status, "tool_running_likely")
+        self.assertEqual(sessions[0].display_status, "运行中")
         self.assertEqual(sessions[0].descendants[0].pid, 101)
 
     def test_network_alone_does_not_classify_api_inflight_likely(self) -> None:
@@ -55,6 +57,7 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].inference.status, "waiting_user_likely")
+        self.assertEqual(sessions[0].display_status, "未运行")
 
     def test_changing_associated_session_file_marks_session_active(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,7 +92,28 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].inference.status, "active_likely")
+        self.assertEqual(sessions[0].display_status, "运行中")
         self.assertIsNotNone(sessions[0].state_activity)
+
+    def test_hook_session_start_marks_session_not_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            append_hook_event("session_start", cwd="/work/a", path=hook_log)
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "未运行")
+        self.assertIsNotNone(sessions[0].hook_state)
 
     def test_hook_state_overrides_waiting_sidecar_signals(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -109,7 +133,115 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].inference.status, "api_inflight_likely")
+        self.assertEqual(sessions[0].display_status, "运行中")
         self.assertIsNotNone(sessions[0].hook_state)
+
+    def test_hook_tool_lifecycle_marks_session_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            append_hook_event("user_prompt_submit", cwd="/work/a", path=hook_log)
+            append_hook_event("pre_tool_use", tool="Bash", cwd="/work/a", path=hook_log)
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].inference.status, "tool_running_likely")
+        self.assertEqual(sessions[0].display_status, "运行中")
+
+    def test_hook_stop_with_successful_terminal_event_marks_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _write_session(
+                home,
+                "/work/a",
+                '{"type":"response_item","payload":{"type":"task_complete"}}',
+            )
+            append_hook_event("user_prompt_submit", cwd="/work/a", path=hook_log)
+            append_hook_event("stop", cwd="/work/a", path=hook_log)
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertFalse(sessions[0].state_activity.failed_event)
+
+    def test_hook_stop_with_interrupted_terminal_event_marks_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _write_session(
+                home,
+                "/work/a",
+                '{"type":"response_item","payload":{"type":"turn_aborted","reason":"interrupted"}}',
+            )
+            append_hook_event("user_prompt_submit", cwd="/work/a", path=hook_log)
+            append_hook_event("stop", cwd="/work/a", path=hook_log)
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "失败")
+        self.assertTrue(sessions[0].state_activity.failed_event)
+
+    def test_failed_session_event_overrides_open_hook_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            append_hook_event("user_prompt_submit", cwd="/work/a", path=hook_log)
+            _write_session(
+                home,
+                "/work/a",
+                '{"type":"response_item","payload":{"type":"error","message":"blocked"}}',
+            )
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "失败")
+        self.assertTrue(sessions[0].state_activity.failed_event)
 
     def test_inspect_runtime_returns_sessions_and_state_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,6 +287,20 @@ def _write_process(
     (pid_dir / "cwd").symlink_to(cwd)
     (pid_dir / "exe").symlink_to(f"/usr/bin/{cmdline[0]}")
     (pid_dir / "fd" / "0").symlink_to("/dev/pts/3")
+
+
+def _write_session(home: Path, cwd: str, last_record: str) -> Path:
+    session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+    session.parent.mkdir(parents=True)
+    session.write_text(
+        '{"type":"session_meta","payload":{"session_id":"s","cwd":"'
+        + cwd
+        + '"}}\n'
+        + last_record
+        + "\n",
+        encoding="utf-8",
+    )
+    return session
 
 
 def _stat_line(pid: int, comm: str, state: str, ppid: int) -> str:

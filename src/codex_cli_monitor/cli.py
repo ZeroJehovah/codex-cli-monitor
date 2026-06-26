@@ -115,7 +115,7 @@ def _print_table(sessions: tuple, codex_state) -> None:
         rows.append(
             {
                 "PID": str(root.pid),
-                "STATUS": inference.status,
+                "STATUS": session.display_status,
                 "CONF": f"{inference.confidence:.2f}",
                 "ELAPSED": _format_duration(root.elapsed_seconds),
                 "TTY": root.tty or "-",

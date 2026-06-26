@@ -64,6 +64,41 @@ class CodexStateTests(unittest.TestCase):
         self.assertEqual(activities[0].last_payload_type, "function_call")
         self.assertNotIn("secret", repr(activities[0].to_dict()))
 
+    def test_scan_session_activities_marks_successful_terminal_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                '{"type":"session_meta","payload":{"session_id":"s","cwd":"/work/a"}}\n'
+                '{"type":"response_item","payload":{"type":"task_complete"}}\n',
+                encoding="utf-8",
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].terminal_event)
+        self.assertFalse(activities[0].failed_event)
+
+    def test_scan_session_activities_marks_interrupted_turn_as_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                '{"type":"session_meta","payload":{"session_id":"s","cwd":"/work/a"}}\n'
+                '{"type":"response_item","payload":{"type":"turn_aborted","reason":"interrupted"}}\n',
+                encoding="utf-8",
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].terminal_event)
+        self.assertTrue(activities[0].failed_event)
+        self.assertEqual(activities[0].last_payload_reason, "interrupted")
+
 
 if __name__ == "__main__":
     unittest.main()
