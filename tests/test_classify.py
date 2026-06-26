@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from codex_cli_monitor.classify import infer_status, is_codex_process
-from codex_cli_monitor.models import ProcessInfo
+from codex_cli_monitor.models import NetworkConnection, ProcessInfo, SessionActivity
 
 
 class ClassifyTests(unittest.TestCase):
@@ -34,6 +34,83 @@ class ClassifyTests(unittest.TestCase):
         inference = infer_status(root, (shell,), (), sample_window=0)
 
         self.assertEqual(inference.status, "tool_running_likely")
+
+    def test_changing_session_file_is_active(self) -> None:
+        root = _process(100, "codex", state="S", tty="/dev/pts/1")
+        activity = _activity(changed=True, age=1, last_payload_type="function_call")
+
+        inference = infer_status(root, (), (), sample_window=1, state_activity=activity)
+
+        self.assertEqual(inference.status, "active_likely")
+
+    def test_network_without_recent_state_does_not_force_api_inflight(self) -> None:
+        root = _process(100, "codex", state="S", tty="/dev/pts/1")
+        connection = NetworkConnection(
+            protocol="tcp4",
+            local_address="127.0.0.1",
+            local_port=50000,
+            remote_address="34.216.184.93",
+            remote_port=443,
+            state="ESTABLISHED",
+            inode="12345",
+        )
+        activity = _activity(changed=False, age=300, last_payload_type="turn_aborted")
+
+        inference = infer_status(
+            root,
+            (),
+            (connection,),
+            sample_window=1,
+            state_activity=activity,
+        )
+
+        self.assertEqual(inference.status, "waiting_user_likely")
+
+    def test_recent_function_call_state_can_indicate_api_inflight(self) -> None:
+        root = _process(100, "codex", state="S", tty="/dev/pts/1")
+        connection = NetworkConnection(
+            protocol="tcp4",
+            local_address="127.0.0.1",
+            local_port=50000,
+            remote_address="34.216.184.93",
+            remote_port=443,
+            state="ESTABLISHED",
+            inode="12345",
+        )
+        activity = _activity(changed=False, age=3, last_payload_type="function_call")
+
+        inference = infer_status(
+            root,
+            (),
+            (connection,),
+            sample_window=1,
+            state_activity=activity,
+        )
+
+        self.assertEqual(inference.status, "api_inflight_likely")
+
+    def test_recent_state_with_proxy_connection_can_indicate_api_inflight(self) -> None:
+        root = _process(100, "codex", state="S", tty="/dev/pts/1")
+        connection = NetworkConnection(
+            protocol="tcp4",
+            local_address="172.24.3.172",
+            local_port=50000,
+            remote_address="172.24.0.1",
+            remote_port=7890,
+            state="ESTABLISHED",
+            inode="12345",
+        )
+        activity = _activity(changed=False, age=3, last_payload_type="reasoning")
+
+        inference = infer_status(
+            root,
+            (),
+            (connection,),
+            sample_window=1,
+            state_activity=activity,
+        )
+
+        self.assertEqual(inference.status, "api_inflight_likely")
 
     def test_codex_process_allows_deleted_exe_suffix(self) -> None:
         process = _process(
@@ -81,6 +158,26 @@ def _process(
         tty_nr=34816 if tty else 0,
         elapsed_seconds=10,
         cpu_seconds=1,
+    )
+
+
+def _activity(
+    changed: bool,
+    age: float,
+    last_payload_type: str,
+) -> SessionActivity:
+    observed_at = 1000.0
+    return SessionActivity(
+        relative_path="sessions/2026/06/26/rollout.jsonl",
+        session_id="session",
+        cwd="/work/a",
+        size_bytes=100,
+        modified_at=observed_at - age,
+        observed_at=observed_at,
+        changed_during_sample=changed,
+        last_record_type="response_item",
+        last_payload_type=last_payload_type,
+        terminal_event=last_payload_type in {"turn_aborted", "thread_rolled_back"},
     )
 
 

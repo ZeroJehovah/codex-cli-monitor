@@ -33,7 +33,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].inference.status, "tool_running_likely")
         self.assertEqual(sessions[0].descendants[0].pid, 101)
 
-    def test_classifies_remote_tls_as_api_inflight_likely(self) -> None:
+    def test_network_alone_does_not_classify_api_inflight_likely(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc = Path(tmp)
             _write_common_proc(proc)
@@ -53,8 +53,42 @@ class MonitorTests(unittest.TestCase):
             sessions = discover_sessions(proc, sample_window=0)
 
         self.assertEqual(len(sessions), 1)
-        self.assertEqual(sessions[0].inference.status, "api_inflight_likely")
-        self.assertLess(sessions[0].inference.confidence, 0.7)
+        self.assertEqual(sessions[0].inference.status, "waiting_user_likely")
+
+    def test_changing_associated_session_file_marks_session_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                '{"type":"session_meta","payload":{"session_id":"s","cwd":"/work/a"}}\n'
+                '{"type":"response_item","payload":{"type":"message","role":"user"}}\n',
+                encoding="utf-8",
+            )
+
+            def mutate_session_file(_: float) -> None:
+                session.write_text(
+                    '{"type":"session_meta","payload":{"session_id":"s","cwd":"/work/a"}}\n'
+                    '{"type":"response_item","payload":{"type":"function_call","name":"exec_command"}}\n',
+                    encoding="utf-8",
+                )
+
+            sessions = discover_sessions(
+                proc,
+                sample_window=1,
+                codex_home=home,
+                sleep=mutate_session_file,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].inference.status, "active_likely")
+        self.assertIsNotNone(sessions[0].state_activity)
 
     def test_inspect_runtime_returns_sessions_and_state_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

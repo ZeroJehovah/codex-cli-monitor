@@ -6,8 +6,14 @@ from pathlib import Path
 from typing import Callable
 
 from .classify import infer_status, is_codex_process
-from .codex_state import scan_codex_state
-from .models import CodexSession, CodexStateSummary, NetworkConnection, ProcessInfo
+from .codex_state import scan_codex_state, scan_session_activities
+from .models import (
+    CodexSession,
+    CodexStateSummary,
+    NetworkConnection,
+    ProcessInfo,
+    SessionActivity,
+)
 from .procfs import read_network_connections, read_processes
 from .shim import default_log_path, load_launch_records
 
@@ -19,7 +25,7 @@ def inspect_runtime(
     codex_home: Path | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[tuple[CodexSession, ...], CodexStateSummary]:
-    sessions = discover_sessions(proc_root, sample_window, shim_log, sleep)
+    sessions = discover_sessions(proc_root, sample_window, shim_log, codex_home, sleep)
     state_summary = scan_codex_state(codex_home)
     return sessions, state_summary
 
@@ -28,14 +34,24 @@ def discover_sessions(
     proc_root: Path = Path("/proc"),
     sample_window: float = 0.25,
     shim_log: Path | None = None,
+    codex_home: Path | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[CodexSession, ...]:
     first_snapshot = read_processes(proc_root)
+    first_activities = scan_session_activities(codex_home) if sample_window > 0 else ()
+    first_activities_by_path = {
+        activity.relative_path: activity for activity in first_activities
+    }
     if sample_window > 0:
         sleep(sample_window)
         second_snapshot = read_processes(proc_root)
+        session_activities = scan_session_activities(
+            codex_home,
+            previous=first_activities_by_path,
+        )
     else:
         second_snapshot = first_snapshot
+        session_activities = scan_session_activities(codex_home)
 
     processes = _with_cpu_deltas(first_snapshot, second_snapshot, sample_window)
     codex_roots = _find_codex_roots(processes)
@@ -57,13 +73,21 @@ def discover_sessions(
     for root in codex_roots:
         descendants = descendants_by_pid[root.pid]
         connections = _connections_for((root, *descendants), connections_by_pid)
-        inference = infer_status(root, descendants, connections, sample_window)
+        state_activity = _state_activity_for_root(root, session_activities)
+        inference = infer_status(
+            root,
+            descendants,
+            connections,
+            sample_window,
+            state_activity,
+        )
         sessions.append(
             CodexSession(
                 root=root,
                 descendants=descendants,
                 connections=connections,
                 inference=inference,
+                state_activity=state_activity,
                 launch_record=launch_records.get(root.pid),
             )
         )
@@ -140,3 +164,29 @@ def _connections_for(
             seen.add(key)
             result.append(connection)
     return tuple(result)
+
+
+def _state_activity_for_root(
+    root: ProcessInfo,
+    activities: tuple[SessionActivity, ...],
+) -> SessionActivity | None:
+    root_cwd = _normalize_path(root.cwd)
+    candidates = []
+    for activity in activities:
+        activity_cwd = _normalize_path(activity.cwd)
+        if root_cwd is None or activity_cwd is None:
+            continue
+        if root_cwd == activity_cwd:
+            candidates.append(activity)
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: item.modified_at, reverse=True)[0]
+
+
+def _normalize_path(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return str(Path(value).resolve())
+    except OSError:
+        return str(Path(value).absolute())

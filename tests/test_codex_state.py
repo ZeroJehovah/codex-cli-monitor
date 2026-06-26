@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_cli_monitor.codex_state import scan_codex_state
+from codex_cli_monitor.codex_state import scan_codex_state, scan_session_activities
 
 
 class CodexStateTests(unittest.TestCase):
@@ -36,6 +36,33 @@ class CodexStateTests(unittest.TestCase):
 
         self.assertEqual(summary.newest_files, ())
         self.assertIn("does not exist", summary.scan_errors[0])
+
+    def test_scan_session_activities_reads_head_and_tail_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / (
+                "rollout-2026-06-26T15-42-25-019f02e1-4585-7693-84dd-684e3da64778.jsonl"
+            )
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                "\n".join(
+                    [
+                        '{"type":"session_meta","payload":{"session_id":"019f02e1-4585-7693-84dd-684e3da64778","cwd":"/work/a"}}',
+                        '{"type":"response_item","payload":{"type":"message","role":"user","content":"secret"}}',
+                        '{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"secret"}}',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0].session_id, "019f02e1-4585-7693-84dd-684e3da64778")
+        self.assertEqual(activities[0].cwd, "/work/a")
+        self.assertEqual(activities[0].last_payload_type, "function_call")
+        self.assertNotIn("secret", repr(activities[0].to_dict()))
 
 
 if __name__ == "__main__":
