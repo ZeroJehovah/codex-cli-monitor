@@ -23,6 +23,7 @@ endpoint, pass it as the first argument or set `CODEX_MONITOR_API_URL`.
 
 The floating panel is a headerless table grouped by directory. Each row shows
 the directory name in the first column and one or more process status dots in
-the second column.
+the second column. The table width is calculated from the visible directory
+names and status dots instead of reserving a large fixed directory column.
 
 Right-click the floating widget and choose Exit to close it.

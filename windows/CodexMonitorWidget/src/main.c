@@ -21,9 +21,9 @@
 #define PADDING_X 10
 #define PADDING_Y 6
 #define ROW_HEIGHT 26
-#define DIRECTORY_COLUMN_WIDTH 220
+#define DIRECTORY_TEXT_PADDING 8
 #define COLUMN_GAP 12
-#define MIN_PANEL_WIDTH 260
+#define MIN_PANEL_WIDTH 48
 #define MIN_PANEL_HEIGHT 32
 
 typedef struct Session {
@@ -56,6 +56,7 @@ typedef struct AppState {
     DirectoryRow rows[MAX_SESSIONS];
     int session_count;
     int row_count;
+    int directory_column_width;
     int empty_success_count;
     int hovered_session;
     int dragging;
@@ -157,12 +158,16 @@ static int max_row_session_count(void) {
     return max_count;
 }
 
+static int dot_column_left(void) {
+    return PADDING_X + g_app.directory_column_width + COLUMN_GAP;
+}
+
 static int panel_width(void) {
     int width;
     if (g_app.row_count <= 0) {
         return MIN_PANEL_WIDTH;
     }
-    width = PADDING_X * 2 + DIRECTORY_COLUMN_WIDTH + COLUMN_GAP + row_dot_width(max_row_session_count());
+    width = PADDING_X * 2 + g_app.directory_column_width + COLUMN_GAP + row_dot_width(max_row_session_count());
     if (width < MIN_PANEL_WIDTH) {
         return MIN_PANEL_WIDTH;
     }
@@ -183,7 +188,7 @@ static int panel_height(void) {
 
 static RECT dot_rect(int row_index, int dot_index) {
     RECT rect;
-    rect.left = PADDING_X + DIRECTORY_COLUMN_WIDTH + COLUMN_GAP + dot_index * (DOT_SIZE + DOT_GAP);
+    rect.left = dot_column_left() + dot_index * (DOT_SIZE + DOT_GAP);
     rect.top = PADDING_Y + row_index * ROW_HEIGHT + (ROW_HEIGHT - DOT_SIZE) / 2;
     rect.right = rect.left + DOT_SIZE;
     rect.bottom = rect.top + DOT_SIZE;
@@ -202,6 +207,37 @@ static int dot_at_point(POINT point) {
         }
     }
     return -1;
+}
+
+static void update_directory_column_width(void) {
+    HDC hdc;
+    HGDIOBJ old_font;
+    int row;
+    int max_width = 0;
+    if (g_app.row_count <= 0 || g_app.hwnd == NULL) {
+        g_app.directory_column_width = 0;
+        return;
+    }
+    hdc = GetDC(g_app.hwnd);
+    if (hdc == NULL) {
+        g_app.directory_column_width = 0;
+        return;
+    }
+    old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
+    for (row = 0; row < g_app.row_count; row++) {
+        char display_name[512];
+        wchar_t display_name_wide[512];
+        SIZE size;
+        directory_display_name(g_app.rows[row].directory, display_name, sizeof(display_name));
+        utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
+        if (GetTextExtentPoint32W(hdc, display_name_wide, (int)wcslen(display_name_wide), &size) &&
+            size.cx > max_width) {
+            max_width = size.cx;
+        }
+    }
+    SelectObject(hdc, old_font);
+    ReleaseDC(g_app.hwnd, hdc);
+    g_app.directory_column_width = max_width + DIRECTORY_TEXT_PADDING;
 }
 
 static void rebuild_directory_rows(void) {
@@ -233,6 +269,7 @@ static void rebuild_directory_rows(void) {
     if (g_app.hovered_session >= g_app.session_count) {
         g_app.hovered_session = -1;
     }
+    update_directory_column_width();
 }
 
 static COLORREF status_color(const char *status) {
@@ -698,12 +735,14 @@ static void paint_widget(HWND hwnd, HDC hdc) {
     Rectangle(hdc, client.left, client.top, client.right, client.bottom);
     SelectObject(hdc, old_pen);
     DeleteObject(border);
-    grid = CreatePen(PS_SOLID, 1, RGB(60, 60, 60));
-    old_pen = SelectObject(hdc, grid);
-    MoveToEx(hdc, PADDING_X + DIRECTORY_COLUMN_WIDTH + COLUMN_GAP / 2, PADDING_Y, NULL);
-    LineTo(hdc, PADDING_X + DIRECTORY_COLUMN_WIDTH + COLUMN_GAP / 2, client.bottom - PADDING_Y);
-    SelectObject(hdc, old_pen);
-    DeleteObject(grid);
+    if (g_app.row_count > 0) {
+        grid = CreatePen(PS_SOLID, 1, RGB(60, 60, 60));
+        old_pen = SelectObject(hdc, grid);
+        MoveToEx(hdc, dot_column_left() - COLUMN_GAP / 2, PADDING_Y, NULL);
+        LineTo(hdc, dot_column_left() - COLUMN_GAP / 2, client.bottom - PADDING_Y);
+        SelectObject(hdc, old_pen);
+        DeleteObject(grid);
+    }
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(225, 225, 225));
     old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
@@ -734,7 +773,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
         text_rect.left = PADDING_X;
         text_rect.top = row_rect.top;
-        text_rect.right = PADDING_X + DIRECTORY_COLUMN_WIDTH;
+        text_rect.right = PADDING_X + g_app.directory_column_width;
         text_rect.bottom = row_rect.bottom;
         DrawTextW(hdc, display_name_wide, -1, &text_rect,
             DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
