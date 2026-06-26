@@ -217,7 +217,9 @@ def _session_activity(
     last_record_type = _optional_str(last_record.get("type")) if isinstance(last_record, dict) else None
     last_payload_reason = _optional_str(last_payload.get("reason"))
     recent_turn_records = _records_since_latest_user(records)
-    failed_event = any(_record_is_failed_event(record) for record in recent_turn_records)
+    failed_event = any(
+        _record_is_failed_event(record) for record in recent_turn_records
+    ) or _turn_completed_without_visible_response(recent_turn_records, last_payload_type)
 
     return SessionActivity(
         relative_path=relative_path,
@@ -338,6 +340,43 @@ def _record_is_failed_event(record: dict) -> bool:
     ) or _is_failed_message_record(record_type, payload)
 
 
+def _turn_completed_without_visible_response(
+    records: tuple[dict, ...],
+    last_payload_type: str | None,
+) -> bool:
+    if last_payload_type not in TERMINAL_PAYLOAD_TYPES:
+        return False
+    saw_user = False
+    saw_token_count = False
+    for record in records:
+        if _is_user_message_record(record):
+            saw_user = True
+        if _is_visible_assistant_or_tool_record(record):
+            return False
+        payload = record.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        if _optional_str(payload.get("type")) == "token_count":
+            saw_token_count = True
+    return saw_user and saw_token_count
+
+
+def _is_visible_assistant_or_tool_record(record: dict) -> bool:
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    record_type = _optional_str(record.get("type"))
+    payload_type = _optional_str(payload.get("type"))
+    payload_role = _optional_str(payload.get("role"))
+    if record_type == "event_msg" and payload_type == "agent_message":
+        return _optional_str(payload.get("phase")) is None
+    if record_type == "response_item" and payload_role == "assistant":
+        return True
+    return payload_type in {
+        "custom_tool_call",
+        "function_call",
+        "function_call_output",
+    }
+
+
 def _is_user_message_record(record: dict) -> bool:
     payload = record.get("payload")
     payload = payload if isinstance(payload, dict) else {}
@@ -358,6 +397,8 @@ def _is_failed_message_record(record_type: str | None, payload: dict) -> bool:
     payload_type = _optional_str(payload.get("type"))
     payload_role = _optional_str(payload.get("role"))
     if record_type == "event_msg" and payload_type == "agent_message":
+        if _optional_str(payload.get("phase")) is not None:
+            return False
         text = _optional_str(payload.get("message")) or ""
         return _message_text_has_terminal_error(text, require_red_ansi=False)
     elif (
