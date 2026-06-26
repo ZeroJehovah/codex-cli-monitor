@@ -10,6 +10,7 @@ from .codex_state import scan_codex_state, scan_session_activities
 from .models import (
     CodexSession,
     CodexStateSummary,
+    Inference,
     NetworkConnection,
     ProcessInfo,
     SessionActivity,
@@ -17,6 +18,9 @@ from .models import (
 from .hook_state import HookSessionState, load_hook_events, summarize_hook_events
 from .procfs import read_network_connections, read_processes
 from .shim import default_log_path, load_launch_records
+
+
+ACTIVITY_TIMESTAMP_GRACE_SECONDS = 5.0
 
 
 def inspect_runtime(
@@ -103,6 +107,7 @@ def discover_sessions(
                 state_activity=state_activity,
                 hook_state=hook_state,
                 launch_record=launch_records.get(root.pid),
+                display_status=_display_status(inference, hook_state, state_activity),
             )
         )
 
@@ -205,6 +210,58 @@ def _hook_state_for_root(
     if root_cwd is None:
         return None
     return states.get(root_cwd)
+
+
+def _display_status(
+    inference: Inference,
+    hook_state: HookSessionState | None,
+    state_activity: SessionActivity | None,
+) -> str:
+    if hook_state is not None:
+        if hook_state.last_event == "session_start":
+            return "未运行"
+        if _activity_is_current_for_hook(state_activity, hook_state):
+            if state_activity is not None and state_activity.failed_event:
+                return "失败"
+            if state_activity is not None and state_activity.terminal_event:
+                return "成功"
+        if hook_state.in_turn or hook_state.active_tool_count > 0:
+            return "运行中"
+        if state_activity is not None and state_activity.failed_event:
+            return "失败"
+        if state_activity is not None and state_activity.terminal_event:
+            return "成功"
+        if hook_state.last_event == "stop":
+            return "成功"
+        return "未运行"
+
+    if state_activity is not None:
+        if state_activity.failed_event:
+            return "失败"
+        if state_activity.terminal_event:
+            return "成功"
+        if state_activity.changed_during_sample:
+            return "运行中"
+
+    if inference.status in {
+        "api_inflight_likely",
+        "tool_running_likely",
+        "active_likely",
+    }:
+        return "运行中"
+    return "未运行"
+
+
+def _activity_is_current_for_hook(
+    state_activity: SessionActivity | None,
+    hook_state: HookSessionState,
+) -> bool:
+    if state_activity is None:
+        return False
+    return (
+        state_activity.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS
+        >= hook_state.updated_at
+    )
 
 
 def _normalize_path(value: str | None) -> str | None:

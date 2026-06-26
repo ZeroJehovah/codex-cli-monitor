@@ -1,11 +1,11 @@
 # codex-cli-monitor
 
-`codex-cli-monitor` 是一个用于观察本机 Codex CLI 运行状态的小工具。它的目标是低侵入地显示当前打开了多少个 Codex 会话，并尽量判断每个会话可能正在做什么。
+`codex-cli-monitor` 是一个用于观察本机 Codex CLI 运行状态的小工具。它的目标是低侵入地显示当前打开了多少个 Codex 会话，并把每个会话归类为少量可直接使用的状态。
 
 ## 功能
 
 - 扫描当前系统里的 Codex CLI 进程，显示会话数量、PID、TTY、工作目录、运行时长等信息。
-- 根据进程树、CPU 变化、网络连接和 Codex 本地状态文件，推断会话状态。
+- 根据 Codex hooks、进程树、CPU 变化、网络连接和 Codex 本地状态文件，判断会话状态。
 - 区分“确定事实”和“推断状态”，不会把推断结果当成 Codex 内部真实状态。
 - 支持 JSON 输出，方便接入脚本或面板。
 - 提供可选的同名 `codex` shim，用来记录启动元数据后再透明执行真正的 Codex CLI。
@@ -17,19 +17,19 @@
 - `/proc` 里的进程、父子进程、命令行、TTY、当前工作目录和 CPU 时间。
 - 进程持有的网络连接，用作远程 API 请求的辅助判断。
 - `$CODEX_HOME` 下的本地状态文件元数据，例如 session JSONL 文件路径、大小、修改时间，以及头尾结构化事件类型。
+- Codex hooks 写入的 turn/tool/stop 生命周期事件。
 - 可选 shim 写入的启动记录。
 
 为了减少误判，远程 API 进行中的判断不会只依赖长连接；它需要近期 Codex session 文件活动和网络连接共同支撑。监控不会输出 session JSONL 的消息正文。
 
-推断状态包括：
+主状态只有四种：
 
-- `waiting_user_likely`：可能正在等待用户输入。
-- `api_inflight_likely`：可能正在等待远程 API 响应。
-- `tool_running_likely`：可能正在运行本地命令、测试或构建。
-- `active_likely`：有活动，但无法更具体分类。
-- `unknown`：信号不足或互相矛盾。
+- `未运行`：新会话，或 `/new`、清空、恢复等产生的新 turn 上下文，尚未提交提示词。
+- `运行中`：已提交提示词，AI 正在思考、等待 API、执行 MCP、本地工具或其他操作。
+- `成功`：从运行中结束，且最近一轮结果完成成功。
+- `失败`：从运行中结束，且最近一轮出现 API/模型错误，或被手动 Ctrl+C 中断。
 
-这些状态都会带有置信度和证据，属于“可能如此”，不是 Codex 内部事件的精确声明。
+JSON 里仍保留 `inferred_status` 诊断字段，里面可能出现 `waiting_user_likely`、`api_inflight_likely`、`tool_running_likely` 等内部推断值，用来解释证据和置信度；表格和顶层 `status` 只显示上面的四种主状态。
 
 ## 使用方法
 
@@ -41,7 +41,7 @@
 
 安装后，在每个正在运行或新打开的 Codex CLI 里执行 `/hooks`，按提示 review/trust 新 hook。这个步骤是 Codex 的安全机制。
 
-信任后，监控会优先使用 hook 事件判断状态：用户提交后到 `Stop` 前视为进行中，`PreToolUse` 到 `PostToolUse` 之间视为工具运行，`Stop` 后视为等待用户。没有 hook 事件的旧会话会继续使用 sidecar 信号降级推断。
+信任后，监控会优先使用 hook 事件判断状态：`SessionStart` 视为 `未运行`，用户提交后到 `Stop` 前视为 `运行中`，`Stop` 后结合 session JSONL 末尾事件判断 `成功` 或 `失败`。没有 hook 事件的旧会话会继续使用 sidecar 信号降级推断。
 
 直接在项目目录运行：
 

@@ -11,6 +11,27 @@ from .models import CodexStateSummary, SessionActivity, StateFile
 
 
 DEFAULT_MAX_FILES = 12
+FAILED_RECORD_TYPES = {"error"}
+FAILED_PAYLOAD_TYPES = {
+    "error",
+    "thread_rolled_back",
+    "turn_aborted",
+    "turn_failed",
+}
+FAILED_PAYLOAD_REASONS = {
+    "cancelled",
+    "canceled",
+    "error",
+    "failed",
+    "interrupted",
+}
+TERMINAL_PAYLOAD_TYPES = {
+    "task_complete",
+    "thread_rolled_back",
+    "turn_aborted",
+    "turn_completed",
+    "turn_failed",
+}
 STATE_PATTERNS = (
     "sessions/**/*.jsonl",
     "shell_snapshots/*.sh",
@@ -159,6 +180,12 @@ def _session_activity(
     last_payload = last_payload if isinstance(last_payload, dict) else {}
     last_payload_type = _optional_str(last_payload.get("type"))
     last_record_type = _optional_str(last_record.get("type")) if isinstance(last_record, dict) else None
+    last_payload_reason = _optional_str(last_payload.get("reason"))
+    failed_event = _is_failed_event(
+        last_record_type,
+        last_payload_type,
+        last_payload_reason,
+    )
 
     return SessionActivity(
         relative_path=relative_path,
@@ -170,8 +197,9 @@ def _session_activity(
         last_record_type=last_record_type,
         last_payload_type=last_payload_type,
         last_payload_role=_optional_str(last_payload.get("role")),
-        terminal_event=last_payload_type
-        in {"turn_aborted", "thread_rolled_back", "task_complete", "turn_completed"},
+        last_payload_reason=last_payload_reason,
+        terminal_event=last_payload_type in TERMINAL_PAYLOAD_TYPES,
+        failed_event=failed_event,
     )
 
 
@@ -240,6 +268,19 @@ def _optional_str(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _is_failed_event(
+    record_type: str | None,
+    payload_type: str | None,
+    payload_reason: str | None,
+) -> bool:
+    reason = payload_reason.lower() if payload_reason is not None else None
+    return (
+        record_type in FAILED_RECORD_TYPES
+        or payload_type in FAILED_PAYLOAD_TYPES
+        or reason in FAILED_PAYLOAD_REASONS
+    )
 
 
 def _mtime_or_zero(path: Path) -> float:

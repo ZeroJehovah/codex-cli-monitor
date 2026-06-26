@@ -8,7 +8,7 @@ from pathlib import Path
 
 HOOK_EVENTS = {
     "SessionStart": {
-        "matcher": "startup|resume|clear|compact",
+        "matcher": "*",
         "command": "session_start",
     },
     "UserPromptSubmit": {

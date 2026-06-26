@@ -96,7 +96,9 @@ class SessionActivity:
     last_record_type: str | None = None
     last_payload_type: str | None = None
     last_payload_role: str | None = None
+    last_payload_reason: str | None = None
     terminal_event: bool = False
+    failed_event: bool = False
 
     @property
     def modified_age_seconds(self) -> float:
@@ -119,7 +121,9 @@ class SessionActivity:
             "last_record_type": self.last_record_type,
             "last_payload_type": self.last_payload_type,
             "last_payload_role": self.last_payload_role,
+            "last_payload_reason": self.last_payload_reason,
             "terminal_event": self.terminal_event,
+            "failed_event": self.failed_event,
         }
 
 
@@ -213,9 +217,11 @@ class CodexSession:
     hook_state: HookSessionState | None = None
     launch_record: LaunchRecord | None = None
     confirmed_status: str = "open"
+    display_status: str = "未运行"
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "status": self.display_status,
             "confirmed_status": self.confirmed_status,
             "inferred_status": self.inference.to_dict(),
             "root": self.root.to_dict(),
