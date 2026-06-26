@@ -46,6 +46,7 @@ typedef struct AppState {
     int empty_success_count;
     int hovered_dot;
     int dragging;
+    int drag_refresh_pending;
     POINT drag_start;
     RECT drag_window;
     LONG fetching;
@@ -58,6 +59,8 @@ static const char STATUS_SUCCESS[] = "\xe6\x88\x90\xe5\x8a\x9f";
 static const char STATUS_FAILED[] = "\xe5\xa4\xb1\xe8\xb4\xa5";
 
 static AppState g_app;
+
+static void set_tooltip_for_hover(int index);
 
 static void utf8_to_wide(const char *source, wchar_t *target, int target_count) {
     if (target_count <= 0) {
@@ -486,6 +489,13 @@ static void update_tool_rect(void) {
     SendMessageW(g_app.tooltip, TTM_NEWTOOLRECTW, 0, (LPARAM)&g_app.tooltip_info);
 }
 
+static void refresh_widget_view(void) {
+    resize_panel();
+    update_tool_rect();
+    InvalidateRect(g_app.hwnd, NULL, FALSE);
+    set_tooltip_for_hover(g_app.hovered_dot);
+}
+
 static void set_tooltip_for_hover(int index) {
     wchar_t status[64];
     wchar_t directory[512];
@@ -600,10 +610,11 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             HeapFree(GetProcessHeap(), 0, result);
         }
         InterlockedExchange(&g_app.fetching, 0);
-        resize_panel();
-        update_tool_rect();
-        InvalidateRect(hwnd, NULL, TRUE);
-        set_tooltip_for_hover(g_app.hovered_dot);
+        if (g_app.dragging) {
+            g_app.drag_refresh_pending = 1;
+        } else {
+            refresh_widget_view();
+        }
         return 0;
     }
     case WM_PAINT: {
@@ -615,8 +626,10 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     }
     case WM_LBUTTONDOWN:
         g_app.dragging = 1;
+        g_app.drag_refresh_pending = 0;
         g_app.drag_start.x = GET_X_LPARAM(lparam);
         g_app.drag_start.y = GET_Y_LPARAM(lparam);
+        ClientToScreen(hwnd, &g_app.drag_start);
         GetWindowRect(hwnd, &g_app.drag_window);
         SetCapture(hwnd);
         return 0;
@@ -626,10 +639,11 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         point.x = GET_X_LPARAM(lparam);
         point.y = GET_Y_LPARAM(lparam);
         if (g_app.dragging) {
+            ClientToScreen(hwnd, &point);
             int dx = point.x - g_app.drag_start.x;
             int dy = point.y - g_app.drag_start.y;
             SetWindowPos(hwnd, HWND_TOPMOST, g_app.drag_window.left + dx, g_app.drag_window.top + dy,
-                0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+                0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
             return 0;
         }
         hovered = dot_at_point(point);
@@ -643,6 +657,10 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         if (g_app.dragging) {
             g_app.dragging = 0;
             ReleaseCapture();
+            if (g_app.drag_refresh_pending) {
+                g_app.drag_refresh_pending = 0;
+                refresh_widget_view();
+            }
         }
         return 0;
     case WM_SIZE:
