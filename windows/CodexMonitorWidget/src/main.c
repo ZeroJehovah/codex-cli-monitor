@@ -14,6 +14,7 @@
 #define REFRESH_TIMER_ID 1
 #define REFRESH_INTERVAL_MS 1500
 #define WM_FETCH_DONE (WM_APP + 1)
+#define MENU_EXIT_ID 1001
 #define MAX_SESSIONS 128
 #define DOT_SIZE 14
 #define DOT_GAP 8
@@ -61,6 +62,7 @@ static const char STATUS_FAILED[] = "\xe5\xa4\xb1\xe8\xb4\xa5";
 static AppState g_app;
 
 static void set_tooltip_for_hover(int index);
+static void show_context_menu(HWND hwnd, POINT point);
 
 static void utf8_to_wide(const char *source, wchar_t *target, int target_count) {
     if (target_count <= 0) {
@@ -544,6 +546,23 @@ static void init_tooltip(HWND hwnd) {
     SendMessageW(g_app.tooltip, TTM_ADDTOOLW, 0, (LPARAM)&g_app.tooltip_info);
 }
 
+static void show_context_menu(HWND hwnd, POINT point) {
+    HMENU menu = CreatePopupMenu();
+    UINT command;
+    if (menu == NULL) {
+        return;
+    }
+    AppendMenuW(menu, MF_STRING, MENU_EXIT_ID, L"\x9000\x51fa");
+    SetForegroundWindow(hwnd);
+    command = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+        point.x, point.y, hwnd, NULL);
+    DestroyMenu(menu);
+    if (command == MENU_EXIT_ID) {
+        DestroyWindow(hwnd);
+    }
+    PostMessageW(hwnd, WM_NULL, 0, 0);
+}
+
 static void paint_widget(HWND hwnd, HDC hdc) {
     RECT client;
     HBRUSH background;
@@ -663,6 +682,38 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             }
         }
         return 0;
+    case WM_RBUTTONUP: {
+        POINT point;
+        if (g_app.dragging) {
+            g_app.dragging = 0;
+            ReleaseCapture();
+        }
+        point.x = GET_X_LPARAM(lparam);
+        point.y = GET_Y_LPARAM(lparam);
+        ClientToScreen(hwnd, &point);
+        show_context_menu(hwnd, point);
+        return 0;
+    }
+    case WM_CONTEXTMENU: {
+        POINT point;
+        if ((int)(short)LOWORD(lparam) == -1 && (int)(short)HIWORD(lparam) == -1) {
+            RECT rect;
+            GetWindowRect(hwnd, &rect);
+            point.x = rect.left + (rect.right - rect.left) / 2;
+            point.y = rect.top + (rect.bottom - rect.top) / 2;
+        } else {
+            point.x = (int)(short)LOWORD(lparam);
+            point.y = (int)(short)HIWORD(lparam);
+        }
+        show_context_menu(hwnd, point);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wparam) == MENU_EXIT_ID) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
     case WM_SIZE:
         update_tool_rect();
         return 0;

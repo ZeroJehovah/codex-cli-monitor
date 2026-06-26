@@ -20,3 +20,5 @@ x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
 
 The widget polls `http://localhost:8765/api/sessions` by default. To use another
 endpoint, pass it as the first argument or set `CODEX_MONITOR_API_URL`.
+
+Right-click the floating widget and choose Exit to close it.
