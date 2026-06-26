@@ -5,6 +5,7 @@
 #include <shellapi.h>
 #include <winhttp.h>
 #include <ctype.h>
+#include <float.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -22,7 +23,7 @@
 #define DOT_SIZE 14
 #define DOT_GAP 8
 #define PADDING_X 10
-#define PADDING_Y 6
+#define PADDING_Y 1
 #define ROW_HEIGHT 26
 #define DIRECTORY_TEXT_PADDING 8
 #define COLUMN_GAP 12
@@ -31,6 +32,7 @@
 
 typedef struct Session {
     int pid;
+    double started_at;
     char status[32];
     char directory[512];
     char started_at_iso[64];
@@ -47,6 +49,7 @@ typedef struct DirectoryRow {
     char directory[512];
     int session_indexes[MAX_SESSIONS];
     int session_count;
+    int original_order;
 } DirectoryRow;
 
 typedef struct AppState {
@@ -102,6 +105,7 @@ static void copy_wide(wchar_t *target, int target_count, const wchar_t *source) 
 }
 
 static void copy_ascii(char *target, int target_count, const char *source) {
+    size_t length;
     if (target_count <= 0) {
         return;
     }
@@ -109,8 +113,12 @@ static void copy_ascii(char *target, int target_count, const char *source) {
         target[0] = '\0';
         return;
     }
-    strncpy(target, source, target_count - 1);
-    target[target_count - 1] = '\0';
+    length = strlen(source);
+    if (length >= (size_t)target_count) {
+        length = (size_t)target_count - 1;
+    }
+    memcpy(target, source, length);
+    target[length] = '\0';
 }
 
 static void directory_display_name(const char *directory, char *target, int target_count) {
@@ -244,6 +252,129 @@ static void update_directory_column_width(void) {
     g_app.directory_column_width = max_width + DIRECTORY_TEXT_PADDING;
 }
 
+static int compare_session_indexes(int left_index, int right_index) {
+    Session *left = &g_app.sessions[left_index];
+    Session *right = &g_app.sessions[right_index];
+    if (left->started_at > 0.0 && right->started_at > 0.0) {
+        if (left->started_at < right->started_at) {
+            return -1;
+        }
+        if (left->started_at > right->started_at) {
+            return 1;
+        }
+    } else if (left->started_at > 0.0) {
+        return -1;
+    } else if (right->started_at > 0.0) {
+        return 1;
+    } else if (left->started_at_iso[0] != '\0' && right->started_at_iso[0] != '\0') {
+        int iso_compare = strcmp(left->started_at_iso, right->started_at_iso);
+        if (iso_compare != 0) {
+            return iso_compare;
+        }
+    } else if (left->started_at_iso[0] != '\0') {
+        return -1;
+    } else if (right->started_at_iso[0] != '\0') {
+        return 1;
+    }
+    if (left_index < right_index) {
+        return -1;
+    }
+    if (left_index > right_index) {
+        return 1;
+    }
+    return 0;
+}
+
+static void sort_row_sessions(DirectoryRow *row) {
+    int index;
+    for (index = 1; index < row->session_count; index++) {
+        int value = row->session_indexes[index];
+        int insert = index - 1;
+        while (insert >= 0 && compare_session_indexes(value, row->session_indexes[insert]) < 0) {
+            row->session_indexes[insert + 1] = row->session_indexes[insert];
+            insert--;
+        }
+        row->session_indexes[insert + 1] = value;
+    }
+}
+
+static double row_started_at_sort_key(const DirectoryRow *row) {
+    int index;
+    double earliest = DBL_MAX;
+    for (index = 0; index < row->session_count; index++) {
+        double started_at = g_app.sessions[row->session_indexes[index]].started_at;
+        if (started_at > 0.0 && started_at < earliest) {
+            earliest = started_at;
+        }
+    }
+    return earliest;
+}
+
+static const char *row_started_at_iso_sort_key(const DirectoryRow *row) {
+    int index;
+    const char *earliest = NULL;
+    for (index = 0; index < row->session_count; index++) {
+        const char *started_at_iso = g_app.sessions[row->session_indexes[index]].started_at_iso;
+        if (started_at_iso[0] != '\0' && (earliest == NULL || strcmp(started_at_iso, earliest) < 0)) {
+            earliest = started_at_iso;
+        }
+    }
+    return earliest;
+}
+
+static int compare_directory_rows(const DirectoryRow *left, const DirectoryRow *right) {
+    double left_started_at = row_started_at_sort_key(left);
+    double right_started_at = row_started_at_sort_key(right);
+    if (left_started_at < DBL_MAX && right_started_at < DBL_MAX) {
+        if (left_started_at < right_started_at) {
+            return -1;
+        }
+        if (left_started_at > right_started_at) {
+            return 1;
+        }
+    } else if (left_started_at < DBL_MAX) {
+        return -1;
+    } else if (right_started_at < DBL_MAX) {
+        return 1;
+    } else {
+        const char *left_iso = row_started_at_iso_sort_key(left);
+        const char *right_iso = row_started_at_iso_sort_key(right);
+        if (left_iso != NULL && right_iso != NULL) {
+            int iso_compare = strcmp(left_iso, right_iso);
+            if (iso_compare != 0) {
+                return iso_compare;
+            }
+        } else if (left_iso != NULL) {
+            return -1;
+        } else if (right_iso != NULL) {
+            return 1;
+        }
+    }
+    if (left->original_order < right->original_order) {
+        return -1;
+    }
+    if (left->original_order > right->original_order) {
+        return 1;
+    }
+    return strcmp(left->directory, right->directory);
+}
+
+static void sort_directory_rows(void) {
+    int row;
+    for (row = 0; row < g_app.row_count; row++) {
+        sort_row_sessions(&g_app.rows[row]);
+    }
+    for (row = 1; row < g_app.row_count; row++) {
+        DirectoryRow value = g_app.rows[row];
+        int insert = row - 1;
+        while (insert >= 0 && compare_directory_rows(&value, &g_app.rows[insert]) < 0) {
+            g_app.rows[insert + 1] = g_app.rows[insert];
+            insert--;
+        }
+        g_app.rows[insert + 1] = value;
+    }
+}
+
 static void rebuild_directory_rows(void) {
     int index;
     g_app.row_count = 0;
@@ -265,11 +396,13 @@ static void rebuild_directory_rows(void) {
             target_row = g_app.row_count++;
             ZeroMemory(&g_app.rows[target_row], sizeof(g_app.rows[target_row]));
             copy_ascii(g_app.rows[target_row].directory, sizeof(g_app.rows[target_row].directory), directory);
+            g_app.rows[target_row].original_order = target_row;
         }
         if (g_app.rows[target_row].session_count < MAX_SESSIONS) {
             g_app.rows[target_row].session_indexes[g_app.rows[target_row].session_count++] = index;
         }
     }
+    sort_directory_rows();
     if (g_app.hovered_session >= g_app.session_count) {
         g_app.hovered_session = -1;
     }
@@ -412,6 +545,22 @@ static int parse_json_int(const char *value, const char *end) {
     return atoi(buffer);
 }
 
+static double parse_json_double(const char *value, const char *end) {
+    char buffer[64];
+    int length = 0;
+    const char *p = value;
+    if (p == NULL) {
+        return 0.0;
+    }
+    while (p < end &&
+        (isdigit((unsigned char)*p) || *p == '-' || *p == '+' || *p == '.' || *p == 'e' || *p == 'E') &&
+        length < (int)sizeof(buffer) - 1) {
+        buffer[length++] = *p++;
+    }
+    buffer[length] = '\0';
+    return strtod(buffer, NULL);
+}
+
 static const char *matching_brace(const char *start, const char *end) {
     int depth = 0;
     int in_string = 0;
@@ -446,6 +595,7 @@ static const char *matching_brace(const char *start, const char *end) {
 static void parse_session_object(const char *start, const char *end, Session *session) {
     memset(session, 0, sizeof(*session));
     session->pid = parse_json_int(find_top_level_key(start, end, "pid"), end);
+    session->started_at = parse_json_double(find_top_level_key(start, end, "started_at"), end);
     parse_json_string(find_top_level_key(start, end, "status"), end, session->status, sizeof(session->status));
     parse_json_string(find_top_level_key(start, end, "directory"), end, session->directory, sizeof(session->directory));
     parse_json_string(find_top_level_key(start, end, "started_at_iso"), end, session->started_at_iso, sizeof(session->started_at_iso));
@@ -757,15 +907,51 @@ static void show_context_menu(HWND hwnd, POINT point) {
 }
 
 static void fill_dot(HDC hdc, const RECT *rect, COLORREF color) {
-    HBRUSH brush = CreateSolidBrush(color);
-    HGDIOBJ old_brush = SelectObject(hdc, brush);
-    HPEN pen = CreatePen(PS_SOLID, 1, color);
-    HGDIOBJ old_pen = SelectObject(hdc, pen);
-    Ellipse(hdc, rect->left, rect->top, rect->right, rect->bottom);
-    SelectObject(hdc, old_pen);
-    SelectObject(hdc, old_brush);
-    DeleteObject(pen);
-    DeleteObject(brush);
+    const int samples = 4;
+    const int total_samples = samples * samples;
+    int width = rect->right - rect->left;
+    int height = rect->bottom - rect->top;
+    int radius_size = width < height ? width : height;
+    double center_x = ((double)rect->left + (double)rect->right) / 2.0;
+    double center_y = ((double)rect->top + (double)rect->bottom) / 2.0;
+    double radius = (double)radius_size / 2.0;
+    double radius_squared = radius * radius;
+    int y;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    for (y = rect->top; y < rect->bottom; y++) {
+        int x;
+        for (x = rect->left; x < rect->right; x++) {
+            int covered = 0;
+            int sample_y;
+            for (sample_y = 0; sample_y < samples; sample_y++) {
+                int sample_x;
+                double py = (double)y + ((double)sample_y + 0.5) / (double)samples;
+                double dy = py - center_y;
+                for (sample_x = 0; sample_x < samples; sample_x++) {
+                    double px = (double)x + ((double)sample_x + 0.5) / (double)samples;
+                    double dx = px - center_x;
+                    if (dx * dx + dy * dy <= radius_squared) {
+                        covered++;
+                    }
+                }
+            }
+            if (covered > 0) {
+                COLORREF background = GetPixel(hdc, x, y);
+                int red;
+                int green;
+                int blue;
+                if (background == CLR_INVALID) {
+                    continue;
+                }
+                red = (GetRValue(color) * covered + GetRValue(background) * (total_samples - covered)) / total_samples;
+                green = (GetGValue(color) * covered + GetGValue(background) * (total_samples - covered)) / total_samples;
+                blue = (GetBValue(color) * covered + GetBValue(background) * (total_samples - covered)) / total_samples;
+                SetPixelV(hdc, x, y, RGB(red, green, blue));
+            }
+        }
+    }
 }
 
 static void draw_status_dot(HDC hdc, const RECT *rect, const char *status) {
@@ -790,7 +976,6 @@ static void paint_widget(HWND hwnd, HDC hdc) {
     HBRUSH background;
     HBRUSH row_background;
     HPEN border;
-    HPEN grid;
     HGDIOBJ old_pen;
     HGDIOBJ old_font;
     int row;
@@ -804,14 +989,6 @@ static void paint_widget(HWND hwnd, HDC hdc) {
     Rectangle(hdc, client.left, client.top, client.right, client.bottom);
     SelectObject(hdc, old_pen);
     DeleteObject(border);
-    if (g_app.row_count > 0) {
-        grid = CreatePen(PS_SOLID, 1, RGB(60, 60, 60));
-        old_pen = SelectObject(hdc, grid);
-        MoveToEx(hdc, dot_column_left() - COLUMN_GAP / 2, PADDING_Y, NULL);
-        LineTo(hdc, dot_column_left() - COLUMN_GAP / 2, client.bottom - PADDING_Y);
-        SelectObject(hdc, old_pen);
-        DeleteObject(grid);
-    }
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(225, 225, 225));
     old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
@@ -829,14 +1006,6 @@ static void paint_widget(HWND hwnd, HDC hdc) {
             row_background = CreateSolidBrush(RGB(39, 39, 39));
             FillRect(hdc, &row_rect, row_background);
             DeleteObject(row_background);
-        }
-        if (row < g_app.row_count - 1) {
-            HPEN row_line = CreatePen(PS_SOLID, 1, RGB(54, 54, 54));
-            HGDIOBJ old_row_pen = SelectObject(hdc, row_line);
-            MoveToEx(hdc, 1, row_rect.bottom, NULL);
-            LineTo(hdc, client.right - 1, row_rect.bottom);
-            SelectObject(hdc, old_row_pen);
-            DeleteObject(row_line);
         }
         directory_display_name(g_app.rows[row].directory, display_name, sizeof(display_name));
         utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
