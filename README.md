@@ -33,6 +33,16 @@
 
 ## 使用方法
 
+先安装低侵入 hooks，用来记录 Codex turn/tool/stop 生命周期事件：
+
+```bash
+./bin/codex-monitor-install-hooks
+```
+
+安装后，在每个正在运行或新打开的 Codex CLI 里执行 `/hooks`，按提示 review/trust 新 hook。这个步骤是 Codex 的安全机制。
+
+信任后，监控会优先使用 hook 事件判断状态：用户提交后到 `Stop` 前视为进行中，`PreToolUse` 到 `PostToolUse` 之间视为工具运行，`Stop` 后视为等待用户。没有 hook 事件的旧会话会继续使用 sidecar 信号降级推断。
+
 直接在项目目录运行：
 
 ```bash

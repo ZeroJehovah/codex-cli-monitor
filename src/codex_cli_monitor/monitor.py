@@ -14,6 +14,7 @@ from .models import (
     ProcessInfo,
     SessionActivity,
 )
+from .hook_state import HookSessionState, load_hook_events, summarize_hook_events
 from .procfs import read_network_connections, read_processes
 from .shim import default_log_path, load_launch_records
 
@@ -23,9 +24,17 @@ def inspect_runtime(
     sample_window: float = 0.25,
     shim_log: Path | None = None,
     codex_home: Path | None = None,
+    hook_log: Path | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[tuple[CodexSession, ...], CodexStateSummary]:
-    sessions = discover_sessions(proc_root, sample_window, shim_log, codex_home, sleep)
+    sessions = discover_sessions(
+        proc_root=proc_root,
+        sample_window=sample_window,
+        shim_log=shim_log,
+        codex_home=codex_home,
+        hook_log=hook_log,
+        sleep=sleep,
+    )
     state_summary = scan_codex_state(codex_home)
     return sessions, state_summary
 
@@ -35,6 +44,7 @@ def discover_sessions(
     sample_window: float = 0.25,
     shim_log: Path | None = None,
     codex_home: Path | None = None,
+    hook_log: Path | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[CodexSession, ...]:
     first_snapshot = read_processes(proc_root)
@@ -68,18 +78,21 @@ def discover_sessions(
 
     connections_by_pid = read_network_connections(proc_root, relevant_pids)
     launch_records = load_launch_records(shim_log or default_log_path())
+    hook_states = summarize_hook_events(load_hook_events(hook_log))
 
     sessions = []
     for root in codex_roots:
         descendants = descendants_by_pid[root.pid]
         connections = _connections_for((root, *descendants), connections_by_pid)
         state_activity = _state_activity_for_root(root, session_activities)
+        hook_state = _hook_state_for_root(root, hook_states)
         inference = infer_status(
             root,
             descendants,
             connections,
             sample_window,
             state_activity,
+            hook_state,
         )
         sessions.append(
             CodexSession(
@@ -88,6 +101,7 @@ def discover_sessions(
                 connections=connections,
                 inference=inference,
                 state_activity=state_activity,
+                hook_state=hook_state,
                 launch_record=launch_records.get(root.pid),
             )
         )
@@ -181,6 +195,16 @@ def _state_activity_for_root(
     if not candidates:
         return None
     return sorted(candidates, key=lambda item: item.modified_at, reverse=True)[0]
+
+
+def _hook_state_for_root(
+    root: ProcessInfo,
+    states: dict[str, HookSessionState],
+) -> HookSessionState | None:
+    root_cwd = _normalize_path(root.cwd)
+    if root_cwd is None:
+        return None
+    return states.get(root_cwd)
 
 
 def _normalize_path(value: str | None) -> str | None:

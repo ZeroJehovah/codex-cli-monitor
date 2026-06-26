@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from codex_cli_monitor.hook_state import append_hook_event
 from codex_cli_monitor.monitor import discover_sessions, inspect_runtime
 
 
@@ -80,7 +81,7 @@ class MonitorTests(unittest.TestCase):
                 )
 
             sessions = discover_sessions(
-                proc,
+                proc_root=proc,
                 sample_window=1,
                 codex_home=home,
                 sleep=mutate_session_file,
@@ -89,6 +90,26 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].inference.status, "active_likely")
         self.assertIsNotNone(sessions[0].state_activity)
+
+    def test_hook_state_overrides_waiting_sidecar_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            append_hook_event("user_prompt_submit", cwd="/work/a", path=hook_log)
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].inference.status, "api_inflight_likely")
+        self.assertIsNotNone(sessions[0].hook_state)
 
     def test_inspect_runtime_returns_sessions_and_state_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
