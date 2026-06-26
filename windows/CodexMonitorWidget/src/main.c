@@ -19,6 +19,7 @@
 #define RUNNING_PULSE_PERIOD_MS 1600
 #define WM_FETCH_DONE (WM_APP + 1)
 #define MENU_EXIT_ID 1001
+#define MENU_ABOUT_ID 1002
 #define MENU_SIZE_BASE_ID 1100
 #define MAX_SESSIONS 128
 #define DOT_SIZE 14
@@ -38,6 +39,7 @@
 #define SETTINGS_VALUE_OFFSET_X L"OffsetX"
 #define SETTINGS_VALUE_OFFSET_Y L"OffsetY"
 #define SETTINGS_VALUE_DISPLAY_SIZE L"DisplaySize"
+#define PROJECT_GITHUB_URL L"https://github.com/ZeroJehovah/api-alive"
 
 typedef struct Session {
     int pid;
@@ -1327,6 +1329,10 @@ static void apply_display_font_points(int points) {
     save_widget_placement();
 }
 
+static void open_about_page(HWND hwnd) {
+    ShellExecuteW(hwnd, L"open", PROJECT_GITHUB_URL, NULL, NULL, SW_SHOWNORMAL);
+}
+
 static void show_context_menu(HWND hwnd, POINT point) {
     HMENU menu = CreatePopupMenu();
     UINT command;
@@ -1341,6 +1347,7 @@ static void show_context_menu(HWND hwnd, POINT point) {
     }
     append_display_size_menu(menu);
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, MENU_ABOUT_ID, L"\x5173\x4e8e");
     AppendMenuW(menu, MF_STRING, MENU_EXIT_ID, L"\x9000\x51fa");
     GetWindowRect(hwnd, &exclude_rect);
     ZeroMemory(&params, sizeof(params));
@@ -1366,6 +1373,11 @@ static void show_context_menu(HWND hwnd, POINT point) {
     }
     if (display_size_from_command(command, &selected_points)) {
         apply_display_font_points(selected_points);
+        restore_widget_topmost(hwnd);
+        return;
+    }
+    if (command == MENU_ABOUT_ID) {
+        open_about_page(hwnd);
         restore_widget_topmost(hwnd);
         return;
     }
@@ -1658,6 +1670,10 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     case WM_COMMAND:
         if (LOWORD(wparam) == MENU_EXIT_ID) {
             DestroyWindow(hwnd);
+            return 0;
+        }
+        if (LOWORD(wparam) == MENU_ABOUT_ID) {
+            open_about_page(hwnd);
             return 0;
         }
         {

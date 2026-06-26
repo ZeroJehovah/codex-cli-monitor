@@ -30,5 +30,5 @@ status dots remain static. The widget saves its last position and display size,
 restores them on launch, and keeps dynamic size changes inside the visible work
 area by anchoring to the touched edge.
 
-Right-click the floating widget to change display size or choose Exit to close
-it.
+Right-click the floating widget to change display size, open the About page, or
+choose Exit to close it.
