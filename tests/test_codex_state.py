@@ -137,7 +137,45 @@ class CodexStateTests(unittest.TestCase):
         self.assertTrue(activities[0].terminal_event)
         self.assertTrue(activities[0].failed_event)
 
-    def test_scan_session_activities_ignores_retry_limit_text_from_user_or_tool(self) -> None:
+    def test_scan_session_activities_marks_unexpected_http_status_message_as_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                '{"type":"session_meta","payload":{"session_id":"s","cwd":"/work/a"}}\n'
+                '{"type":"response_item","payload":{"type":"message","role":"user","content":"go"}}\n'
+                '{"type":"event_msg","payload":{"type":"agent_message","message":"■ unexpected status 503 Service Unavailable: auth_unavailable: no auth available (providers=codex)"}}\n'
+                '{"type":"event_msg","payload":{"type":"task_complete"}}\n',
+                encoding="utf-8",
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].terminal_event)
+        self.assertTrue(activities[0].failed_event)
+
+    def test_scan_session_activities_marks_red_terminal_error_message_as_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                '{"type":"session_meta","payload":{"session_id":"s","cwd":"/work/a"}}\n'
+                '{"type":"response_item","payload":{"type":"message","role":"user","content":"go"}}\n'
+                '{"type":"event_msg","payload":{"type":"agent_message","message":"\\u001b[31mService Unavailable\\u001b[0m"}}\n'
+                '{"type":"event_msg","payload":{"type":"task_complete"}}\n',
+                encoding="utf-8",
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].terminal_event)
+        self.assertTrue(activities[0].failed_event)
+
+    def test_scan_session_activities_ignores_error_text_from_user_or_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
@@ -145,7 +183,28 @@ class CodexStateTests(unittest.TestCase):
             session.write_text(
                 '{"type":"session_meta","payload":{"session_id":"s","cwd":"/work/a"}}\n'
                 '{"type":"response_item","payload":{"type":"message","role":"user","content":"■ exceeded retry limit, last status: 429 Too Many Requests"}}\n'
+                '{"type":"response_item","payload":{"type":"message","role":"user","content":"■ unexpected status 503 Service Unavailable: auth_unavailable"}}\n'
                 '{"type":"response_item","payload":{"type":"function_call_output","output":"ERROR: exceeded retry limit, last status: 429 Too Many Requests"}}\n'
+                '{"type":"response_item","payload":{"type":"function_call_output","output":"■ unexpected status 503 Service Unavailable: auth_unavailable"}}\n'
+                '{"type":"event_msg","payload":{"type":"task_complete"}}\n',
+                encoding="utf-8",
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].terminal_event)
+        self.assertFalse(activities[0].failed_event)
+
+    def test_scan_session_activities_ignores_plain_assistant_error_discussion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                '{"type":"session_meta","payload":{"session_id":"s","cwd":"/work/a"}}\n'
+                '{"type":"response_item","payload":{"type":"message","role":"user","content":"explain errors"}}\n'
+                '{"type":"response_item","payload":{"type":"message","role":"assistant","content":"A service unavailable response usually means the upstream service is down."}}\n'
                 '{"type":"event_msg","payload":{"type":"task_complete"}}\n',
                 encoding="utf-8",
             )

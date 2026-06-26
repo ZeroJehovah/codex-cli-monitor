@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -25,11 +26,37 @@ FAILED_PAYLOAD_REASONS = {
     "failed",
     "interrupted",
 }
-FAILED_MESSAGE_MARKERS = (
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+HTTP_ERROR_STATUS_RE = re.compile(
+    r"\b(?:unexpected\s+status|last\s+status:?|status:?)\s*(4\d\d|5\d\d)\b"
+)
+TERMINAL_ERROR_PREFIXES = (
+    "error:",
+    "unexpected status ",
+)
+TERMINAL_ERROR_PHRASES = (
+    "api error",
+    "auth_unavailable",
+    "bad gateway",
+    "connection refused",
+    "connection reset",
     "exceeded retry limit",
-    "last status: 429",
+    "gateway timeout",
+    "internal server error",
+    "model error",
+    "network error",
+    "no auth available",
+    "overloaded",
+    "rate limit",
+    "rate limited",
+    "response.completed",
+    "server error",
+    "service unavailable",
     "stream closed before response.completed",
     "stream disconnected before completion",
+    "temporarily unavailable",
+    "timed out",
+    "timeout",
     "too many requests",
 )
 TERMINAL_PAYLOAD_TYPES = {
@@ -357,17 +384,28 @@ def _message_content_text(content: object) -> str:
 
 def _message_text_has_terminal_error(text: str) -> bool:
     for line in text.splitlines():
-        normalized = line.strip().lstrip("■ ").lower()
-        if (
-            normalized.startswith("error:")
-            or normalized.startswith("exceeded retry limit")
-        ) and any(marker in normalized for marker in FAILED_MESSAGE_MARKERS):
+        has_error_marker = _line_has_terminal_error_marker(line)
+        normalized = _normalize_terminal_message_line(line)
+        if not normalized:
+            continue
+        if normalized.startswith(TERMINAL_ERROR_PREFIXES):
             return True
-        if normalized.startswith("stream disconnected before completion") and any(
-            marker in normalized for marker in FAILED_MESSAGE_MARKERS
+        if HTTP_ERROR_STATUS_RE.search(normalized):
+            return True
+        if has_error_marker and any(
+            phrase in normalized for phrase in TERMINAL_ERROR_PHRASES
         ):
             return True
     return False
+
+
+def _line_has_terminal_error_marker(line: str) -> bool:
+    stripped = line.lstrip()
+    return stripped.startswith("■") or "\x1b[31" in line or "\x1b[91" in line
+
+
+def _normalize_terminal_message_line(line: str) -> str:
+    return ANSI_ESCAPE_RE.sub("", line).strip().lstrip("■ ").lower()
 
 
 def _mtime_or_zero(path: Path) -> float:
