@@ -36,6 +36,20 @@ class ClassifyTests(unittest.TestCase):
 
         self.assertEqual(inference.status, "tool_running_likely")
 
+    def test_stopped_shell_child_is_not_tool_running(self) -> None:
+        root = _process(100, "codex", state="S", tty="/dev/pts/1")
+        shell = _process(
+            101,
+            "sh",
+            cmdline=("sh", "-c", "pytest"),
+            ppid=100,
+            state="T",
+        )
+
+        inference = infer_status(root, (shell,), (), sample_window=0)
+
+        self.assertNotEqual(inference.status, "tool_running_likely")
+
     def test_hook_open_turn_overrides_waiting_sidecar_signals(self) -> None:
         root = _process(100, "codex", state="S", tty="/dev/pts/1")
         hook_state = HookSessionState(

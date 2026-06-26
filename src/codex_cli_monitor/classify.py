@@ -16,6 +16,7 @@ SUPPORT_PROCESS_MARKERS = (
     "modelcontextprotocol",
     "telemetry/watchdog",
 )
+INACTIVE_PROCESS_STATES = {"T", "t", "Z", "X", "x"}
 TOOL_COMMAND_NAMES = {
     "bash",
     "dash",
@@ -256,6 +257,8 @@ def _looks_idle_at_tty(
 
 
 def _looks_like_active_tool_process(process: ProcessInfo) -> bool:
+    if process.state in INACTIVE_PROCESS_STATES:
+        return False
     if _looks_like_support_process(process):
         return False
     if process.cpu_delta_seconds is not None and process.cpu_delta_seconds >= CPU_ACTIVE_SECONDS:
