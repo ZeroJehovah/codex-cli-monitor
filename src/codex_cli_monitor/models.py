@@ -29,6 +29,11 @@ class NetworkConnection:
             return False
         if self.remote_port not in {443, 8443}:
             return False
+        return self.is_established_remote()
+
+    def is_established_remote(self) -> bool:
+        if self.state != "ESTABLISHED":
+            return False
         if self.remote_address in {"0.0.0.0", "::", "::1", "127.0.0.1"}:
             return False
         if self.remote_address.startswith("127."):
@@ -74,6 +79,45 @@ class CodexStateSummary:
             "codex_home": self.codex_home,
             "newest_files": [state_file.to_dict() for state_file in self.newest_files],
             "scan_errors": list(self.scan_errors),
+        }
+
+
+@dataclass(frozen=True)
+class SessionActivity:
+    relative_path: str
+    session_id: str | None
+    cwd: str | None
+    size_bytes: int
+    modified_at: float
+    observed_at: float
+    changed_during_sample: bool = False
+    last_record_type: str | None = None
+    last_payload_type: str | None = None
+    last_payload_role: str | None = None
+    terminal_event: bool = False
+
+    @property
+    def modified_age_seconds(self) -> float:
+        return max(0.0, self.observed_at - self.modified_at)
+
+    def event_label(self) -> str:
+        if self.last_payload_type:
+            return f"{self.last_record_type}:{self.last_payload_type}"
+        return self.last_record_type or "unknown"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "relative_path": self.relative_path,
+            "session_id": self.session_id,
+            "cwd": self.cwd,
+            "size_bytes": self.size_bytes,
+            "modified_at": self.modified_at,
+            "modified_age_seconds": self.modified_age_seconds,
+            "changed_during_sample": self.changed_during_sample,
+            "last_record_type": self.last_record_type,
+            "last_payload_type": self.last_payload_type,
+            "last_payload_role": self.last_payload_role,
+            "terminal_event": self.terminal_event,
         }
 
 
@@ -163,6 +207,7 @@ class CodexSession:
     descendants: tuple[ProcessInfo, ...]
     connections: tuple[NetworkConnection, ...]
     inference: Inference
+    state_activity: SessionActivity | None = None
     launch_record: LaunchRecord | None = None
     confirmed_status: str = "open"
 
@@ -173,6 +218,9 @@ class CodexSession:
             "root": self.root.to_dict(),
             "descendants": [process.to_dict() for process in self.descendants],
             "connections": [connection.to_dict() for connection in self.connections],
+            "state_activity": self.state_activity.to_dict()
+            if self.state_activity is not None
+            else None,
             "launch_record": self.launch_record.to_dict()
             if self.launch_record is not None
             else None,

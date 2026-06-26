@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .models import Evidence, Inference, NetworkConnection, ProcessInfo
+from .models import Evidence, Inference, NetworkConnection, ProcessInfo, SessionActivity
 
 
 CPU_ACTIVE_SECONDS = 0.02
+RECENT_SESSION_ACTIVITY_SECONDS = 15.0
+RECENT_FUNCTION_CALL_SECONDS = 90.0
 SUPPORT_PROCESS_MARKERS = (
     "chrome-devtools-mcp",
     "/mcp/",
@@ -40,6 +42,7 @@ def infer_status(
     descendants: tuple[ProcessInfo, ...],
     connections: tuple[NetworkConnection, ...],
     sample_window: float,
+    state_activity: SessionActivity | None = None,
 ) -> Inference:
     tool_children = tuple(
         process
@@ -63,25 +66,80 @@ def infer_status(
         )
 
     total_cpu_delta = _total_cpu_delta((root, *descendants))
-    remote_tls = tuple(connection for connection in connections if connection.is_remote_tls_like())
-    if remote_tls and (total_cpu_delta is None or total_cpu_delta < CPU_ACTIVE_SECONDS):
-        connection = remote_tls[0]
+    if state_activity is not None and state_activity.changed_during_sample:
+        return Inference(
+            status="active_likely",
+            confidence=0.78,
+            evidence=(
+                Evidence(
+                    "codex_state",
+                    "Associated session file changed during the sample: "
+                    f"{state_activity.relative_path}",
+                ),
+                Evidence(
+                    "codex_state",
+                    f"Last structured event is {state_activity.event_label()}.",
+                ),
+            ),
+            limitations=(
+                "Session file activity shows Codex is recording events, but not the exact internal state.",
+            ),
+        )
+
+    remote_connections = tuple(
+        connection for connection in connections if connection.is_established_remote()
+    )
+    if (
+        remote_connections
+        and _has_recent_nonterminal_state_activity(state_activity)
+        and (total_cpu_delta is None or total_cpu_delta < CPU_ACTIVE_SECONDS)
+    ):
+        connection = remote_connections[0]
         return Inference(
             status="api_inflight_likely",
-            confidence=0.62,
+            confidence=0.64,
             evidence=(
                 Evidence(
                     "network",
-                    "Observed established remote TLS-like connection "
+                    "Observed established remote connection "
                     f"{connection.remote_address}:{connection.remote_port}",
                 ),
                 Evidence(
                     "process_tree",
                     "No local tool descendant was observed.",
                 ),
+                Evidence(
+                    "codex_state",
+                    "Associated session file has recent non-terminal activity "
+                    f"{state_activity.modified_age_seconds:.1f}s ago.",
+                ),
             ),
             limitations=(
-                "Network connections alone are not definitive because keep-alive sockets may remain open.",
+                "Remote API waiting is inferred from recent Codex state plus a live connection; keep-alive sockets can still confuse this signal.",
+            ),
+        )
+
+    if (
+        state_activity is not None
+        and not state_activity.terminal_event
+        and state_activity.modified_age_seconds <= RECENT_SESSION_ACTIVITY_SECONDS
+    ):
+        return Inference(
+            status="active_likely",
+            confidence=0.66,
+            evidence=(
+                Evidence(
+                    "codex_state",
+                    "Associated session file was recently updated "
+                    f"{state_activity.modified_age_seconds:.1f}s ago.",
+                ),
+                Evidence(
+                    "codex_state",
+                    f"Last structured event is {state_activity.event_label()}.",
+                ),
+            ),
+            limitations=(
+                "Recent session metadata is inferred from Codex local state, not a definitive live event stream.",
             ),
         )
 
@@ -125,6 +183,15 @@ def infer_status(
                 Evidence(
                     "cpu_delta",
                     f"Observed {total_cpu_delta:.3f}s CPU time over {sample_window:.3f}s sample.",
+                )
+            )
+        if state_activity is not None:
+            evidence.append(
+                Evidence(
+                    "codex_state",
+                    "Associated session file is not changing; "
+                    f"last event {state_activity.event_label()} "
+                    f"{state_activity.modified_age_seconds:.1f}s ago.",
                 )
             )
         return Inference(
@@ -195,6 +262,14 @@ def _looks_like_support_process(process: ProcessInfo) -> bool:
     command = _display_process(process)
     command_lower = command.lower()
     return any(marker in command_lower for marker in SUPPORT_PROCESS_MARKERS)
+
+
+def _has_recent_nonterminal_state_activity(
+    state_activity: SessionActivity | None,
+) -> bool:
+    if state_activity is None or state_activity.terminal_event:
+        return False
+    return state_activity.modified_age_seconds <= RECENT_SESSION_ACTIVITY_SECONDS
 
 
 def _total_cpu_delta(processes: tuple[ProcessInfo, ...]) -> float | None:
