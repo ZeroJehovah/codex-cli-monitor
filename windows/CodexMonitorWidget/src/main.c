@@ -43,6 +43,7 @@ typedef struct AppState {
     TOOLINFOW tooltip_info;
     Session sessions[MAX_SESSIONS];
     int session_count;
+    int empty_success_count;
     int hovered_dot;
     int dragging;
     POINT drag_start;
@@ -378,7 +379,7 @@ static int fetch_json(char **json, char *error, int error_count) {
         copy_ascii(error, error_count, "WinHttpOpen failed");
         goto cleanup;
     }
-    WinHttpSetTimeouts(session, 1000, 1000, 1500, 1500);
+    WinHttpSetTimeouts(session, 2000, 2000, 5000, 5000);
     connect = WinHttpConnect(session, host, parts.nPort, 0);
     if (connect == NULL) {
         copy_ascii(error, error_count, "WinHttpConnect failed");
@@ -581,11 +582,19 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         FetchResult *result = (FetchResult *)lparam;
         if (result != NULL) {
             if (result->ok) {
-                g_app.session_count = result->count;
-                memcpy(g_app.sessions, result->sessions, sizeof(Session) * result->count);
+                if (result->count > 0 || g_app.session_count == 0) {
+                    g_app.session_count = result->count;
+                    memcpy(g_app.sessions, result->sessions, sizeof(Session) * result->count);
+                    g_app.empty_success_count = 0;
+                } else {
+                    g_app.empty_success_count++;
+                    if (g_app.empty_success_count >= 3) {
+                        g_app.session_count = 0;
+                        g_app.empty_success_count = 0;
+                    }
+                }
                 g_app.last_error[0] = '\0';
             } else {
-                g_app.session_count = 0;
                 copy_ascii(g_app.last_error, sizeof(g_app.last_error), result->error);
             }
             HeapFree(GetProcessHeap(), 0, result);
