@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -103,7 +105,7 @@ class MonitorTests(unittest.TestCase):
             proc.mkdir()
             _write_common_proc(proc)
             _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
-            append_hook_event("session_start", cwd="/work/a", path=hook_log)
+            append_hook_event("session_start", cwd="/work/a", ppid=100, path=hook_log)
 
             sessions = discover_sessions(
                 proc_root=proc,
@@ -123,7 +125,7 @@ class MonitorTests(unittest.TestCase):
             proc.mkdir()
             _write_common_proc(proc)
             _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
-            append_hook_event("user_prompt_submit", cwd="/work/a", path=hook_log)
+            append_hook_event("user_prompt_submit", cwd="/work/a", ppid=100, path=hook_log)
 
             sessions = discover_sessions(
                 proc_root=proc,
@@ -144,8 +146,8 @@ class MonitorTests(unittest.TestCase):
             proc.mkdir()
             _write_common_proc(proc)
             _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
-            append_hook_event("user_prompt_submit", cwd="/work/a", path=hook_log)
-            append_hook_event("pre_tool_use", tool="Bash", cwd="/work/a", path=hook_log)
+            append_hook_event("user_prompt_submit", cwd="/work/a", ppid=100, path=hook_log)
+            append_hook_event("pre_tool_use", tool="Bash", cwd="/work/a", ppid=100, path=hook_log)
 
             sessions = discover_sessions(
                 proc_root=proc,
@@ -172,8 +174,8 @@ class MonitorTests(unittest.TestCase):
                 "/work/a",
                 '{"type":"response_item","payload":{"type":"task_complete"}}',
             )
-            append_hook_event("user_prompt_submit", cwd="/work/a", path=hook_log)
-            append_hook_event("stop", cwd="/work/a", path=hook_log)
+            append_hook_event("user_prompt_submit", cwd="/work/a", ppid=100, path=hook_log)
+            append_hook_event("stop", cwd="/work/a", ppid=100, path=hook_log)
 
             sessions = discover_sessions(
                 proc_root=proc,
@@ -201,8 +203,8 @@ class MonitorTests(unittest.TestCase):
                 "/work/a",
                 '{"type":"response_item","payload":{"type":"turn_aborted","reason":"interrupted"}}',
             )
-            append_hook_event("user_prompt_submit", cwd="/work/a", path=hook_log)
-            append_hook_event("stop", cwd="/work/a", path=hook_log)
+            append_hook_event("user_prompt_submit", cwd="/work/a", ppid=100, path=hook_log)
+            append_hook_event("stop", cwd="/work/a", ppid=100, path=hook_log)
 
             sessions = discover_sessions(
                 proc_root=proc,
@@ -225,7 +227,7 @@ class MonitorTests(unittest.TestCase):
             home.mkdir()
             _write_common_proc(proc)
             _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
-            append_hook_event("user_prompt_submit", cwd="/work/a", path=hook_log)
+            append_hook_event("user_prompt_submit", cwd="/work/a", ppid=100, path=hook_log)
             _write_session(
                 home,
                 "/work/a",
@@ -242,6 +244,64 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].display_status, "失败")
         self.assertTrue(sessions[0].state_activity.failed_event)
+
+    def test_same_cwd_new_session_does_not_inherit_old_success_hook_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _write_process(proc, 200, "codex", "S", 1, ["codex"], "/work/a")
+            _write_session(
+                home,
+                "/work/a",
+                '{"type":"response_item","payload":{"type":"task_complete"}}',
+            )
+            append_hook_event("user_prompt_submit", cwd="/work/a", ppid=100, path=hook_log)
+            append_hook_event("stop", cwd="/work/a", ppid=100, path=hook_log)
+            append_hook_event("session_start", cwd="/work/a", ppid=200, path=hook_log)
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        sessions_by_pid = {session.root.pid: session for session in sessions}
+        self.assertEqual(sessions_by_pid[100].display_status, "成功")
+        self.assertEqual(sessions_by_pid[200].display_status, "未运行")
+
+    def test_new_process_ignores_session_activity_from_before_process_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a", start_ticks=15000)
+            session = _write_session(
+                home,
+                "/work/a",
+                '{"type":"response_item","payload":{"type":"task_complete"}}',
+            )
+            old_mtime = time.time() - 120
+            os.utime(session, (old_mtime, old_mtime))
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertIsNone(sessions[0].state_activity)
+        self.assertEqual(sessions[0].display_status, "未运行")
 
     def test_inspect_runtime_returns_sessions_and_state_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -279,10 +339,14 @@ def _write_process(
     ppid: int,
     cmdline: list[str],
     cwd: str,
+    start_ticks: int = 100,
 ) -> None:
     pid_dir = proc / str(pid)
     (pid_dir / "fd").mkdir(parents=True)
-    (pid_dir / "stat").write_text(_stat_line(pid, comm, state, ppid), encoding="utf-8")
+    (pid_dir / "stat").write_text(
+        _stat_line(pid, comm, state, ppid, start_ticks=start_ticks),
+        encoding="utf-8",
+    )
     (pid_dir / "cmdline").write_bytes(b"\0".join(item.encode() for item in cmdline) + b"\0")
     (pid_dir / "cwd").symlink_to(cwd)
     (pid_dir / "exe").symlink_to(f"/usr/bin/{cmdline[0]}")
@@ -303,7 +367,13 @@ def _write_session(home: Path, cwd: str, last_record: str) -> Path:
     return session
 
 
-def _stat_line(pid: int, comm: str, state: str, ppid: int) -> str:
+def _stat_line(
+    pid: int,
+    comm: str,
+    state: str,
+    ppid: int,
+    start_ticks: int = 100,
+) -> str:
     fields = [
         state,
         str(ppid),
@@ -324,7 +394,7 @@ def _stat_line(pid: int, comm: str, state: str, ppid: int) -> str:
         "0",
         "1",
         "0",
-        "100",
+        str(start_ticks),
     ]
     return f"{pid} ({comm}) {' '.join(fields)}\n"
 

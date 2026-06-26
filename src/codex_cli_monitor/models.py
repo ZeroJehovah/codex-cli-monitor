@@ -140,6 +140,7 @@ class ProcessInfo:
     tty_nr: int | None
     elapsed_seconds: float | None
     cpu_seconds: float | None
+    started_at: float | None = None
     cpu_delta_seconds: float | None = None
     children: tuple[int, ...] = field(default_factory=tuple)
 
@@ -164,6 +165,7 @@ class ProcessInfo:
             "tty_nr": self.tty_nr,
             "elapsed_seconds": self.elapsed_seconds,
             "cpu_seconds": self.cpu_seconds,
+            "started_at": self.started_at,
             "cpu_delta_seconds": self.cpu_delta_seconds,
             "children": list(self.children),
         }

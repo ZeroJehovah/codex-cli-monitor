@@ -196,6 +196,8 @@ def _state_activity_for_root(
         if root_cwd is None or activity_cwd is None:
             continue
         if root_cwd == activity_cwd:
+            if _is_before_process_start(activity.modified_at, root):
+                continue
             candidates.append(activity)
     if not candidates:
         return None
@@ -204,12 +206,21 @@ def _state_activity_for_root(
 
 def _hook_state_for_root(
     root: ProcessInfo,
-    states: dict[str, HookSessionState],
+    states: dict[str, tuple[HookSessionState, ...]],
 ) -> HookSessionState | None:
     root_cwd = _normalize_path(root.cwd)
     if root_cwd is None:
         return None
-    return states.get(root_cwd)
+    candidates = states.get(root_cwd, ())
+    if not candidates:
+        return None
+    for state in candidates:
+        if state.codex_pid == root.pid:
+            return state
+    for state in candidates:
+        if state.codex_pid is None and not _is_before_process_start(state.updated_at, root):
+            return state
+    return None
 
 
 def _display_status(
@@ -271,3 +282,9 @@ def _normalize_path(value: str | None) -> str | None:
         return str(Path(value).resolve())
     except OSError:
         return str(Path(value).absolute())
+
+
+def _is_before_process_start(timestamp: float, process: ProcessInfo) -> bool:
+    if process.started_at is None:
+        return False
+    return timestamp < process.started_at

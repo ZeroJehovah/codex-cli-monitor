@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
+import time
 from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
@@ -91,8 +92,11 @@ def _read_process(
     stdin = _readlink(pid_dir / "fd" / "0")
 
     elapsed_seconds = None
+    started_at = None
     if uptime is not None:
-        elapsed_seconds = max(0.0, uptime - (start_ticks / ticks_per_second))
+        process_age = uptime - (start_ticks / ticks_per_second)
+        elapsed_seconds = max(0.0, process_age)
+        started_at = time.time() - elapsed_seconds
 
     return ProcessInfo(
         pid=pid,
@@ -106,6 +110,7 @@ def _read_process(
         tty_nr=tty_nr,
         elapsed_seconds=elapsed_seconds,
         cpu_seconds=(utime_ticks + stime_ticks) / ticks_per_second,
+        started_at=started_at,
     )
 
 
