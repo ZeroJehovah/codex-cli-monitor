@@ -20,6 +20,7 @@ def main(argv: list[str] | None = None) -> int:
             sample_window=args.sample_window,
             shim_log=args.shim_log,
             codex_home=args.codex_home,
+            hook_log=args.hook_log,
         )
         if args.json:
             payload = {
@@ -69,6 +70,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Codex home directory to scan for local state metadata",
+    )
+    parser.add_argument(
+        "--hook-log",
+        type=Path,
+        default=None,
+        help="path to Codex hook lifecycle JSONL metadata",
     )
     parser.add_argument(
         "--watch",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from codex_cli_monitor.classify import infer_status, is_codex_process
+from codex_cli_monitor.hook_state import HookSessionState
 from codex_cli_monitor.models import NetworkConnection, ProcessInfo, SessionActivity
 
 
@@ -34,6 +35,54 @@ class ClassifyTests(unittest.TestCase):
         inference = infer_status(root, (shell,), (), sample_window=0)
 
         self.assertEqual(inference.status, "tool_running_likely")
+
+    def test_hook_open_turn_overrides_waiting_sidecar_signals(self) -> None:
+        root = _process(100, "codex", state="S", tty="/dev/pts/1")
+        hook_state = HookSessionState(
+            cwd="/work/a",
+            updated_at=1000.0,
+            last_event="user_prompt_submit",
+            in_turn=True,
+        )
+
+        inference = infer_status(
+            root,
+            (),
+            (),
+            sample_window=0,
+            hook_state=hook_state,
+        )
+
+        self.assertEqual(inference.status, "api_inflight_likely")
+        self.assertGreater(inference.confidence, 0.8)
+
+    def test_hook_stop_overrides_stale_network_signals(self) -> None:
+        root = _process(100, "codex", state="S", tty="/dev/pts/1")
+        connection = NetworkConnection(
+            protocol="tcp4",
+            local_address="172.24.3.172",
+            local_port=50000,
+            remote_address="172.24.0.1",
+            remote_port=7890,
+            state="ESTABLISHED",
+            inode="12345",
+        )
+        hook_state = HookSessionState(
+            cwd="/work/a",
+            updated_at=1000.0,
+            last_event="stop",
+            in_turn=False,
+        )
+
+        inference = infer_status(
+            root,
+            (),
+            (connection,),
+            sample_window=0,
+            hook_state=hook_state,
+        )
+
+        self.assertEqual(inference.status, "waiting_user_likely")
 
     def test_changing_session_file_is_active(self) -> None:
         root = _process(100, "codex", state="S", tty="/dev/pts/1")

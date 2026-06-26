@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
+from .hook_state import HookSessionState
 from .models import Evidence, Inference, NetworkConnection, ProcessInfo, SessionActivity
 
 
@@ -43,7 +45,12 @@ def infer_status(
     connections: tuple[NetworkConnection, ...],
     sample_window: float,
     state_activity: SessionActivity | None = None,
+    hook_state: HookSessionState | None = None,
 ) -> Inference:
+    hook_inference = _infer_from_hook_state(hook_state)
+    if hook_inference is not None:
+        return hook_inference
+
     tool_children = tuple(
         process
         for process in descendants
@@ -270,6 +277,40 @@ def _has_recent_nonterminal_state_activity(
     if state_activity is None or state_activity.terminal_event:
         return False
     return state_activity.modified_age_seconds <= RECENT_SESSION_ACTIVITY_SECONDS
+
+
+def _infer_from_hook_state(hook_state: HookSessionState | None) -> Inference | None:
+    if hook_state is None:
+        return None
+    age = max(0.0, time.time() - hook_state.updated_at)
+    evidence = (
+        Evidence(
+            "codex_hook",
+            f"Last hook event {hook_state.last_event} observed {age:.1f}s ago.",
+        ),
+    )
+    if hook_state.active_tool_count > 0:
+        return Inference(
+            status="tool_running_likely",
+            confidence=0.92,
+            evidence=evidence,
+            limitations=("Hook events are trusted local lifecycle signals, not Codex internals.",),
+        )
+    if hook_state.in_turn:
+        return Inference(
+            status="api_inflight_likely",
+            confidence=0.86,
+            evidence=evidence,
+            limitations=(
+                "Hook events show a turn is open and no tool is currently running; this may include reasoning or remote API waiting.",
+            ),
+        )
+    return Inference(
+        status="waiting_user_likely",
+        confidence=0.9,
+        evidence=evidence,
+        limitations=("Hook Stop/UserPromptSubmit events define this state for the monitored lifecycle.",),
+    )
 
 
 def _total_cpu_delta(processes: tuple[ProcessInfo, ...]) -> float | None:

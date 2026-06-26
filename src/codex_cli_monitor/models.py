@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .hook_state import HookSessionState
+
 
 @dataclass(frozen=True)
 class Evidence:
@@ -208,6 +210,7 @@ class CodexSession:
     connections: tuple[NetworkConnection, ...]
     inference: Inference
     state_activity: SessionActivity | None = None
+    hook_state: HookSessionState | None = None
     launch_record: LaunchRecord | None = None
     confirmed_status: str = "open"
 
@@ -220,6 +223,9 @@ class CodexSession:
             "connections": [connection.to_dict() for connection in self.connections],
             "state_activity": self.state_activity.to_dict()
             if self.state_activity is not None
+            else None,
+            "hook_state": self.hook_state.to_dict()
+            if self.hook_state is not None
             else None,
             "launch_record": self.launch_record.to_dict()
             if self.launch_record is not None
