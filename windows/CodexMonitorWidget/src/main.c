@@ -19,6 +19,7 @@
 #define RUNNING_PULSE_PERIOD_MS 1600
 #define WM_FETCH_DONE (WM_APP + 1)
 #define MENU_EXIT_ID 1001
+#define MENU_SIZE_BASE_ID 1100
 #define MAX_SESSIONS 128
 #define DOT_SIZE 14
 #define DOT_GAP 8
@@ -30,6 +31,13 @@
 #define COLUMN_GAP 12
 #define MIN_PANEL_WIDTH 48
 #define MIN_PANEL_HEIGHT 32
+#define DEFAULT_DISPLAY_FONT_POINTS 9
+#define SETTINGS_REGISTRY_PATH L"Software\\CodexMonitorWidget"
+#define SETTINGS_VALUE_ANCHOR_RIGHT L"AnchorRight"
+#define SETTINGS_VALUE_ANCHOR_BOTTOM L"AnchorBottom"
+#define SETTINGS_VALUE_OFFSET_X L"OffsetX"
+#define SETTINGS_VALUE_OFFSET_Y L"OffsetY"
+#define SETTINGS_VALUE_DISPLAY_SIZE L"DisplaySize"
 
 typedef struct Session {
     int pid;
@@ -56,6 +64,7 @@ typedef struct DirectoryRow {
 typedef struct AppState {
     HWND hwnd;
     HWND tooltip;
+    HFONT font;
     wchar_t api_url[1024];
     wchar_t tooltip_text[1024];
     TOOLINFOW tooltip_info;
@@ -70,6 +79,11 @@ typedef struct AppState {
     int drag_refresh_pending;
     int context_menu_open;
     int animation_timer_active;
+    int anchor_right;
+    int anchor_bottom;
+    int placement_offset_x;
+    int placement_offset_y;
+    int display_font_points;
     POINT drag_start;
     RECT drag_window;
     LONG fetching;
@@ -80,6 +94,7 @@ static const char STATUS_IDLE[] = "\xe6\x9c\xaa\xe8\xbf\x90\xe8\xa1\x8c";
 static const char STATUS_RUNNING[] = "\xe8\xbf\x90\xe8\xa1\x8c\xe4\xb8\xad";
 static const char STATUS_SUCCESS[] = "\xe6\x88\x90\xe5\x8a\x9f";
 static const char STATUS_FAILED[] = "\xe5\xa4\xb1\xe8\xb4\xa5";
+static const int DISPLAY_FONT_SIZES[] = {8, 9, 10, 11, 12, 14, 16};
 
 static AppState g_app;
 
@@ -154,11 +169,123 @@ static void directory_display_name(const char *directory, char *target, int targ
     target[end - start] = '\0';
 }
 
+static int display_size_count(void) {
+    return (int)(sizeof(DISPLAY_FONT_SIZES) / sizeof(DISPLAY_FONT_SIZES[0]));
+}
+
+static int is_supported_display_font_points(int points) {
+    int index;
+    for (index = 0; index < display_size_count(); index++) {
+        if (DISPLAY_FONT_SIZES[index] == points) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int normalized_display_font_points(int points) {
+    if (is_supported_display_font_points(points)) {
+        return points;
+    }
+    return DEFAULT_DISPLAY_FONT_POINTS;
+}
+
+static int scale_px(int value) {
+    int points = normalized_display_font_points(g_app.display_font_points);
+    int scaled = (value * points + DEFAULT_DISPLAY_FONT_POINTS / 2) / DEFAULT_DISPLAY_FONT_POINTS;
+    if (scaled < 1) {
+        return 1;
+    }
+    return scaled;
+}
+
+static int ui_dot_size(void) {
+    return scale_px(DOT_SIZE);
+}
+
+static int ui_dot_gap(void) {
+    return scale_px(DOT_GAP);
+}
+
+static int ui_dot_halo_expand(int pulse) {
+    int base = scale_px(2);
+    int extra = scale_px(2);
+    return base + (pulse * extra + 50) / 100;
+}
+
+static int ui_padding_x(void) {
+    return scale_px(PADDING_X);
+}
+
+static int ui_padding_y(void) {
+    return scale_px(PADDING_Y);
+}
+
+static int ui_row_height(void) {
+    int height = scale_px(ROW_HEIGHT);
+    int min_height = ui_dot_size() + scale_px(4) * 2 + 2;
+    if (height < min_height) {
+        return min_height;
+    }
+    return height;
+}
+
+static int ui_directory_text_padding(void) {
+    return scale_px(DIRECTORY_TEXT_PADDING);
+}
+
+static int ui_column_gap(void) {
+    return scale_px(COLUMN_GAP);
+}
+
+static int ui_min_panel_width(void) {
+    return scale_px(MIN_PANEL_WIDTH);
+}
+
+static int ui_min_panel_height(void) {
+    return scale_px(MIN_PANEL_HEIGHT);
+}
+
+static HFONT create_display_font(int points) {
+    HDC hdc = GetDC(NULL);
+    int dpi_y = 96;
+    HFONT font;
+    if (hdc != NULL) {
+        dpi_y = GetDeviceCaps(hdc, LOGPIXELSY);
+        ReleaseDC(NULL, hdc);
+    }
+    font = CreateFontW(-MulDiv(points, dpi_y, 72), 0, 0, 0, FW_NORMAL,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI");
+    return font;
+}
+
+static HFONT widget_font(void) {
+    if (g_app.font != NULL) {
+        return g_app.font;
+    }
+    return (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+}
+
+static void update_display_font(void) {
+    HFONT font;
+    g_app.display_font_points = normalized_display_font_points(g_app.display_font_points);
+    font = create_display_font(g_app.display_font_points);
+    if (font == NULL) {
+        return;
+    }
+    if (g_app.font != NULL) {
+        DeleteObject(g_app.font);
+    }
+    g_app.font = font;
+}
+
 static int row_dot_width(int count) {
     if (count <= 0) {
         return 0;
     }
-    return count * DOT_SIZE + (count - 1) * DOT_GAP;
+    return count * ui_dot_size() + (count - 1) * ui_dot_gap();
 }
 
 static int max_row_session_count(void) {
@@ -173,17 +300,17 @@ static int max_row_session_count(void) {
 }
 
 static int dot_column_left(void) {
-    return PADDING_X + g_app.directory_column_width + COLUMN_GAP;
+    return ui_padding_x() + g_app.directory_column_width + ui_column_gap();
 }
 
 static int panel_width(void) {
     int width;
     if (g_app.row_count <= 0) {
-        return MIN_PANEL_WIDTH;
+        return ui_min_panel_width();
     }
-    width = PADDING_X * 2 + g_app.directory_column_width + COLUMN_GAP + row_dot_width(max_row_session_count());
-    if (width < MIN_PANEL_WIDTH) {
-        return MIN_PANEL_WIDTH;
+    width = ui_padding_x() * 2 + g_app.directory_column_width + ui_column_gap() + row_dot_width(max_row_session_count());
+    if (width < ui_min_panel_width()) {
+        return ui_min_panel_width();
     }
     return width;
 }
@@ -191,21 +318,252 @@ static int panel_width(void) {
 static int panel_height(void) {
     int height;
     if (g_app.row_count <= 0) {
-        return MIN_PANEL_HEIGHT;
+        return ui_min_panel_height();
     }
-    height = PADDING_Y * 2 + g_app.row_count * ROW_HEIGHT;
-    if (height < MIN_PANEL_HEIGHT) {
-        return MIN_PANEL_HEIGHT;
+    height = ui_padding_y() * 2 + g_app.row_count * ui_row_height();
+    if (height < ui_min_panel_height()) {
+        return ui_min_panel_height();
     }
     return height;
 }
 
+static int rect_width(const RECT *rect) {
+    return rect->right - rect->left;
+}
+
+static int rect_height(const RECT *rect) {
+    return rect->bottom - rect->top;
+}
+
+static void get_primary_work_area(RECT *work_area) {
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, work_area, 0)) {
+        work_area->left = 0;
+        work_area->top = 0;
+        work_area->right = GetSystemMetrics(SM_CXSCREEN);
+        work_area->bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+}
+
+static void get_work_area_for_rect(const RECT *rect, RECT *work_area) {
+    HMONITOR monitor;
+    MONITORINFO info;
+    if (rect == NULL) {
+        get_primary_work_area(work_area);
+        return;
+    }
+    monitor = MonitorFromRect(rect, MONITOR_DEFAULTTONEAREST);
+    ZeroMemory(&info, sizeof(info));
+    info.cbSize = sizeof(info);
+    if (monitor != NULL && GetMonitorInfoW(monitor, &info)) {
+        *work_area = info.rcWork;
+        return;
+    }
+    get_primary_work_area(work_area);
+}
+
+static void clamp_panel_size_to_work_area(const RECT *work_area, int *width, int *height) {
+    int work_width = rect_width(work_area);
+    int work_height = rect_height(work_area);
+    if (work_width < 1) {
+        work_width = 1;
+    }
+    if (work_height < 1) {
+        work_height = 1;
+    }
+    if (*width > work_width) {
+        *width = work_width;
+    }
+    if (*height > work_height) {
+        *height = work_height;
+    }
+    if (*width < 1) {
+        *width = 1;
+    }
+    if (*height < 1) {
+        *height = 1;
+    }
+}
+
+static void update_placement_offsets_from_rect(const RECT *rect, const RECT *work_area) {
+    if (g_app.anchor_right) {
+        g_app.placement_offset_x = work_area->right - rect->right;
+    } else {
+        g_app.placement_offset_x = rect->left - work_area->left;
+    }
+    if (g_app.anchor_bottom) {
+        g_app.placement_offset_y = work_area->bottom - rect->bottom;
+    } else {
+        g_app.placement_offset_y = rect->top - work_area->top;
+    }
+    if (g_app.placement_offset_x < 0) {
+        g_app.placement_offset_x = 0;
+    }
+    if (g_app.placement_offset_y < 0) {
+        g_app.placement_offset_y = 0;
+    }
+}
+
+static void place_rect_from_current_placement(const RECT *work_area, int *width, int *height, RECT *target) {
+    clamp_panel_size_to_work_area(work_area, width, height);
+    if (g_app.placement_offset_x < 0) {
+        g_app.placement_offset_x = 0;
+    }
+    if (g_app.placement_offset_y < 0) {
+        g_app.placement_offset_y = 0;
+    }
+
+    if (g_app.anchor_right) {
+        target->right = work_area->right - g_app.placement_offset_x;
+        target->left = target->right - *width;
+    } else {
+        target->left = work_area->left + g_app.placement_offset_x;
+        target->right = target->left + *width;
+    }
+    if (target->left < work_area->left) {
+        target->left = work_area->left;
+        target->right = target->left + *width;
+        g_app.anchor_right = 0;
+    }
+    if (target->right > work_area->right) {
+        target->right = work_area->right;
+        target->left = target->right - *width;
+        g_app.anchor_right = 1;
+    }
+
+    if (g_app.anchor_bottom) {
+        target->bottom = work_area->bottom - g_app.placement_offset_y;
+        target->top = target->bottom - *height;
+    } else {
+        target->top = work_area->top + g_app.placement_offset_y;
+        target->bottom = target->top + *height;
+    }
+    if (target->top < work_area->top) {
+        target->top = work_area->top;
+        target->bottom = target->top + *height;
+        g_app.anchor_bottom = 0;
+    }
+    if (target->bottom > work_area->bottom) {
+        target->bottom = work_area->bottom;
+        target->top = target->bottom - *height;
+        g_app.anchor_bottom = 1;
+    }
+
+    update_placement_offsets_from_rect(target, work_area);
+}
+
+static void place_drag_rect(const RECT *desired, RECT *target, int *width, int *height) {
+    RECT work_area;
+    *width = rect_width(desired);
+    *height = rect_height(desired);
+    get_work_area_for_rect(desired, &work_area);
+    clamp_panel_size_to_work_area(&work_area, width, height);
+
+    *target = *desired;
+    target->right = target->left + *width;
+    target->bottom = target->top + *height;
+    g_app.anchor_right = 0;
+    g_app.anchor_bottom = 0;
+
+    if (target->left < work_area.left) {
+        target->left = work_area.left;
+        target->right = target->left + *width;
+    }
+    if (target->right > work_area.right) {
+        target->right = work_area.right;
+        target->left = target->right - *width;
+        g_app.anchor_right = 1;
+    }
+    if (target->top < work_area.top) {
+        target->top = work_area.top;
+        target->bottom = target->top + *height;
+    }
+    if (target->bottom > work_area.bottom) {
+        target->bottom = work_area.bottom;
+        target->top = target->bottom - *height;
+        g_app.anchor_bottom = 1;
+    }
+
+    update_placement_offsets_from_rect(target, &work_area);
+}
+
+static int read_registry_dword(HKEY key, const wchar_t *name, int *target) {
+    DWORD type = 0;
+    DWORD data = 0;
+    DWORD data_size = sizeof(data);
+    if (RegQueryValueExW(key, name, NULL, &type, (LPBYTE)&data, &data_size) != ERROR_SUCCESS ||
+        type != REG_DWORD || data_size != sizeof(data)) {
+        return 0;
+    }
+    if (data > 1000000U) {
+        return 0;
+    }
+    *target = (int)data;
+    return 1;
+}
+
+static void write_registry_dword(HKEY key, const wchar_t *name, int value) {
+    DWORD data = (DWORD)(value < 0 ? 0 : value);
+    RegSetValueExW(key, name, 0, REG_DWORD, (const BYTE *)&data, sizeof(data));
+}
+
+static void set_default_widget_placement(const RECT *work_area) {
+    g_app.anchor_right = 0;
+    g_app.anchor_bottom = 0;
+    g_app.placement_offset_x = rect_width(work_area) - ui_min_panel_width() - 24;
+    g_app.placement_offset_y = 80;
+    if (g_app.placement_offset_x < 0) {
+        g_app.placement_offset_x = 0;
+    }
+    if (g_app.placement_offset_y < 0) {
+        g_app.placement_offset_y = 0;
+    }
+}
+
+static void load_widget_placement(void) {
+    HKEY key;
+    int value;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, SETTINGS_REGISTRY_PATH, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+        return;
+    }
+    if (read_registry_dword(key, SETTINGS_VALUE_ANCHOR_RIGHT, &value)) {
+        g_app.anchor_right = value != 0;
+    }
+    if (read_registry_dword(key, SETTINGS_VALUE_ANCHOR_BOTTOM, &value)) {
+        g_app.anchor_bottom = value != 0;
+    }
+    if (read_registry_dword(key, SETTINGS_VALUE_OFFSET_X, &value)) {
+        g_app.placement_offset_x = value;
+    }
+    if (read_registry_dword(key, SETTINGS_VALUE_OFFSET_Y, &value)) {
+        g_app.placement_offset_y = value;
+    }
+    if (read_registry_dword(key, SETTINGS_VALUE_DISPLAY_SIZE, &value)) {
+        g_app.display_font_points = normalized_display_font_points(value);
+    }
+    RegCloseKey(key);
+}
+
+static void save_widget_placement(void) {
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_REGISTRY_PATH, 0, NULL, 0,
+            KEY_WRITE, NULL, &key, NULL) != ERROR_SUCCESS) {
+        return;
+    }
+    write_registry_dword(key, SETTINGS_VALUE_ANCHOR_RIGHT, g_app.anchor_right);
+    write_registry_dword(key, SETTINGS_VALUE_ANCHOR_BOTTOM, g_app.anchor_bottom);
+    write_registry_dword(key, SETTINGS_VALUE_OFFSET_X, g_app.placement_offset_x);
+    write_registry_dword(key, SETTINGS_VALUE_OFFSET_Y, g_app.placement_offset_y);
+    write_registry_dword(key, SETTINGS_VALUE_DISPLAY_SIZE, g_app.display_font_points);
+    RegCloseKey(key);
+}
+
 static RECT dot_rect(int row_index, int dot_index) {
     RECT rect;
-    rect.left = dot_column_left() + dot_index * (DOT_SIZE + DOT_GAP);
-    rect.top = PADDING_Y + row_index * ROW_HEIGHT + (ROW_HEIGHT - DOT_SIZE) / 2;
-    rect.right = rect.left + DOT_SIZE;
-    rect.bottom = rect.top + DOT_SIZE;
+    int dot_size = ui_dot_size();
+    rect.left = dot_column_left() + dot_index * (dot_size + ui_dot_gap());
+    rect.top = ui_padding_y() + row_index * ui_row_height() + (ui_row_height() - dot_size) / 2;
+    rect.right = rect.left + dot_size;
+    rect.bottom = rect.top + dot_size;
     return rect;
 }
 
@@ -237,7 +595,7 @@ static void update_directory_column_width(void) {
         g_app.directory_column_width = 0;
         return;
     }
-    old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
+    old_font = SelectObject(hdc, widget_font());
     for (row = 0; row < g_app.row_count; row++) {
         char display_name[512];
         wchar_t display_name_wide[512];
@@ -251,7 +609,7 @@ static void update_directory_column_width(void) {
     }
     SelectObject(hdc, old_font);
     ReleaseDC(g_app.hwnd, hdc);
-    g_app.directory_column_width = max_width + DIRECTORY_TEXT_PADDING;
+    g_app.directory_column_width = max_width + ui_directory_text_padding();
 }
 
 static int compare_session_indexes(int left_index, int right_index) {
@@ -810,16 +1168,30 @@ static void start_fetch(void) {
 
 static void resize_panel(void) {
     RECT rect;
+    RECT work_area;
+    RECT target;
     int width = panel_width();
     int height = panel_height();
+    int old_anchor_right = g_app.anchor_right;
+    int old_anchor_bottom = g_app.anchor_bottom;
+    int old_offset_x = g_app.placement_offset_x;
+    int old_offset_y = g_app.placement_offset_y;
     HWND insert_after = HWND_TOPMOST;
     UINT flags = SWP_NOACTIVATE;
     GetWindowRect(g_app.hwnd, &rect);
+    get_work_area_for_rect(&rect, &work_area);
+    place_rect_from_current_placement(&work_area, &width, &height, &target);
     if (g_app.context_menu_open) {
         insert_after = NULL;
         flags |= SWP_NOZORDER;
     }
-    SetWindowPos(g_app.hwnd, insert_after, rect.left, rect.top, width, height, flags);
+    SetWindowPos(g_app.hwnd, insert_after, target.left, target.top, width, height, flags);
+    if (old_anchor_right != g_app.anchor_right ||
+        old_anchor_bottom != g_app.anchor_bottom ||
+        old_offset_x != g_app.placement_offset_x ||
+        old_offset_y != g_app.placement_offset_y) {
+        save_widget_placement();
+    }
 }
 
 static void update_tool_rect(void) {
@@ -905,9 +1277,60 @@ static void restore_widget_topmost(HWND hwnd) {
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 }
 
+static UINT display_size_command_id(int index) {
+    return MENU_SIZE_BASE_ID + (UINT)index;
+}
+
+static int display_size_from_command(UINT command, int *points) {
+    int index;
+    if (command < MENU_SIZE_BASE_ID) {
+        return 0;
+    }
+    index = (int)(command - MENU_SIZE_BASE_ID);
+    if (index < 0 || index >= display_size_count()) {
+        return 0;
+    }
+    *points = DISPLAY_FONT_SIZES[index];
+    return 1;
+}
+
+static void append_display_size_menu(HMENU menu) {
+    HMENU size_menu = CreatePopupMenu();
+    int index;
+    if (size_menu == NULL) {
+        return;
+    }
+    for (index = 0; index < display_size_count(); index++) {
+        wchar_t label[32];
+        UINT flags = MF_STRING;
+        _snwprintf(label, sizeof(label) / sizeof(label[0]) - 1, L"%d pt", DISPLAY_FONT_SIZES[index]);
+        label[sizeof(label) / sizeof(label[0]) - 1] = L'\0';
+        if (DISPLAY_FONT_SIZES[index] == g_app.display_font_points) {
+            flags |= MF_CHECKED;
+        }
+        AppendMenuW(size_menu, flags, display_size_command_id(index), label);
+    }
+    if (!AppendMenuW(menu, MF_POPUP, (UINT_PTR)size_menu, L"\x663e\x793a\x5927\x5c0f")) {
+        DestroyMenu(size_menu);
+    }
+}
+
+static void apply_display_font_points(int points) {
+    points = normalized_display_font_points(points);
+    if (points == g_app.display_font_points) {
+        return;
+    }
+    g_app.display_font_points = points;
+    update_display_font();
+    update_directory_column_width();
+    refresh_widget_view();
+    save_widget_placement();
+}
+
 static void show_context_menu(HWND hwnd, POINT point) {
     HMENU menu = CreatePopupMenu();
     UINT command;
+    int selected_points;
     RECT exclude_rect;
     TPMPARAMS params;
     if (g_app.context_menu_open) {
@@ -916,6 +1339,8 @@ static void show_context_menu(HWND hwnd, POINT point) {
     if (menu == NULL) {
         return;
     }
+    append_display_size_menu(menu);
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, MENU_EXIT_ID, L"\x9000\x51fa");
     GetWindowRect(hwnd, &exclude_rect);
     ZeroMemory(&params, sizeof(params));
@@ -937,6 +1362,11 @@ static void show_context_menu(HWND hwnd, POINT point) {
     PostMessageW(hwnd, WM_NULL, 0, 0);
     if (command == MENU_EXIT_ID) {
         DestroyWindow(hwnd);
+        return;
+    }
+    if (display_size_from_command(command, &selected_points)) {
+        apply_display_font_points(selected_points);
+        restore_widget_topmost(hwnd);
         return;
     }
     restore_widget_topmost(hwnd);
@@ -1000,13 +1430,14 @@ static void fill_dot(HDC hdc, const RECT *rect, COLORREF color, COLORREF backgro
 static void draw_status_dot(HDC hdc, const RECT *rect, const char *status, COLORREF row_background) {
     if (is_running_status(status)) {
         int pulse = running_pulse_level();
-        int expand = 2 + pulse / 50;
+        int expand = ui_dot_halo_expand(pulse);
+        int inset = pulse >= 100 ? 0 : scale_px(1);
         RECT halo = *rect;
         RECT core = *rect;
         COLORREF halo_color = RGB(22 + pulse * 10 / 100, 50 + pulse * 35 / 100, 120 + pulse * 65 / 100);
         COLORREF core_color = RGB(37 + pulse * 38 / 100, 99 + pulse * 56 / 100, 235 + pulse * 20 / 100);
         InflateRect(&halo, expand, expand);
-        InflateRect(&core, -(1 - pulse / 100), -(1 - pulse / 100));
+        InflateRect(&core, -inset, -inset);
         fill_dot(hdc, &halo, halo_color, row_background);
         fill_dot(hdc, &core, core_color, halo_color);
         return;
@@ -1034,7 +1465,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
     DeleteObject(border);
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(225, 225, 225));
-    old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
+    old_font = SelectObject(hdc, widget_font());
     for (row = 0; row < g_app.row_count; row++) {
         RECT row_rect;
         RECT text_rect;
@@ -1043,9 +1474,9 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         int dot;
         COLORREF row_color = RGB(34, 34, 34);
         row_rect.left = 1;
-        row_rect.top = PADDING_Y + row * ROW_HEIGHT;
+        row_rect.top = ui_padding_y() + row * ui_row_height();
         row_rect.right = client.right - 1;
-        row_rect.bottom = row_rect.top + ROW_HEIGHT;
+        row_rect.bottom = row_rect.top + ui_row_height();
         if (row % 2 == 1) {
             row_color = RGB(39, 39, 39);
             row_background = CreateSolidBrush(row_color);
@@ -1054,9 +1485,9 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         }
         directory_display_name(g_app.rows[row].directory, display_name, sizeof(display_name));
         utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
-        text_rect.left = PADDING_X;
+        text_rect.left = ui_padding_x();
         text_rect.top = row_rect.top;
-        text_rect.right = PADDING_X + g_app.directory_column_width;
+        text_rect.right = ui_padding_x() + g_app.directory_column_width;
         text_rect.bottom = row_rect.bottom;
         DrawTextW(hdc, display_name_wide, -1, &text_rect,
             DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -1166,11 +1597,17 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         point.x = GET_X_LPARAM(lparam);
         point.y = GET_Y_LPARAM(lparam);
         if (g_app.dragging) {
+            RECT desired = g_app.drag_window;
+            RECT target;
+            int width;
+            int height;
             ClientToScreen(hwnd, &point);
             int dx = point.x - g_app.drag_start.x;
             int dy = point.y - g_app.drag_start.y;
-            SetWindowPos(hwnd, HWND_TOPMOST, g_app.drag_window.left + dx, g_app.drag_window.top + dy,
-                0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
+            OffsetRect(&desired, dx, dy);
+            place_drag_rect(&desired, &target, &width, &height);
+            SetWindowPos(hwnd, HWND_TOPMOST, target.left, target.top, width, height,
+                SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
             return 0;
         }
         hovered = dot_at_point(point);
@@ -1184,6 +1621,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         if (g_app.dragging) {
             g_app.dragging = 0;
             ReleaseCapture();
+            save_widget_placement();
             if (g_app.drag_refresh_pending) {
                 g_app.drag_refresh_pending = 0;
                 refresh_widget_view();
@@ -1195,6 +1633,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         if (g_app.dragging) {
             g_app.dragging = 0;
             ReleaseCapture();
+            save_widget_placement();
         }
         point.x = GET_X_LPARAM(lparam);
         point.y = GET_Y_LPARAM(lparam);
@@ -1221,13 +1660,25 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             DestroyWindow(hwnd);
             return 0;
         }
+        {
+            int selected_points;
+            if (display_size_from_command((UINT)LOWORD(wparam), &selected_points)) {
+                apply_display_font_points(selected_points);
+                return 0;
+            }
+        }
         return DefWindowProcW(hwnd, message, wparam, lparam);
     case WM_SIZE:
         update_tool_rect();
         return 0;
     case WM_DESTROY:
+        save_widget_placement();
         KillTimer(hwnd, REFRESH_TIMER_ID);
         KillTimer(hwnd, ANIMATION_TIMER_ID);
+        if (g_app.font != NULL) {
+            DeleteObject(g_app.font);
+            g_app.font = NULL;
+        }
         PostQuitMessage(0);
         return 0;
     default:
@@ -1265,13 +1716,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
     WNDCLASSW wc;
     HWND hwnd;
     RECT work_area;
+    RECT initial_rect;
+    int initial_width;
+    int initial_height;
     MSG message;
     (void)previous_instance;
     (void)command_line;
     (void)show_command;
 
     ZeroMemory(&g_app, sizeof(g_app));
+    g_app.display_font_points = DEFAULT_DISPLAY_FONT_POINTS;
     resolve_api_url();
+    get_primary_work_area(&work_area);
+    set_default_widget_placement(&work_area);
+    load_widget_placement();
+    update_display_font();
     ZeroMemory(&wc, sizeof(wc));
     wc.lpfnWndProc = window_proc;
     wc.hInstance = instance;
@@ -1279,13 +1738,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     if (!RegisterClassW(&wc)) {
+        if (g_app.font != NULL) {
+            DeleteObject(g_app.font);
+            g_app.font = NULL;
+        }
         return 1;
     }
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0);
+    initial_width = panel_width();
+    initial_height = panel_height();
+    place_rect_from_current_placement(&work_area, &initial_width, &initial_height, &initial_rect);
     hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, APP_CLASS_NAME, L"Codex Monitor",
-        WS_POPUP, work_area.right - MIN_PANEL_WIDTH - 24, work_area.top + 80,
-        MIN_PANEL_WIDTH, MIN_PANEL_HEIGHT, NULL, NULL, instance, NULL);
+        WS_POPUP, initial_rect.left, initial_rect.top,
+        initial_width, initial_height, NULL, NULL, instance, NULL);
     if (hwnd == NULL) {
+        if (g_app.font != NULL) {
+            DeleteObject(g_app.font);
+            g_app.font = NULL;
+        }
         return 1;
     }
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
