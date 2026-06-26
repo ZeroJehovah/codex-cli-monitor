@@ -156,6 +156,46 @@ class CodexStateTests(unittest.TestCase):
         self.assertTrue(activities[0].terminal_event)
         self.assertTrue(activities[0].failed_event)
 
+    def test_scan_session_activities_marks_empty_terminal_turn_as_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                '{"type":"session_meta","payload":{"session_id":"s","cwd":"/work/a"}}\n'
+                '{"type":"response_item","payload":{"type":"message","role":"user","content":"go"}}\n'
+                '{"type":"event_msg","payload":{"type":"user_message","message":"go"}}\n'
+                '{"type":"event_msg","payload":{"type":"token_count"}}\n'
+                '{"type":"event_msg","payload":{"type":"task_complete"}}\n',
+                encoding="utf-8",
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].terminal_event)
+        self.assertTrue(activities[0].failed_event)
+
+    def test_scan_session_activities_ignores_commentary_error_discussion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                '{"type":"session_meta","payload":{"session_id":"s","cwd":"/work/a"}}\n'
+                '{"type":"response_item","payload":{"type":"message","role":"user","content":"explain"}}\n'
+                '{"type":"event_msg","payload":{"type":"agent_message","phase":"commentary","message":"I saw ■ unexpected status 503 Service Unavailable."}}\n'
+                '{"type":"response_item","payload":{"type":"message","role":"assistant","content":"done"}}\n'
+                '{"type":"event_msg","payload":{"type":"task_complete"}}\n',
+                encoding="utf-8",
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].terminal_event)
+        self.assertFalse(activities[0].failed_event)
+
     def test_scan_session_activities_marks_red_terminal_error_message_as_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
