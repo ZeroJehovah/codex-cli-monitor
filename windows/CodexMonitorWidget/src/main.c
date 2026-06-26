@@ -15,7 +15,7 @@
 #define REFRESH_TIMER_ID 1
 #define ANIMATION_TIMER_ID 2
 #define REFRESH_INTERVAL_MS 1500
-#define ANIMATION_INTERVAL_MS 80
+#define ANIMATION_INTERVAL_MS 160
 #define RUNNING_PULSE_PERIOD_MS 1600
 #define WM_FETCH_DONE (WM_APP + 1)
 #define MENU_EXIT_ID 1001
@@ -907,51 +907,15 @@ static void show_context_menu(HWND hwnd, POINT point) {
 }
 
 static void fill_dot(HDC hdc, const RECT *rect, COLORREF color) {
-    const int samples = 4;
-    const int total_samples = samples * samples;
-    int width = rect->right - rect->left;
-    int height = rect->bottom - rect->top;
-    int radius_size = width < height ? width : height;
-    double center_x = ((double)rect->left + (double)rect->right) / 2.0;
-    double center_y = ((double)rect->top + (double)rect->bottom) / 2.0;
-    double radius = (double)radius_size / 2.0;
-    double radius_squared = radius * radius;
-    int y;
-    if (width <= 0 || height <= 0) {
-        return;
-    }
-    for (y = rect->top; y < rect->bottom; y++) {
-        int x;
-        for (x = rect->left; x < rect->right; x++) {
-            int covered = 0;
-            int sample_y;
-            for (sample_y = 0; sample_y < samples; sample_y++) {
-                int sample_x;
-                double py = (double)y + ((double)sample_y + 0.5) / (double)samples;
-                double dy = py - center_y;
-                for (sample_x = 0; sample_x < samples; sample_x++) {
-                    double px = (double)x + ((double)sample_x + 0.5) / (double)samples;
-                    double dx = px - center_x;
-                    if (dx * dx + dy * dy <= radius_squared) {
-                        covered++;
-                    }
-                }
-            }
-            if (covered > 0) {
-                COLORREF background = GetPixel(hdc, x, y);
-                int red;
-                int green;
-                int blue;
-                if (background == CLR_INVALID) {
-                    continue;
-                }
-                red = (GetRValue(color) * covered + GetRValue(background) * (total_samples - covered)) / total_samples;
-                green = (GetGValue(color) * covered + GetGValue(background) * (total_samples - covered)) / total_samples;
-                blue = (GetBValue(color) * covered + GetBValue(background) * (total_samples - covered)) / total_samples;
-                SetPixelV(hdc, x, y, RGB(red, green, blue));
-            }
-        }
-    }
+    HBRUSH brush = CreateSolidBrush(color);
+    HGDIOBJ old_brush = SelectObject(hdc, brush);
+    HPEN pen = CreatePen(PS_SOLID, 1, color);
+    HGDIOBJ old_pen = SelectObject(hdc, pen);
+    Ellipse(hdc, rect->left, rect->top, rect->right, rect->bottom);
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    DeleteObject(pen);
+    DeleteObject(brush);
 }
 
 static void draw_status_dot(HDC hdc, const RECT *rect, const char *status) {
@@ -1024,6 +988,32 @@ static void paint_widget(HWND hwnd, HDC hdc) {
     SelectObject(hdc, old_font);
 }
 
+static void paint_widget_buffered(HWND hwnd, HDC target_hdc) {
+    RECT client;
+    HDC memory_hdc;
+    HBITMAP bitmap;
+    HGDIOBJ old_bitmap;
+    GetClientRect(hwnd, &client);
+    memory_hdc = CreateCompatibleDC(target_hdc);
+    if (memory_hdc == NULL) {
+        paint_widget(hwnd, target_hdc);
+        return;
+    }
+    bitmap = CreateCompatibleBitmap(target_hdc, client.right - client.left, client.bottom - client.top);
+    if (bitmap == NULL) {
+        DeleteDC(memory_hdc);
+        paint_widget(hwnd, target_hdc);
+        return;
+    }
+    old_bitmap = SelectObject(memory_hdc, bitmap);
+    paint_widget(hwnd, memory_hdc);
+    BitBlt(target_hdc, client.left, client.top, client.right - client.left, client.bottom - client.top,
+        memory_hdc, 0, 0, SRCCOPY);
+    SelectObject(memory_hdc, old_bitmap);
+    DeleteObject(bitmap);
+    DeleteDC(memory_hdc);
+}
+
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_CREATE:
@@ -1040,6 +1030,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
+    case WM_ERASEBKGND:
+        return 1;
     case WM_FETCH_DONE: {
         FetchResult *result = (FetchResult *)lparam;
         if (result != NULL) {
@@ -1074,7 +1066,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
-        paint_widget(hwnd, hdc);
+        paint_widget_buffered(hwnd, hdc);
         EndPaint(hwnd, &ps);
         return 0;
     }
