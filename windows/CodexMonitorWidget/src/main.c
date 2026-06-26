@@ -19,8 +19,12 @@
 #define DOT_SIZE 14
 #define DOT_GAP 8
 #define PADDING_X 10
-#define PANEL_HEIGHT 32
-#define MIN_PANEL_WIDTH 32
+#define PADDING_Y 6
+#define ROW_HEIGHT 26
+#define DIRECTORY_COLUMN_WIDTH 220
+#define COLUMN_GAP 12
+#define MIN_PANEL_WIDTH 260
+#define MIN_PANEL_HEIGHT 32
 
 typedef struct Session {
     int pid;
@@ -36,6 +40,12 @@ typedef struct FetchResult {
     Session sessions[MAX_SESSIONS];
 } FetchResult;
 
+typedef struct DirectoryRow {
+    char directory[512];
+    int session_indexes[MAX_SESSIONS];
+    int session_count;
+} DirectoryRow;
+
 typedef struct AppState {
     HWND hwnd;
     HWND tooltip;
@@ -43,9 +53,11 @@ typedef struct AppState {
     wchar_t tooltip_text[1024];
     TOOLINFOW tooltip_info;
     Session sessions[MAX_SESSIONS];
+    DirectoryRow rows[MAX_SESSIONS];
     int session_count;
+    int row_count;
     int empty_success_count;
-    int hovered_dot;
+    int hovered_session;
     int dragging;
     int drag_refresh_pending;
     POINT drag_start;
@@ -96,31 +108,131 @@ static void copy_ascii(char *target, int target_count, const char *source) {
     target[target_count - 1] = '\0';
 }
 
-static int panel_width(int count) {
-    if (count <= 0) {
-        return MIN_PANEL_WIDTH;
+static void directory_display_name(const char *directory, char *target, int target_count) {
+    size_t length;
+    size_t end;
+    size_t start;
+    if (target_count <= 0) {
+        return;
     }
-    return PADDING_X * 2 + count * DOT_SIZE + (count - 1) * DOT_GAP;
+    if (directory == NULL || directory[0] == '\0') {
+        copy_ascii(target, target_count, "-");
+        return;
+    }
+    length = strlen(directory);
+    end = length;
+    while (end > 1 && (directory[end - 1] == '/' || directory[end - 1] == '\\')) {
+        end--;
+    }
+    start = end;
+    while (start > 0 && directory[start - 1] != '/' && directory[start - 1] != '\\') {
+        start--;
+    }
+    if (end <= start) {
+        copy_ascii(target, target_count, directory);
+        return;
+    }
+    if ((int)(end - start) >= target_count) {
+        end = start + target_count - 1;
+    }
+    memcpy(target, directory + start, end - start);
+    target[end - start] = '\0';
 }
 
-static RECT dot_rect(int index) {
+static int row_dot_width(int count) {
+    if (count <= 0) {
+        return 0;
+    }
+    return count * DOT_SIZE + (count - 1) * DOT_GAP;
+}
+
+static int max_row_session_count(void) {
+    int row;
+    int max_count = 0;
+    for (row = 0; row < g_app.row_count; row++) {
+        if (g_app.rows[row].session_count > max_count) {
+            max_count = g_app.rows[row].session_count;
+        }
+    }
+    return max_count;
+}
+
+static int panel_width(void) {
+    int width;
+    if (g_app.row_count <= 0) {
+        return MIN_PANEL_WIDTH;
+    }
+    width = PADDING_X * 2 + DIRECTORY_COLUMN_WIDTH + COLUMN_GAP + row_dot_width(max_row_session_count());
+    if (width < MIN_PANEL_WIDTH) {
+        return MIN_PANEL_WIDTH;
+    }
+    return width;
+}
+
+static int panel_height(void) {
+    int height;
+    if (g_app.row_count <= 0) {
+        return MIN_PANEL_HEIGHT;
+    }
+    height = PADDING_Y * 2 + g_app.row_count * ROW_HEIGHT;
+    if (height < MIN_PANEL_HEIGHT) {
+        return MIN_PANEL_HEIGHT;
+    }
+    return height;
+}
+
+static RECT dot_rect(int row_index, int dot_index) {
     RECT rect;
-    rect.left = PADDING_X + index * (DOT_SIZE + DOT_GAP);
-    rect.top = (PANEL_HEIGHT - DOT_SIZE) / 2;
+    rect.left = PADDING_X + DIRECTORY_COLUMN_WIDTH + COLUMN_GAP + dot_index * (DOT_SIZE + DOT_GAP);
+    rect.top = PADDING_Y + row_index * ROW_HEIGHT + (ROW_HEIGHT - DOT_SIZE) / 2;
     rect.right = rect.left + DOT_SIZE;
     rect.bottom = rect.top + DOT_SIZE;
     return rect;
 }
 
 static int dot_at_point(POINT point) {
-    int index;
-    for (index = 0; index < g_app.session_count; index++) {
-        RECT rect = dot_rect(index);
-        if (PtInRect(&rect, point)) {
-            return index;
+    int row;
+    for (row = 0; row < g_app.row_count; row++) {
+        int dot;
+        for (dot = 0; dot < g_app.rows[row].session_count; dot++) {
+            RECT rect = dot_rect(row, dot);
+            if (PtInRect(&rect, point)) {
+                return g_app.rows[row].session_indexes[dot];
+            }
         }
     }
     return -1;
+}
+
+static void rebuild_directory_rows(void) {
+    int index;
+    g_app.row_count = 0;
+    for (index = 0; index < g_app.session_count; index++) {
+        Session *session = &g_app.sessions[index];
+        const char *directory = session->directory[0] ? session->directory : "-";
+        int row;
+        int target_row = -1;
+        for (row = 0; row < g_app.row_count; row++) {
+            if (strcmp(g_app.rows[row].directory, directory) == 0) {
+                target_row = row;
+                break;
+            }
+        }
+        if (target_row < 0) {
+            if (g_app.row_count >= MAX_SESSIONS) {
+                break;
+            }
+            target_row = g_app.row_count++;
+            ZeroMemory(&g_app.rows[target_row], sizeof(g_app.rows[target_row]));
+            copy_ascii(g_app.rows[target_row].directory, sizeof(g_app.rows[target_row].directory), directory);
+        }
+        if (g_app.rows[target_row].session_count < MAX_SESSIONS) {
+            g_app.rows[target_row].session_indexes[g_app.rows[target_row].session_count++] = index;
+        }
+    }
+    if (g_app.hovered_session >= g_app.session_count) {
+        g_app.hovered_session = -1;
+    }
 }
 
 static COLORREF status_color(const char *status) {
@@ -132,6 +244,9 @@ static COLORREF status_color(const char *status) {
     }
     if (strcmp(status, STATUS_FAILED) == 0) {
         return RGB(235, 87, 87);
+    }
+    if (strcmp(status, STATUS_IDLE) == 0) {
+        return RGB(139, 143, 152);
     }
     return RGB(139, 143, 152);
 }
@@ -479,9 +594,10 @@ static void start_fetch(void) {
 
 static void resize_panel(void) {
     RECT rect;
-    int width = panel_width(g_app.session_count);
+    int width = panel_width();
+    int height = panel_height();
     GetWindowRect(g_app.hwnd, &rect);
-    SetWindowPos(g_app.hwnd, HWND_TOPMOST, rect.left, rect.top, width, PANEL_HEIGHT, SWP_NOACTIVATE);
+    SetWindowPos(g_app.hwnd, HWND_TOPMOST, rect.left, rect.top, width, height, SWP_NOACTIVATE);
 }
 
 static void update_tool_rect(void) {
@@ -495,7 +611,7 @@ static void refresh_widget_view(void) {
     resize_panel();
     update_tool_rect();
     InvalidateRect(g_app.hwnd, NULL, FALSE);
-    set_tooltip_for_hover(g_app.hovered_dot);
+    set_tooltip_for_hover(g_app.hovered_session);
 }
 
 static void set_tooltip_for_hover(int index) {
@@ -566,9 +682,12 @@ static void show_context_menu(HWND hwnd, POINT point) {
 static void paint_widget(HWND hwnd, HDC hdc) {
     RECT client;
     HBRUSH background;
+    HBRUSH row_background;
     HPEN border;
+    HPEN grid;
     HGDIOBJ old_pen;
-    int index;
+    HGDIOBJ old_font;
+    int row;
     GetClientRect(hwnd, &client);
     background = CreateSolidBrush(RGB(34, 34, 34));
     FillRect(hdc, &client, background);
@@ -579,25 +698,69 @@ static void paint_widget(HWND hwnd, HDC hdc) {
     Rectangle(hdc, client.left, client.top, client.right, client.bottom);
     SelectObject(hdc, old_pen);
     DeleteObject(border);
-    for (index = 0; index < g_app.session_count; index++) {
-        RECT rect = dot_rect(index);
-        HBRUSH brush = CreateSolidBrush(status_color(g_app.sessions[index].status));
-        HGDIOBJ old_brush = SelectObject(hdc, brush);
-        HPEN pen = CreatePen(PS_SOLID, 1, status_color(g_app.sessions[index].status));
-        HGDIOBJ old_dot_pen = SelectObject(hdc, pen);
-        Ellipse(hdc, rect.left, rect.top, rect.right, rect.bottom);
-        SelectObject(hdc, old_dot_pen);
-        SelectObject(hdc, old_brush);
-        DeleteObject(pen);
-        DeleteObject(brush);
+    grid = CreatePen(PS_SOLID, 1, RGB(60, 60, 60));
+    old_pen = SelectObject(hdc, grid);
+    MoveToEx(hdc, PADDING_X + DIRECTORY_COLUMN_WIDTH + COLUMN_GAP / 2, PADDING_Y, NULL);
+    LineTo(hdc, PADDING_X + DIRECTORY_COLUMN_WIDTH + COLUMN_GAP / 2, client.bottom - PADDING_Y);
+    SelectObject(hdc, old_pen);
+    DeleteObject(grid);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(225, 225, 225));
+    old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
+    for (row = 0; row < g_app.row_count; row++) {
+        RECT row_rect;
+        RECT text_rect;
+        char display_name[512];
+        wchar_t display_name_wide[512];
+        int dot;
+        row_rect.left = 1;
+        row_rect.top = PADDING_Y + row * ROW_HEIGHT;
+        row_rect.right = client.right - 1;
+        row_rect.bottom = row_rect.top + ROW_HEIGHT;
+        if (row % 2 == 1) {
+            row_background = CreateSolidBrush(RGB(39, 39, 39));
+            FillRect(hdc, &row_rect, row_background);
+            DeleteObject(row_background);
+        }
+        if (row < g_app.row_count - 1) {
+            HPEN row_line = CreatePen(PS_SOLID, 1, RGB(54, 54, 54));
+            HGDIOBJ old_row_pen = SelectObject(hdc, row_line);
+            MoveToEx(hdc, 1, row_rect.bottom, NULL);
+            LineTo(hdc, client.right - 1, row_rect.bottom);
+            SelectObject(hdc, old_row_pen);
+            DeleteObject(row_line);
+        }
+        directory_display_name(g_app.rows[row].directory, display_name, sizeof(display_name));
+        utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
+        text_rect.left = PADDING_X;
+        text_rect.top = row_rect.top;
+        text_rect.right = PADDING_X + DIRECTORY_COLUMN_WIDTH;
+        text_rect.bottom = row_rect.bottom;
+        DrawTextW(hdc, display_name_wide, -1, &text_rect,
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        for (dot = 0; dot < g_app.rows[row].session_count; dot++) {
+            int session_index = g_app.rows[row].session_indexes[dot];
+            RECT rect = dot_rect(row, dot);
+            COLORREF color = status_color(g_app.sessions[session_index].status);
+            HBRUSH brush = CreateSolidBrush(color);
+            HGDIOBJ old_brush = SelectObject(hdc, brush);
+            HPEN pen = CreatePen(PS_SOLID, 1, color);
+            HGDIOBJ old_dot_pen = SelectObject(hdc, pen);
+            Ellipse(hdc, rect.left, rect.top, rect.right, rect.bottom);
+            SelectObject(hdc, old_dot_pen);
+            SelectObject(hdc, old_brush);
+            DeleteObject(pen);
+            DeleteObject(brush);
+        }
     }
+    SelectObject(hdc, old_font);
 }
 
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_CREATE:
         g_app.hwnd = hwnd;
-        g_app.hovered_dot = -1;
+        g_app.hovered_session = -1;
         init_tooltip(hwnd);
         SetTimer(hwnd, REFRESH_TIMER_ID, REFRESH_INTERVAL_MS, NULL);
         start_fetch();
@@ -614,11 +777,13 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
                 if (result->count > 0 || g_app.session_count == 0) {
                     g_app.session_count = result->count;
                     memcpy(g_app.sessions, result->sessions, sizeof(Session) * result->count);
+                    rebuild_directory_rows();
                     g_app.empty_success_count = 0;
                 } else {
                     g_app.empty_success_count++;
                     if (g_app.empty_success_count >= 3) {
                         g_app.session_count = 0;
+                        rebuild_directory_rows();
                         g_app.empty_success_count = 0;
                     }
                 }
@@ -666,8 +831,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             return 0;
         }
         hovered = dot_at_point(point);
-        if (hovered != g_app.hovered_dot) {
-            g_app.hovered_dot = hovered;
+        if (hovered != g_app.hovered_session) {
+            g_app.hovered_session = hovered;
             set_tooltip_for_hover(hovered);
         }
         return 0;
@@ -713,7 +878,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             DestroyWindow(hwnd);
             return 0;
         }
-        break;
+        return DefWindowProcW(hwnd, message, wparam, lparam);
     case WM_SIZE:
         update_tool_rect();
         return 0;
@@ -775,7 +940,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0);
     hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, APP_CLASS_NAME, L"Codex Monitor",
         WS_POPUP, work_area.right - MIN_PANEL_WIDTH - 24, work_area.top + 80,
-        MIN_PANEL_WIDTH, PANEL_HEIGHT, NULL, NULL, instance, NULL);
+        MIN_PANEL_WIDTH, MIN_PANEL_HEIGHT, NULL, NULL, instance, NULL);
     if (hwnd == NULL) {
         return 1;
     }

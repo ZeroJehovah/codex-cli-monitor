@@ -125,8 +125,9 @@ PYTHONPATH=src python3 -m codex_cli_monitor --codex-home ~/.codex
 ## Windows 悬浮窗
 
 Windows 前端在 `windows/CodexMonitorWidget`。它是一个轻量原生 Win32 小型矩形
-桌面悬浮窗，会轮询 `/api/sessions`，并按 Codex 进程数量动态调整宽度。它不依赖
-.NET Runtime 或 Electron。
+桌面悬浮窗，会轮询 `/api/sessions`，并按目录分组显示无表头表格：每行第一列是
+目录名，第二列是该目录下一个或多个 Codex 进程状态圆点。它不依赖 .NET Runtime
+或 Electron。
 
 圆点颜色：
 
@@ -135,8 +136,9 @@ Windows 前端在 `windows/CodexMonitorWidget`。它是一个轻量原生 Win32 
 - 绿色：`成功`
 - 红色：`失败`
 
-悬浮窗始终置顶，可以拖动位置。鼠标移到圆点上会显示 PID、状态、目录和启动时间。
-右键点击悬浮窗会打开菜单，可以选择退出程序。
+悬浮窗始终置顶，会按目录行数和每行圆点数量动态调整大小，可以拖动位置。鼠标移到
+圆点上会显示 PID、状态、目录和启动时间。右键点击悬浮窗会打开菜单，可以选择退出
+程序。
 
 构建 Windows x64 exe：
 
