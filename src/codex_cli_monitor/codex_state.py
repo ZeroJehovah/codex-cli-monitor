@@ -28,6 +28,8 @@ FAILED_PAYLOAD_REASONS = {
 FAILED_MESSAGE_MARKERS = (
     "exceeded retry limit",
     "last status: 429",
+    "stream closed before response.completed",
+    "stream disconnected before completion",
     "too many requests",
 )
 TERMINAL_PAYLOAD_TYPES = {
@@ -360,6 +362,10 @@ def _message_text_has_terminal_error(text: str) -> bool:
             normalized.startswith("error:")
             or normalized.startswith("exceeded retry limit")
         ) and any(marker in normalized for marker in FAILED_MESSAGE_MARKERS):
+            return True
+        if normalized.startswith("stream disconnected before completion") and any(
+            marker in normalized for marker in FAILED_MESSAGE_MARKERS
+        ):
             return True
     return False
 
