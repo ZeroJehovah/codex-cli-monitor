@@ -38,6 +38,29 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].display_status, "运行中")
         self.assertEqual(sessions[0].descendants[0].pid, 101)
 
+    def test_stopped_codex_root_is_not_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "T", 1, ["codex"], "/work/a")
+
+            sessions = discover_sessions(proc, sample_window=0)
+
+        self.assertEqual(sessions, ())
+
+    def test_new_codex_run_does_not_count_stopped_same_directory_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "T", 1, ["codex"], "/work/a")
+            _write_process(proc, 200, "codex", "S", 1, ["codex"], "/work/a")
+
+            sessions = discover_sessions(proc, sample_window=0)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].root.pid, 200)
+        self.assertEqual(sessions[0].display_status, "未运行")
+
     def test_network_alone_does_not_classify_api_inflight_likely(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc = Path(tmp)

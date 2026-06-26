@@ -21,6 +21,7 @@ from .shim import default_log_path, load_launch_records
 
 
 ACTIVITY_TIMESTAMP_GRACE_SECONDS = 5.0
+INACTIVE_ROOT_STATES = {"T", "t", "Z", "X", "x"}
 
 
 def inspect_runtime(
@@ -138,12 +139,21 @@ def _with_cpu_deltas(
 
 def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, ...]:
     codex_pids = {pid for pid, process in processes.items() if is_codex_process(process)}
+    visible_codex_pids = {
+        pid
+        for pid in codex_pids
+        if not _is_inactive_root_state(processes[pid])
+    }
     roots = [
         processes[pid]
-        for pid in codex_pids
-        if processes[pid].ppid not in codex_pids
+        for pid in visible_codex_pids
+        if processes[pid].ppid not in visible_codex_pids
     ]
     return tuple(sorted(roots, key=lambda process: process.pid))
+
+
+def _is_inactive_root_state(process: ProcessInfo) -> bool:
+    return process.state in INACTIVE_ROOT_STATES
 
 
 def _collect_descendants(
