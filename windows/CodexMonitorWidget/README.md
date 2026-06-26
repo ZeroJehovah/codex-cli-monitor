@@ -14,7 +14,7 @@ Build from Linux/WSL with MinGW-w64:
 x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
   windows/CodexMonitorWidget/src/main.c \
   -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
-  -mwindows -municode \
+  -mwindows -municode -Wl,--subsystem,windows \
   -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32
 ```
 
