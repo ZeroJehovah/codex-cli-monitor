@@ -68,6 +68,7 @@ typedef struct AppState {
     int hovered_session;
     int dragging;
     int drag_refresh_pending;
+    int context_menu_open;
     int animation_timer_active;
     POINT drag_start;
     RECT drag_window;
@@ -811,8 +812,14 @@ static void resize_panel(void) {
     RECT rect;
     int width = panel_width();
     int height = panel_height();
+    HWND insert_after = HWND_TOPMOST;
+    UINT flags = SWP_NOACTIVATE;
     GetWindowRect(g_app.hwnd, &rect);
-    SetWindowPos(g_app.hwnd, HWND_TOPMOST, rect.left, rect.top, width, height, SWP_NOACTIVATE);
+    if (g_app.context_menu_open) {
+        insert_after = NULL;
+        flags |= SWP_NOZORDER;
+    }
+    SetWindowPos(g_app.hwnd, insert_after, rect.left, rect.top, width, height, flags);
 }
 
 static void update_tool_rect(void) {
@@ -890,21 +897,49 @@ static void init_tooltip(HWND hwnd) {
     SendMessageW(g_app.tooltip, TTM_ADDTOOLW, 0, (LPARAM)&g_app.tooltip_info);
 }
 
+static void restore_widget_topmost(HWND hwnd) {
+    if (!IsWindow(hwnd)) {
+        return;
+    }
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+}
+
 static void show_context_menu(HWND hwnd, POINT point) {
     HMENU menu = CreatePopupMenu();
     UINT command;
+    RECT exclude_rect;
+    TPMPARAMS params;
+    if (g_app.context_menu_open) {
+        return;
+    }
     if (menu == NULL) {
         return;
     }
     AppendMenuW(menu, MF_STRING, MENU_EXIT_ID, L"\x9000\x51fa");
+    GetWindowRect(hwnd, &exclude_rect);
+    ZeroMemory(&params, sizeof(params));
+    params.cbSize = sizeof(params);
+    params.rcExclude = exclude_rect;
+
+    if (g_app.tooltip != NULL) {
+        SendMessageW(g_app.tooltip, TTM_POP, 0, 0);
+    }
+    g_app.context_menu_open = 1;
+    SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     SetForegroundWindow(hwnd);
-    command = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
-        point.x, point.y, hwnd, NULL);
+    command = TrackPopupMenuEx(menu,
+        TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY | TPM_WORKAREA,
+        point.x, point.y, hwnd, &params);
     DestroyMenu(menu);
+    g_app.context_menu_open = 0;
+    PostMessageW(hwnd, WM_NULL, 0, 0);
     if (command == MENU_EXIT_ID) {
         DestroyWindow(hwnd);
+        return;
     }
-    PostMessageW(hwnd, WM_NULL, 0, 0);
+    restore_widget_topmost(hwnd);
 }
 
 static int blend_component(int foreground, int background, int alpha) {
