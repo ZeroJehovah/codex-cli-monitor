@@ -1,9 +1,10 @@
 # codex-cli-monitor
 
 `codex-cli-monitor` is a low-intrusion sidecar monitor for local Codex CLI
-sessions on Linux and WSL-style hosts. It observes process facts from `/proc`
-and reports inferred session states with confidence and evidence instead of
-claiming internal Codex knowledge.
+sessions on Linux and WSL-style hosts. It observes process facts from `/proc`,
+reads Codex local state metadata from `$CODEX_HOME`, and reports inferred
+session states with confidence and evidence instead of claiming internal Codex
+knowledge.
 
 ## Usage
 
@@ -22,6 +23,9 @@ PYTHONPATH=src python3 -m codex_cli_monitor --json
 The default scan samples process CPU time over a short window. Use
 `--sample-window 0` for a single read-only snapshot, or `--watch 2` to refresh
 every two seconds.
+
+The local state scan reads file metadata only: relative path, size, mtime, and a
+coarse file kind. It does not parse session JSONL message contents.
 
 ## Optional same-name shim
 

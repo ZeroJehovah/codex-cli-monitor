@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from .monitor import discover_sessions
+from .monitor import inspect_runtime
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -15,19 +15,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     while True:
-        sessions = discover_sessions(
+        sessions, codex_state = inspect_runtime(
             proc_root=args.proc_root,
             sample_window=args.sample_window,
             shim_log=args.shim_log,
+            codex_home=args.codex_home,
         )
         if args.json:
             payload = {
                 "session_count": len(sessions),
                 "sessions": [session.to_dict() for session in sessions],
+                "codex_state": codex_state.to_dict(),
             }
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
-            _print_table(sessions)
+            _print_table(sessions, codex_state)
 
         if args.watch is None:
             return 0
@@ -63,6 +65,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="path to shim launch JSONL metadata",
     )
     parser.add_argument(
+        "--codex-home",
+        type=Path,
+        default=None,
+        help="Codex home directory to scan for local state metadata",
+    )
+    parser.add_argument(
         "--watch",
         type=_positive_float,
         default=None,
@@ -86,7 +94,8 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
-def _print_table(sessions: tuple) -> None:
+def _print_table(sessions: tuple, codex_state) -> None:
+    _print_codex_state(codex_state)
     if not sessions:
         print("No open Codex CLI sessions found.")
         return
@@ -118,12 +127,35 @@ def _print_table(sessions: tuple) -> None:
         print(" ".join(row[header].ljust(widths[header]) for header in headers))
 
 
+def _print_codex_state(codex_state) -> None:
+    session_files = [
+        state_file
+        for state_file in codex_state.newest_files
+        if state_file.kind == "session_jsonl"
+    ]
+    if session_files:
+        newest = session_files[0]
+        print(
+            "Codex state: "
+            f"{codex_state.codex_home} latest session metadata "
+            f"{newest.relative_path} modified {_format_age(newest.modified_at)} ago"
+        )
+    elif codex_state.scan_errors:
+        print(f"Codex state: unavailable ({codex_state.scan_errors[0]})")
+    else:
+        print(f"Codex state: {codex_state.codex_home} no session metadata found")
+
+
 def _first_evidence(session) -> str:
     if session.inference.evidence:
         return session.inference.evidence[0].detail
     if session.root.cmdline:
         return shlex.join(session.root.cmdline)
     return session.root.command_name
+
+
+def _format_age(timestamp: float) -> str:
+    return _format_duration(max(0, time.time() - timestamp))
 
 
 def _format_duration(value: float | None) -> str:

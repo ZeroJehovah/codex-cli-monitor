@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_cli_monitor.monitor import discover_sessions
+from codex_cli_monitor.monitor import discover_sessions, inspect_runtime
 
 
 class MonitorTests(unittest.TestCase):
@@ -55,6 +55,29 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].inference.status, "api_inflight_likely")
         self.assertLess(sessions[0].inference.confidence, 0.7)
+
+    def test_inspect_runtime_returns_sessions_and_state_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text("{}\n", encoding="utf-8")
+
+            sessions, state_summary = inspect_runtime(
+                proc,
+                sample_window=0,
+                codex_home=home,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(state_summary.codex_home, str(home))
+        self.assertEqual(state_summary.newest_files[0].kind, "session_jsonl")
 
 
 def _write_common_proc(proc: Path) -> None:

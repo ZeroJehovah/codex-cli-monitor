@@ -48,6 +48,36 @@ class NetworkConnection:
 
 
 @dataclass(frozen=True)
+class StateFile:
+    relative_path: str
+    size_bytes: int
+    modified_at: float
+    kind: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "relative_path": self.relative_path,
+            "size_bytes": self.size_bytes,
+            "modified_at": self.modified_at,
+            "kind": self.kind,
+        }
+
+
+@dataclass(frozen=True)
+class CodexStateSummary:
+    codex_home: str
+    newest_files: tuple[StateFile, ...]
+    scan_errors: tuple[str, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "codex_home": self.codex_home,
+            "newest_files": [state_file.to_dict() for state_file in self.newest_files],
+            "scan_errors": list(self.scan_errors),
+        }
+
+
+@dataclass(frozen=True)
 class ProcessInfo:
     pid: int
     ppid: int | None
