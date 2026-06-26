@@ -25,5 +25,7 @@ The floating panel is a headerless table grouped by directory. Each row shows
 the directory name in the first column and one or more process status dots in
 the second column. The table width is calculated from the visible directory
 names and status dots instead of reserving a large fixed directory column.
+Running sessions are shown with a breathing blue dot; other status dots remain
+static.
 
 Right-click the floating widget and choose Exit to close it.

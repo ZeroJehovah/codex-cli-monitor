@@ -12,7 +12,10 @@
 #define APP_CLASS_NAME L"CodexMonitorWidget"
 #define DEFAULT_API_URL L"http://localhost:8765/api/sessions"
 #define REFRESH_TIMER_ID 1
+#define ANIMATION_TIMER_ID 2
 #define REFRESH_INTERVAL_MS 1500
+#define ANIMATION_INTERVAL_MS 80
+#define RUNNING_PULSE_PERIOD_MS 1600
 #define WM_FETCH_DONE (WM_APP + 1)
 #define MENU_EXIT_ID 1001
 #define MAX_SESSIONS 128
@@ -61,6 +64,7 @@ typedef struct AppState {
     int hovered_session;
     int dragging;
     int drag_refresh_pending;
+    int animation_timer_active;
     POINT drag_start;
     RECT drag_window;
     LONG fetching;
@@ -272,12 +276,26 @@ static void rebuild_directory_rows(void) {
     update_directory_column_width();
 }
 
+static int is_running_status(const char *status) {
+    return strcmp(status, STATUS_RUNNING) == 0;
+}
+
+static int has_running_sessions(void) {
+    int index;
+    for (index = 0; index < g_app.session_count; index++) {
+        if (is_running_status(g_app.sessions[index].status)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static COLORREF status_color(const char *status) {
-    if (strcmp(status, STATUS_RUNNING) == 0) {
-        return RGB(47, 128, 237);
+    if (is_running_status(status)) {
+        return RGB(37, 99, 235);
     }
     if (strcmp(status, STATUS_SUCCESS) == 0) {
-        return RGB(39, 174, 96);
+        return RGB(132, 204, 22);
     }
     if (strcmp(status, STATUS_FAILED) == 0) {
         return RGB(235, 87, 87);
@@ -286,6 +304,15 @@ static COLORREF status_color(const char *status) {
         return RGB(139, 143, 152);
     }
     return RGB(139, 143, 152);
+}
+
+static int running_pulse_level(void) {
+    DWORD elapsed = GetTickCount() % RUNNING_PULSE_PERIOD_MS;
+    DWORD half_period = RUNNING_PULSE_PERIOD_MS / 2;
+    if (elapsed > half_period) {
+        elapsed = RUNNING_PULSE_PERIOD_MS - elapsed;
+    }
+    return (int)(elapsed * 100 / half_period);
 }
 
 static const char *skip_space(const char *p, const char *end) {
@@ -644,9 +671,22 @@ static void update_tool_rect(void) {
     SendMessageW(g_app.tooltip, TTM_NEWTOOLRECTW, 0, (LPARAM)&g_app.tooltip_info);
 }
 
+static void update_animation_timer(void) {
+    if (has_running_sessions()) {
+        if (!g_app.animation_timer_active) {
+            SetTimer(g_app.hwnd, ANIMATION_TIMER_ID, ANIMATION_INTERVAL_MS, NULL);
+            g_app.animation_timer_active = 1;
+        }
+    } else if (g_app.animation_timer_active) {
+        KillTimer(g_app.hwnd, ANIMATION_TIMER_ID);
+        g_app.animation_timer_active = 0;
+    }
+}
+
 static void refresh_widget_view(void) {
     resize_panel();
     update_tool_rect();
+    update_animation_timer();
     InvalidateRect(g_app.hwnd, NULL, FALSE);
     set_tooltip_for_hover(g_app.hovered_session);
 }
@@ -716,6 +756,35 @@ static void show_context_menu(HWND hwnd, POINT point) {
     PostMessageW(hwnd, WM_NULL, 0, 0);
 }
 
+static void fill_dot(HDC hdc, const RECT *rect, COLORREF color) {
+    HBRUSH brush = CreateSolidBrush(color);
+    HGDIOBJ old_brush = SelectObject(hdc, brush);
+    HPEN pen = CreatePen(PS_SOLID, 1, color);
+    HGDIOBJ old_pen = SelectObject(hdc, pen);
+    Ellipse(hdc, rect->left, rect->top, rect->right, rect->bottom);
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
+static void draw_status_dot(HDC hdc, const RECT *rect, const char *status) {
+    if (is_running_status(status)) {
+        int pulse = running_pulse_level();
+        int expand = 2 + pulse / 50;
+        RECT halo = *rect;
+        RECT core = *rect;
+        COLORREF halo_color = RGB(22 + pulse * 10 / 100, 50 + pulse * 35 / 100, 120 + pulse * 65 / 100);
+        COLORREF core_color = RGB(37 + pulse * 38 / 100, 99 + pulse * 56 / 100, 235 + pulse * 20 / 100);
+        InflateRect(&halo, expand, expand);
+        InflateRect(&core, -(1 - pulse / 100), -(1 - pulse / 100));
+        fill_dot(hdc, &halo, halo_color);
+        fill_dot(hdc, &core, core_color);
+        return;
+    }
+    fill_dot(hdc, rect, status_color(status));
+}
+
 static void paint_widget(HWND hwnd, HDC hdc) {
     RECT client;
     HBRUSH background;
@@ -780,16 +849,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         for (dot = 0; dot < g_app.rows[row].session_count; dot++) {
             int session_index = g_app.rows[row].session_indexes[dot];
             RECT rect = dot_rect(row, dot);
-            COLORREF color = status_color(g_app.sessions[session_index].status);
-            HBRUSH brush = CreateSolidBrush(color);
-            HGDIOBJ old_brush = SelectObject(hdc, brush);
-            HPEN pen = CreatePen(PS_SOLID, 1, color);
-            HGDIOBJ old_dot_pen = SelectObject(hdc, pen);
-            Ellipse(hdc, rect.left, rect.top, rect.right, rect.bottom);
-            SelectObject(hdc, old_dot_pen);
-            SelectObject(hdc, old_brush);
-            DeleteObject(pen);
-            DeleteObject(brush);
+            draw_status_dot(hdc, &rect, g_app.sessions[session_index].status);
         }
     }
     SelectObject(hdc, old_font);
@@ -807,6 +867,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     case WM_TIMER:
         if (wparam == REFRESH_TIMER_ID) {
             start_fetch();
+        } else if (wparam == ANIMATION_TIMER_ID) {
+            InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
     case WM_FETCH_DONE: {
@@ -923,6 +985,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return 0;
     case WM_DESTROY:
         KillTimer(hwnd, REFRESH_TIMER_ID);
+        KillTimer(hwnd, ANIMATION_TIMER_ID);
         PostQuitMessage(0);
         return 0;
     default:
