@@ -25,6 +25,11 @@ FAILED_PAYLOAD_REASONS = {
     "failed",
     "interrupted",
 }
+FAILED_MESSAGE_MARKERS = (
+    "exceeded retry limit",
+    "last status: 429",
+    "too many requests",
+)
 TERMINAL_PAYLOAD_TYPES = {
     "task_complete",
     "thread_rolled_back",
@@ -167,9 +172,10 @@ def _session_activity(
     except ValueError:
         relative_path = path.as_posix()
 
+    records = _iter_jsonl_records(path, head_limit=8, tail_limit=24)
     first_record = None
     last_record = None
-    for record in _iter_jsonl_records(path, head_limit=8, tail_limit=24):
+    for record in records:
         if first_record is None:
             first_record = record
         last_record = record
@@ -181,11 +187,8 @@ def _session_activity(
     last_payload_type = _optional_str(last_payload.get("type"))
     last_record_type = _optional_str(last_record.get("type")) if isinstance(last_record, dict) else None
     last_payload_reason = _optional_str(last_payload.get("reason"))
-    failed_event = _is_failed_event(
-        last_record_type,
-        last_payload_type,
-        last_payload_reason,
-    )
+    recent_turn_records = _records_since_latest_user(records)
+    failed_event = any(_record_is_failed_event(record) for record in recent_turn_records)
 
     return SessionActivity(
         relative_path=relative_path,
@@ -281,6 +284,84 @@ def _is_failed_event(
         or payload_type in FAILED_PAYLOAD_TYPES
         or reason in FAILED_PAYLOAD_REASONS
     )
+
+
+def _records_since_latest_user(records: tuple[dict, ...]) -> tuple[dict, ...]:
+    latest_user_index = None
+    for index, record in enumerate(records):
+        if _is_user_message_record(record):
+            latest_user_index = index
+    if latest_user_index is None:
+        return records
+    return records[latest_user_index:]
+
+
+def _record_is_failed_event(record: dict) -> bool:
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    record_type = _optional_str(record.get("type"))
+    payload_type = _optional_str(payload.get("type"))
+    payload_reason = _optional_str(payload.get("reason"))
+    return _is_failed_event(
+        record_type,
+        payload_type,
+        payload_reason,
+    ) or _is_failed_message_record(record_type, payload)
+
+
+def _is_user_message_record(record: dict) -> bool:
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    record_type = _optional_str(record.get("type"))
+    payload_type = _optional_str(payload.get("type"))
+    payload_role = _optional_str(payload.get("role"))
+    return (
+        record_type == "event_msg"
+        and payload_type == "user_message"
+    ) or (
+        record_type == "response_item"
+        and payload_type == "message"
+        and payload_role == "user"
+    )
+
+
+def _is_failed_message_record(record_type: str | None, payload: dict) -> bool:
+    payload_type = _optional_str(payload.get("type"))
+    payload_role = _optional_str(payload.get("role"))
+    if record_type == "event_msg" and payload_type == "agent_message":
+        text = _optional_str(payload.get("message")) or ""
+    elif (
+        record_type == "response_item"
+        and payload_type == "message"
+        and payload_role == "assistant"
+    ):
+        text = _message_content_text(payload.get("content"))
+    else:
+        return False
+    return _message_text_has_terminal_error(text)
+
+
+def _message_content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "\n".join(parts)
+    return ""
+
+
+def _message_text_has_terminal_error(text: str) -> bool:
+    for line in text.splitlines():
+        normalized = line.strip().lstrip("■ ").lower()
+        if (
+            normalized.startswith("error:")
+            or normalized.startswith("exceeded retry limit")
+        ) and any(marker in normalized for marker in FAILED_MESSAGE_MARKERS):
+            return True
+    return False
 
 
 def _mtime_or_zero(path: Path) -> float:

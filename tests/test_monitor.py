@@ -217,6 +217,36 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].display_status, "失败")
         self.assertTrue(sessions[0].state_activity.failed_event)
 
+    def test_hook_stop_with_retry_limit_message_marks_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _write_session(
+                home,
+                "/work/a",
+                '{"type":"event_msg","payload":{"type":"agent_message","message":"■ exceeded retry limit, last status: 429 Too Many Requests"}}\n'
+                '{"type":"event_msg","payload":{"type":"task_complete"}}',
+            )
+            append_hook_event("user_prompt_submit", cwd="/work/a", ppid=100, path=hook_log)
+            append_hook_event("stop", cwd="/work/a", ppid=100, path=hook_log)
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "失败")
+        self.assertTrue(sessions[0].state_activity.failed_event)
+
     def test_failed_session_event_overrides_open_hook_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
