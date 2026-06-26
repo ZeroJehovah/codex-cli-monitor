@@ -137,20 +137,39 @@ static const char *skip_space(const char *p, const char *end) {
     return p;
 }
 
-static const char *find_key(const char *start, const char *end, const char *key) {
+static const char *find_top_level_key(const char *start, const char *end, const char *key) {
     size_t key_len = strlen(key);
     const char *p = start;
+    int depth = 0;
+    int in_string = 0;
+    int escape = 0;
     while (p < end) {
-        p = (const char *)memchr(p, '"', (size_t)(end - p));
-        if (p == NULL || p + key_len + 2 >= end) {
-            return NULL;
-        }
-        if (memcmp(p + 1, key, key_len) == 0 && p[key_len + 1] == '"') {
-            const char *colon = p + key_len + 2;
-            colon = skip_space(colon, end);
-            if (colon < end && *colon == ':') {
-                return skip_space(colon + 1, end);
+        char c = *p;
+        if (in_string) {
+            if (escape) {
+                escape = 0;
+            } else if (c == '\\') {
+                escape = 1;
+            } else if (c == '"') {
+                in_string = 0;
             }
+            p++;
+            continue;
+        }
+        if (c == '"') {
+            if (depth == 1 && p + key_len + 2 < end &&
+                memcmp(p + 1, key, key_len) == 0 && p[key_len + 1] == '"') {
+                const char *colon = p + key_len + 2;
+                colon = skip_space(colon, end);
+                if (colon < end && *colon == ':') {
+                    return skip_space(colon + 1, end);
+                }
+            }
+            in_string = 1;
+        } else if (c == '{' || c == '[') {
+            depth++;
+        } else if (c == '}' || c == ']') {
+            depth--;
         }
         p++;
     }
@@ -241,10 +260,10 @@ static const char *matching_brace(const char *start, const char *end) {
 
 static void parse_session_object(const char *start, const char *end, Session *session) {
     memset(session, 0, sizeof(*session));
-    session->pid = parse_json_int(find_key(start, end, "pid"), end);
-    parse_json_string(find_key(start, end, "status"), end, session->status, sizeof(session->status));
-    parse_json_string(find_key(start, end, "directory"), end, session->directory, sizeof(session->directory));
-    parse_json_string(find_key(start, end, "started_at_iso"), end, session->started_at_iso, sizeof(session->started_at_iso));
+    session->pid = parse_json_int(find_top_level_key(start, end, "pid"), end);
+    parse_json_string(find_top_level_key(start, end, "status"), end, session->status, sizeof(session->status));
+    parse_json_string(find_top_level_key(start, end, "directory"), end, session->directory, sizeof(session->directory));
+    parse_json_string(find_top_level_key(start, end, "started_at_iso"), end, session->started_at_iso, sizeof(session->started_at_iso));
 }
 
 static void parse_sessions_json(const char *json, FetchResult *result) {
@@ -286,7 +305,12 @@ static void parse_sessions_json(const char *json, FetchResult *result) {
 }
 
 static int append_bytes(char **buffer, DWORD *length, DWORD chunk_size) {
-    char *new_buffer = (char *)HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, *buffer, *length + chunk_size + 1);
+    char *new_buffer;
+    if (*buffer == NULL) {
+        new_buffer = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, *length + chunk_size + 1);
+    } else {
+        new_buffer = (char *)HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, *buffer, *length + chunk_size + 1);
+    }
     if (new_buffer == NULL) {
         return 0;
     }
