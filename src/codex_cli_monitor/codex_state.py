@@ -359,15 +359,16 @@ def _is_failed_message_record(record_type: str | None, payload: dict) -> bool:
     payload_role = _optional_str(payload.get("role"))
     if record_type == "event_msg" and payload_type == "agent_message":
         text = _optional_str(payload.get("message")) or ""
+        return _message_text_has_terminal_error(text, require_red_ansi=False)
     elif (
         record_type == "response_item"
         and payload_type == "message"
         and payload_role == "assistant"
     ):
         text = _message_content_text(payload.get("content"))
+        return _message_text_has_terminal_error(text, require_red_ansi=True)
     else:
         return False
-    return _message_text_has_terminal_error(text)
 
 
 def _message_content_text(content: object) -> str:
@@ -382,9 +383,12 @@ def _message_content_text(content: object) -> str:
     return ""
 
 
-def _message_text_has_terminal_error(text: str) -> bool:
+def _message_text_has_terminal_error(text: str, *, require_red_ansi: bool) -> bool:
     for line in text.splitlines():
         has_error_marker = _line_has_terminal_error_marker(line)
+        has_red_ansi = _line_has_red_ansi(line)
+        if require_red_ansi and not has_red_ansi:
+            continue
         normalized = _normalize_terminal_message_line(line)
         if not normalized:
             continue
@@ -401,7 +405,11 @@ def _message_text_has_terminal_error(text: str) -> bool:
 
 def _line_has_terminal_error_marker(line: str) -> bool:
     stripped = line.lstrip()
-    return stripped.startswith("■") or "\x1b[31" in line or "\x1b[91" in line
+    return stripped.startswith("■") or _line_has_red_ansi(line)
+
+
+def _line_has_red_ansi(line: str) -> bool:
+    return "\x1b[31" in line or "\x1b[91" in line
 
 
 def _normalize_terminal_message_line(line: str) -> str:
