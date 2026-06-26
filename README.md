@@ -136,6 +136,7 @@ Windows 前端在 `windows/CodexMonitorWidget`。它是一个轻量原生 Win32 
 - 红色：`失败`
 
 悬浮窗始终置顶，可以拖动位置。鼠标移到圆点上会显示 PID、状态、目录和启动时间。
+右键点击悬浮窗会打开菜单，可以选择退出程序。
 
 构建 Windows x64 exe：
 
