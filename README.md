@@ -137,8 +137,9 @@ Runtime 或 Electron。
 - 红色：`失败`
 
 悬浮窗始终置顶，会按目录名宽度、目录行数和每行圆点数量动态调整大小，不为目录名
-预留固定大宽度，可以拖动位置。鼠标移到圆点上会显示 PID、状态、目录和启动时间。
-右键点击悬浮窗会打开菜单，可以选择退出程序。
+预留固定大宽度，可以拖动位置并在下次启动时恢复位置。悬浮窗会保持在屏幕工作区内；
+如果动态变宽或变高导致越界，会自动贴到对应边缘。鼠标移到圆点上会显示 PID、状态、
+目录和启动时间。右键点击悬浮窗会打开菜单，可以调整显示大小或退出程序。
 
 构建 Windows x64 exe：
 
@@ -147,7 +148,7 @@ x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
   windows/CodexMonitorWidget/src/main.c \
   -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
   -mwindows -municode -Wl,--subsystem,windows \
-  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32
+  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32
 ```
 
 运行生成的 `CodexMonitorWidget.exe` 即可。默认连接

@@ -15,7 +15,7 @@ x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
   windows/CodexMonitorWidget/src/main.c \
   -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
   -mwindows -municode -Wl,--subsystem,windows \
-  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32
+  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32
 ```
 
 The widget polls `http://localhost:8765/api/sessions` by default. To use another
@@ -26,6 +26,9 @@ the directory name in the first column and one or more antialiased process
 status dots in the second column. The table width is calculated from the
 visible directory names and status dots instead of reserving a large fixed
 directory column. Running sessions are shown with a breathing blue dot; other
-status dots remain static.
+status dots remain static. The widget saves its last position and display size,
+restores them on launch, and keeps dynamic size changes inside the visible work
+area by anchoring to the touched edge.
 
-Right-click the floating widget and choose Exit to close it.
+Right-click the floating widget to change display size or choose Exit to close
+it.
