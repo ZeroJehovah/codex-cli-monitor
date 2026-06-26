@@ -242,9 +242,9 @@ def _display_status(
         if hook_state.last_event == "session_start":
             return "未运行"
         if _activity_is_current_for_hook(state_activity, hook_state):
-            if state_activity is not None and state_activity.failed_event:
-                return "失败"
             if state_activity is not None and state_activity.terminal_event:
+                if state_activity.failed_event:
+                    return "失败"
                 return "成功"
         if hook_state.in_turn or hook_state.active_tool_count > 0:
             return "运行中"
