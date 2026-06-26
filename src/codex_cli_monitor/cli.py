@@ -96,6 +96,7 @@ def _positive_float(value: str) -> float:
 
 def _print_table(sessions: tuple, codex_state) -> None:
     _print_codex_state(codex_state)
+    print(f"Open Codex sessions: {len(sessions)}")
     if not sessions:
         print("No open Codex CLI sessions found.")
         return

@@ -46,6 +46,32 @@ class CliTests(unittest.TestCase):
             "session_jsonl",
         )
 
+    def test_text_output_includes_explicit_session_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            proc.mkdir()
+            home.mkdir()
+            (proc / "uptime").write_text("200.00 0.00\n", encoding="utf-8")
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                result = main(
+                    [
+                        "--sample-window",
+                        "0",
+                        "--proc-root",
+                        str(proc),
+                        "--codex-home",
+                        str(home),
+                    ]
+                )
+
+        text = stdout.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("Open Codex sessions: 0", text)
+
 
 if __name__ == "__main__":
     unittest.main()
