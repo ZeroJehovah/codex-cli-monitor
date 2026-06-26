@@ -6,9 +6,22 @@ from pathlib import Path
 from typing import Callable
 
 from .classify import infer_status, is_codex_process
-from .models import CodexSession, NetworkConnection, ProcessInfo
+from .codex_state import scan_codex_state
+from .models import CodexSession, CodexStateSummary, NetworkConnection, ProcessInfo
 from .procfs import read_network_connections, read_processes
 from .shim import default_log_path, load_launch_records
+
+
+def inspect_runtime(
+    proc_root: Path = Path("/proc"),
+    sample_window: float = 0.25,
+    shim_log: Path | None = None,
+    codex_home: Path | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[tuple[CodexSession, ...], CodexStateSummary]:
+    sessions = discover_sessions(proc_root, sample_window, shim_log, sleep)
+    state_summary = scan_codex_state(codex_home)
+    return sessions, state_summary
 
 
 def discover_sessions(
