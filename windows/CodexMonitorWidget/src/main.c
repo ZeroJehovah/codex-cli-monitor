@@ -339,27 +339,6 @@ static int ui_font_height(void) {
     return height;
 }
 
-static int ui_reference_glyph_height(void) {
-    HDC hdc;
-    HGDIOBJ old_font;
-    GlyphVerticalMetrics metrics;
-    int height = scale_px(8);
-    hdc = GetDC(g_app.hwnd != NULL ? g_app.hwnd : NULL);
-    if (hdc == NULL) {
-        return height;
-    }
-    old_font = SelectObject(hdc, widget_font());
-    if (glyph_vertical_metrics(hdc, &metrics) && metrics.black_box_y > 0) {
-        height = metrics.black_box_y;
-    }
-    SelectObject(hdc, old_font);
-    ReleaseDC(g_app.hwnd != NULL ? g_app.hwnd : NULL, hdc);
-    if (height < 1) {
-        return 1;
-    }
-    return height;
-}
-
 static int ui_row_height(void) {
     int height = scale_px(ROW_HEIGHT);
     int content_margin = ui_dot_effect_padding();
@@ -382,14 +361,6 @@ static int ui_row_top(int row_index) {
     return ui_panel_padding_y() + row_index * ui_row_height();
 }
 
-static int ui_directory_left_margin(void) {
-    int margin = ui_panel_padding_y() + (ui_row_height() - ui_reference_glyph_height()) / 2;
-    if (margin < 1) {
-        return 1;
-    }
-    return margin;
-}
-
 static int ui_dot_right_margin(void) {
     int margin = ui_panel_padding_y() + (ui_row_height() - ui_dot_size()) / 2;
     if (margin < 1) {
@@ -398,8 +369,12 @@ static int ui_dot_right_margin(void) {
     return margin;
 }
 
+static int ui_directory_left_margin(void) {
+    return ui_dot_right_margin();
+}
+
 static int ui_text_dot_gap(void) {
-    return ui_directory_left_margin() + ui_dot_right_margin();
+    return ui_dot_right_margin();
 }
 
 static int row_dot_width(int count) {
