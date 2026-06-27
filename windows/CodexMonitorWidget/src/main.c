@@ -14,7 +14,8 @@
 #define DEFAULT_API_URL L"http://localhost:8765/api/sessions"
 #define REFRESH_TIMER_ID 1
 #define ANIMATION_TIMER_ID 2
-#define REFRESH_INTERVAL_MS 1500
+#define REFRESH_INTERVAL_MS 500
+#define EMPTY_RESULT_CONFIRMATIONS 1
 #define ANIMATION_INTERVAL_MS 16
 #define RUNNING_PULSE_PERIOD_MS 1600
 #define WM_FETCH_DONE (WM_APP + 1)
@@ -1599,7 +1600,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
                     g_app.empty_success_count = 0;
                 } else {
                     g_app.empty_success_count++;
-                    if (g_app.empty_success_count >= 3) {
+                    if (g_app.empty_success_count >= EMPTY_RESULT_CONFIRMATIONS) {
                         g_app.session_count = 0;
                         rebuild_directory_rows();
                         g_app.empty_success_count = 0;
