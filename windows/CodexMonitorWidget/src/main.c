@@ -30,11 +30,7 @@
 #define RUNNING_DOT_SOFT_EDGE 1
 #define STATIC_DOT_SOFT_EDGE 2
 #define RUNNING_SHADOW_SPREAD 6
-#define PADDING_X 10
-#define PADDING_Y 1
 #define ROW_HEIGHT 26
-#define DIRECTORY_TEXT_PADDING 8
-#define COLUMN_GAP 12
 #define MIN_PANEL_WIDTH 48
 #define MIN_PANEL_HEIGHT 32
 #define DEFAULT_DISPLAY_FONT_POINTS 9
@@ -242,31 +238,6 @@ static int ui_dot_effect_padding(void) {
     return ui_running_shadow_spread();
 }
 
-static int ui_padding_x(void) {
-    return scale_px(PADDING_X);
-}
-
-static int ui_padding_y(void) {
-    return scale_px(PADDING_Y);
-}
-
-static int ui_row_height(void) {
-    int height = scale_px(ROW_HEIGHT);
-    int min_height = ui_dot_size() + ui_dot_effect_padding() * 2;
-    if (height < min_height) {
-        return min_height;
-    }
-    return height;
-}
-
-static int ui_directory_text_padding(void) {
-    return scale_px(DIRECTORY_TEXT_PADDING);
-}
-
-static int ui_column_gap(void) {
-    return scale_px(COLUMN_GAP);
-}
-
 static int ui_min_panel_width(void) {
     return scale_px(MIN_PANEL_WIDTH);
 }
@@ -310,11 +281,66 @@ static void update_display_font(void) {
     g_app.font = font;
 }
 
+static int ui_font_height(void) {
+    HDC hdc;
+    HGDIOBJ old_font;
+    TEXTMETRICW metrics;
+    int height = scale_px(15);
+    hdc = GetDC(g_app.hwnd != NULL ? g_app.hwnd : NULL);
+    if (hdc == NULL) {
+        return height;
+    }
+    old_font = SelectObject(hdc, widget_font());
+    if (GetTextMetricsW(hdc, &metrics)) {
+        height = metrics.tmHeight;
+    }
+    SelectObject(hdc, old_font);
+    ReleaseDC(g_app.hwnd != NULL ? g_app.hwnd : NULL, hdc);
+    if (height < 1) {
+        return 1;
+    }
+    return height;
+}
+
+static int ui_row_height(void) {
+    int height = scale_px(ROW_HEIGHT);
+    int content_margin = ui_dot_effect_padding();
+    int min_dot_height = ui_dot_size() + content_margin * 2;
+    int min_text_height = ui_font_height() + content_margin * 2;
+    if (height < min_dot_height) {
+        height = min_dot_height;
+    }
+    if (height < min_text_height) {
+        height = min_text_height;
+    }
+    return height;
+}
+
+static int ui_directory_left_margin(void) {
+    int margin = (ui_row_height() - ui_font_height()) / 2;
+    if (margin < 1) {
+        return 1;
+    }
+    return margin;
+}
+
+static int ui_dot_right_margin(void) {
+    int margin = (ui_row_height() - ui_dot_size()) / 2;
+    if (margin < 1) {
+        return 1;
+    }
+    return margin;
+}
+
+static int ui_text_dot_gap(void) {
+    return ui_directory_left_margin() + ui_dot_right_margin();
+}
+
 static int row_dot_width(int count) {
     if (count <= 0) {
         return 0;
     }
-    return ui_dot_effect_padding() * 2 + count * ui_dot_size() + (count - 1) * ui_dot_gap();
+    return count * ui_dot_size() + (count - 1) * ui_dot_gap();
 }
 
 static int max_row_session_count(void) {
@@ -329,7 +355,7 @@ static int max_row_session_count(void) {
 }
 
 static int dot_column_left(void) {
-    return ui_padding_x() + g_app.directory_column_width + ui_column_gap() + ui_dot_effect_padding();
+    return ui_directory_left_margin() + g_app.directory_column_width + ui_text_dot_gap();
 }
 
 static int panel_width(void) {
@@ -337,7 +363,8 @@ static int panel_width(void) {
     if (g_app.row_count <= 0) {
         return ui_min_panel_width();
     }
-    width = ui_padding_x() * 2 + g_app.directory_column_width + ui_column_gap() + row_dot_width(max_row_session_count());
+    width = ui_directory_left_margin() + g_app.directory_column_width + ui_text_dot_gap() +
+        row_dot_width(max_row_session_count()) + ui_dot_right_margin();
     if (width < ui_min_panel_width()) {
         return ui_min_panel_width();
     }
@@ -349,7 +376,7 @@ static int panel_height(void) {
     if (g_app.row_count <= 0) {
         return ui_min_panel_height();
     }
-    height = ui_padding_y() * 2 + g_app.row_count * ui_row_height();
+    height = g_app.row_count * ui_row_height();
     if (height < ui_min_panel_height()) {
         return ui_min_panel_height();
     }
@@ -590,7 +617,7 @@ static RECT dot_rect(int row_index, int dot_index) {
     RECT rect;
     int dot_size = ui_dot_size();
     rect.left = dot_column_left() + dot_index * (dot_size + ui_dot_gap());
-    rect.top = ui_padding_y() + row_index * ui_row_height() + (ui_row_height() - dot_size) / 2;
+    rect.top = row_index * ui_row_height() + (ui_row_height() - dot_size) / 2;
     rect.right = rect.left + dot_size;
     rect.bottom = rect.top + dot_size;
     return rect;
@@ -638,7 +665,7 @@ static void update_directory_column_width(void) {
     }
     SelectObject(hdc, old_font);
     ReleaseDC(g_app.hwnd, hdc);
-    g_app.directory_column_width = max_width + ui_directory_text_padding();
+    g_app.directory_column_width = max_width;
 }
 
 static int compare_session_indexes(int left_index, int right_index) {
@@ -1666,19 +1693,13 @@ static void paint_widget(HWND hwnd, HDC hdc) {
     HBRUSH background;
     HBRUSH row_background;
     HPEN border;
-    HGDIOBJ old_pen;
     HGDIOBJ old_font;
+    HGDIOBJ old_pen;
     int row;
     GetClientRect(hwnd, &client);
     background = CreateSolidBrush(RGB(34, 34, 34));
     FillRect(hdc, &client, background);
     DeleteObject(background);
-    border = CreatePen(PS_SOLID, 1, RGB(86, 86, 86));
-    old_pen = SelectObject(hdc, border);
-    SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    Rectangle(hdc, client.left, client.top, client.right, client.bottom);
-    SelectObject(hdc, old_pen);
-    DeleteObject(border);
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(225, 225, 225));
     old_font = SelectObject(hdc, widget_font());
@@ -1689,9 +1710,9 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         wchar_t display_name_wide[512];
         int dot;
         COLORREF row_color = RGB(34, 34, 34);
-        row_rect.left = 1;
-        row_rect.top = ui_padding_y() + row * ui_row_height();
-        row_rect.right = client.right - 1;
+        row_rect.left = 0;
+        row_rect.top = row * ui_row_height();
+        row_rect.right = client.right;
         row_rect.bottom = row_rect.top + ui_row_height();
         if (row % 2 == 1) {
             row_color = RGB(39, 39, 39);
@@ -1701,12 +1722,12 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         }
         directory_display_name(g_app.rows[row].directory, display_name, sizeof(display_name));
         utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
-        text_rect.left = ui_padding_x();
+        text_rect.left = ui_directory_left_margin();
         text_rect.top = row_rect.top;
-        text_rect.right = ui_padding_x() + g_app.directory_column_width;
+        text_rect.right = text_rect.left + g_app.directory_column_width;
         text_rect.bottom = row_rect.bottom;
         DrawTextW(hdc, display_name_wide, -1, &text_rect,
-            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+            DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS | DT_NOPREFIX);
         for (dot = 0; dot < g_app.rows[row].session_count; dot++) {
             int session_index = g_app.rows[row].session_indexes[dot];
             RECT rect = dot_rect(row, dot);
@@ -1714,6 +1735,12 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         }
     }
     SelectObject(hdc, old_font);
+    border = CreatePen(PS_SOLID, 1, RGB(86, 86, 86));
+    old_pen = SelectObject(hdc, border);
+    SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, client.left, client.top, client.right, client.bottom);
+    SelectObject(hdc, old_pen);
+    DeleteObject(border);
 }
 
 static void paint_widget_buffered(HWND hwnd, HDC target_hdc) {
