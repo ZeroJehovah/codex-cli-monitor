@@ -31,6 +31,7 @@
 #define STATIC_DOT_SOFT_EDGE 2
 #define RUNNING_SHADOW_SPREAD 6
 #define ROW_HEIGHT 26
+#define PANEL_PADDING_Y 1
 #define MIN_PANEL_WIDTH 48
 #define MIN_PANEL_HEIGHT 32
 #define DEFAULT_DISPLAY_FONT_POINTS 9
@@ -316,8 +317,16 @@ static int ui_row_height(void) {
     return height;
 }
 
+static int ui_panel_padding_y(void) {
+    return scale_px(PANEL_PADDING_Y);
+}
+
+static int ui_row_top(int row_index) {
+    return ui_panel_padding_y() + row_index * ui_row_height();
+}
+
 static int ui_directory_left_margin(void) {
-    int margin = (ui_row_height() - ui_font_height()) / 2;
+    int margin = ui_panel_padding_y() + (ui_row_height() - ui_font_height()) / 2;
     if (margin < 1) {
         return 1;
     }
@@ -325,7 +334,7 @@ static int ui_directory_left_margin(void) {
 }
 
 static int ui_dot_right_margin(void) {
-    int margin = (ui_row_height() - ui_dot_size()) / 2;
+    int margin = ui_panel_padding_y() + (ui_row_height() - ui_dot_size()) / 2;
     if (margin < 1) {
         return 1;
     }
@@ -376,7 +385,7 @@ static int panel_height(void) {
     if (g_app.row_count <= 0) {
         return ui_min_panel_height();
     }
-    height = g_app.row_count * ui_row_height();
+    height = ui_panel_padding_y() * 2 + g_app.row_count * ui_row_height();
     if (height < ui_min_panel_height()) {
         return ui_min_panel_height();
     }
@@ -617,7 +626,7 @@ static RECT dot_rect(int row_index, int dot_index) {
     RECT rect;
     int dot_size = ui_dot_size();
     rect.left = dot_column_left() + dot_index * (dot_size + ui_dot_gap());
-    rect.top = row_index * ui_row_height() + (ui_row_height() - dot_size) / 2;
+    rect.top = ui_row_top(row_index) + (ui_row_height() - dot_size) / 2;
     rect.right = rect.left + dot_size;
     rect.bottom = rect.top + dot_size;
     return rect;
@@ -1711,7 +1720,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         int dot;
         COLORREF row_color = RGB(34, 34, 34);
         row_rect.left = 0;
-        row_rect.top = row * ui_row_height();
+        row_rect.top = ui_row_top(row);
         row_rect.right = client.right;
         row_rect.bottom = row_rect.top + ui_row_height();
         if (row % 2 == 1) {
