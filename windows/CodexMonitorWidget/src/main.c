@@ -86,6 +86,7 @@ typedef struct AppState {
     int placement_offset_x;
     int placement_offset_y;
     int display_font_points;
+    int display_wheel_delta;
     POINT drag_start;
     RECT drag_window;
     LONG fetching;
@@ -190,6 +191,17 @@ static int normalized_display_font_points(int points) {
         return points;
     }
     return DEFAULT_DISPLAY_FONT_POINTS;
+}
+
+static int display_size_index_for_points(int points) {
+    int index;
+    points = normalized_display_font_points(points);
+    for (index = 0; index < display_size_count(); index++) {
+        if (DISPLAY_FONT_SIZES[index] == points) {
+            return index;
+        }
+    }
+    return 0;
 }
 
 static int scale_px(int value) {
@@ -1329,6 +1341,32 @@ static void apply_display_font_points(int points) {
     save_widget_placement();
 }
 
+static void apply_display_font_wheel_delta(int delta) {
+    int current_index;
+    int target_index;
+    if (delta == 0) {
+        return;
+    }
+    g_app.display_wheel_delta += delta;
+    current_index = display_size_index_for_points(g_app.display_font_points);
+    target_index = current_index;
+    while (g_app.display_wheel_delta >= WHEEL_DELTA) {
+        if (target_index < display_size_count() - 1) {
+            target_index++;
+        }
+        g_app.display_wheel_delta -= WHEEL_DELTA;
+    }
+    while (g_app.display_wheel_delta <= -WHEEL_DELTA) {
+        if (target_index > 0) {
+            target_index--;
+        }
+        g_app.display_wheel_delta += WHEEL_DELTA;
+    }
+    if (target_index != current_index) {
+        apply_display_font_points(DISPLAY_FONT_SIZES[target_index]);
+    }
+}
+
 static void open_about_page(HWND hwnd) {
     ShellExecuteW(hwnd, L"open", PROJECT_GITHUB_URL, NULL, NULL, SW_SHOWNORMAL);
 }
@@ -1680,6 +1718,9 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return DefWindowProcW(hwnd, message, wparam, lparam);
     case WM_SIZE:
         update_tool_rect();
+        return 0;
+    case WM_MOUSEWHEEL:
+        apply_display_font_wheel_delta(GET_WHEEL_DELTA_WPARAM(wparam));
         return 0;
     case WM_DESTROY:
         save_widget_placement();
