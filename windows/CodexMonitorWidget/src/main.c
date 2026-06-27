@@ -1337,8 +1337,6 @@ static void show_context_menu(HWND hwnd, POINT point) {
     HMENU menu = CreatePopupMenu();
     UINT command;
     int selected_points;
-    RECT exclude_rect;
-    TPMPARAMS params;
     if (g_app.context_menu_open) {
         return;
     }
@@ -1349,10 +1347,6 @@ static void show_context_menu(HWND hwnd, POINT point) {
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, MENU_ABOUT_ID, L"\x5173\x4e8e");
     AppendMenuW(menu, MF_STRING, MENU_EXIT_ID, L"\x9000\x51fa");
-    GetWindowRect(hwnd, &exclude_rect);
-    ZeroMemory(&params, sizeof(params));
-    params.cbSize = sizeof(params);
-    params.rcExclude = exclude_rect;
 
     if (g_app.tooltip != NULL) {
         SendMessageW(g_app.tooltip, TTM_POP, 0, 0);
@@ -1363,7 +1357,7 @@ static void show_context_menu(HWND hwnd, POINT point) {
     SetForegroundWindow(hwnd);
     command = TrackPopupMenuEx(menu,
         TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY | TPM_WORKAREA,
-        point.x, point.y, hwnd, &params);
+        point.x, point.y, hwnd, NULL);
     DestroyMenu(menu);
     g_app.context_menu_open = 0;
     PostMessageW(hwnd, WM_NULL, 0, 0);
