@@ -26,7 +26,7 @@
 #define DOT_SIZE 14
 #define DOT_GAP 8
 #define DOT_EDGE_SAMPLES 4
-#define DOT_SOFT_EDGE 3
+#define DOT_SOFT_EDGE 1
 #define RUNNING_SHADOW_SPREAD 6
 #define PADDING_X 10
 #define PADDING_Y 1
@@ -1491,7 +1491,7 @@ static void fill_soft_dot(
     if (max_alpha <= 0) {
         return;
     }
-    edge_blur = clamp_int(edge_blur, 1, diameter);
+    edge_blur = clamp_int(edge_blur, 0, diameter);
     center_x = rect->left + width / 2.0;
     center_y = rect->top + height / 2.0;
     radius = diameter / 2.0;
@@ -1521,6 +1521,7 @@ static void fill_soft_dot(
                         alpha_sum += max_alpha;
                     } else if (distance_squared <= outer_radius_squared) {
                         double fade = (outer_radius_squared - distance_squared) / fade_denominator;
+                        fade = fade * fade * (3.0 - 2.0 * fade);
                         alpha_sum += (int)(max_alpha * fade + 0.5);
                     }
                 }
@@ -1540,27 +1541,93 @@ static void fill_soft_dot(
     }
 }
 
+static void fill_glow_dot(
+    HDC hdc,
+    const RECT *rect,
+    COLORREF color,
+    COLORREF fallback_background,
+    int max_alpha
+) {
+    int width = rect->right - rect->left;
+    int height = rect->bottom - rect->top;
+    int diameter = width < height ? width : height;
+    double center_x;
+    double center_y;
+    double radius;
+    double radius_squared;
+    int total_samples = DOT_EDGE_SAMPLES * DOT_EDGE_SAMPLES;
+    int x;
+    int y;
+    if (width <= 0 || height <= 0 || diameter <= 0) {
+        return;
+    }
+    max_alpha = clamp_int(max_alpha, 0, 255);
+    if (max_alpha <= 0) {
+        return;
+    }
+    center_x = rect->left + width / 2.0;
+    center_y = rect->top + height / 2.0;
+    radius = diameter / 2.0;
+    radius_squared = radius * radius;
+    if (radius_squared <= 0.0) {
+        return;
+    }
+    for (y = rect->top; y < rect->bottom; y++) {
+        for (x = rect->left; x < rect->right; x++) {
+            int alpha_sum = 0;
+            int sample_y;
+            for (sample_y = 0; sample_y < DOT_EDGE_SAMPLES; sample_y++) {
+                int sample_x;
+                double py = y + (sample_y + 0.5) / DOT_EDGE_SAMPLES;
+                double dy = py - center_y;
+                for (sample_x = 0; sample_x < DOT_EDGE_SAMPLES; sample_x++) {
+                    double px = x + (sample_x + 0.5) / DOT_EDGE_SAMPLES;
+                    double dx = px - center_x;
+                    double distance_squared = dx * dx + dy * dy;
+                    if (distance_squared <= radius_squared) {
+                        double fade = (radius_squared - distance_squared) / radius_squared;
+                        fade = fade * fade;
+                        alpha_sum += (int)(max_alpha * fade + 0.5);
+                    }
+                }
+            }
+            if (alpha_sum > 0) {
+                int alpha = (alpha_sum + total_samples / 2) / total_samples;
+                COLORREF background = GetPixel(hdc, x, y);
+                if (background == CLR_INVALID) {
+                    background = fallback_background;
+                }
+                SetPixelV(hdc, x, y, blend_color(color, background, alpha));
+            }
+        }
+    }
+}
+
 static void draw_status_dot(HDC hdc, const RECT *rect, const char *status, COLORREF row_background) {
     if (is_running_status(status)) {
         int pulse = running_pulse_level();
         int dot_size = ui_dot_size();
-        int core_scale = 82 + pulse * 26 / 100;
-        int core_alpha = 191 + pulse * 64 / 100;
-        int shadow_spread = (pulse * ui_running_shadow_spread() + 50) / 100;
-        int shadow_alpha = 115 * (100 - pulse) / 100;
-        int core_diameter = (dot_size * core_scale + 50) / 100;
-        int halo_diameter = core_diameter + shadow_spread * 2;
-        RECT halo = centered_square_rect(rect, halo_diameter);
-        RECT core = centered_square_rect(rect, core_diameter);
+        int max_shadow_spread = ui_running_shadow_spread();
+        int min_shadow_spread = max_shadow_spread / 2;
+        int shadow_spread;
+        int shadow_alpha = 42 + pulse * 72 / 100;
+        int halo_diameter;
+        RECT halo;
         COLORREF running_blue = RGB(37, 99, 235);
-        if (shadow_alpha > 0 && halo_diameter > core_diameter) {
-            fill_soft_dot(hdc, &halo, running_blue, row_background, shadow_alpha,
-                ui_dot_soft_edge() + shadow_spread / 2, 1);
+        if (min_shadow_spread < 1) {
+            min_shadow_spread = 1;
         }
-        fill_soft_dot(hdc, &core, running_blue, row_background, core_alpha, ui_dot_soft_edge(), 1);
+        shadow_spread = min_shadow_spread +
+            (pulse * (max_shadow_spread - min_shadow_spread) + 50) / 100;
+        halo_diameter = dot_size + shadow_spread * 2;
+        halo = centered_square_rect(rect, halo_diameter);
+        if (shadow_spread > 0) {
+            fill_glow_dot(hdc, &halo, running_blue, row_background, shadow_alpha);
+        }
+        fill_soft_dot(hdc, rect, running_blue, row_background, 255, ui_dot_soft_edge(), 1);
         return;
     }
-    fill_soft_dot(hdc, rect, status_color(status), row_background, 245, ui_dot_soft_edge(), 0);
+    fill_soft_dot(hdc, rect, status_color(status), row_background, 255, ui_dot_soft_edge(), 0);
 }
 
 static void paint_widget(HWND hwnd, HDC hdc) {
