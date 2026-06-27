@@ -65,6 +65,11 @@ typedef struct DirectoryRow {
     int original_order;
 } DirectoryRow;
 
+typedef struct GlyphVerticalMetrics {
+    int black_box_y;
+    int origin_y;
+} GlyphVerticalMetrics;
+
 typedef struct AppState {
     HWND hwnd;
     HWND tooltip;
@@ -282,6 +287,37 @@ static void update_display_font(void) {
     g_app.font = font;
 }
 
+static void identity_mat2(MAT2 *matrix) {
+    ZeroMemory(matrix, sizeof(*matrix));
+    matrix->eM11.value = 1;
+    matrix->eM22.value = 1;
+}
+
+static int glyph_vertical_metrics(HDC hdc, GlyphVerticalMetrics *metrics) {
+    MAT2 matrix;
+    GLYPHMETRICS glyph;
+    TEXTMETRICW text_metrics;
+    DWORD result;
+    if (metrics == NULL) {
+        return 0;
+    }
+    identity_mat2(&matrix);
+    result = GetGlyphOutlineW(hdc, L'o', GGO_METRICS, &glyph, 0, NULL, &matrix);
+    if (result != GDI_ERROR && glyph.gmBlackBoxY > 0) {
+        metrics->black_box_y = (int)glyph.gmBlackBoxY;
+        metrics->origin_y = glyph.gmptGlyphOrigin.y;
+        return 1;
+    }
+    if (GetTextMetricsW(hdc, &text_metrics)) {
+        metrics->black_box_y = text_metrics.tmHeight;
+        metrics->origin_y = text_metrics.tmAscent;
+        return 1;
+    }
+    metrics->black_box_y = scale_px(15);
+    metrics->origin_y = metrics->black_box_y;
+    return 0;
+}
+
 static int ui_font_height(void) {
     HDC hdc;
     HGDIOBJ old_font;
@@ -294,6 +330,27 @@ static int ui_font_height(void) {
     old_font = SelectObject(hdc, widget_font());
     if (GetTextMetricsW(hdc, &metrics)) {
         height = metrics.tmHeight;
+    }
+    SelectObject(hdc, old_font);
+    ReleaseDC(g_app.hwnd != NULL ? g_app.hwnd : NULL, hdc);
+    if (height < 1) {
+        return 1;
+    }
+    return height;
+}
+
+static int ui_reference_glyph_height(void) {
+    HDC hdc;
+    HGDIOBJ old_font;
+    GlyphVerticalMetrics metrics;
+    int height = scale_px(8);
+    hdc = GetDC(g_app.hwnd != NULL ? g_app.hwnd : NULL);
+    if (hdc == NULL) {
+        return height;
+    }
+    old_font = SelectObject(hdc, widget_font());
+    if (glyph_vertical_metrics(hdc, &metrics) && metrics.black_box_y > 0) {
+        height = metrics.black_box_y;
     }
     SelectObject(hdc, old_font);
     ReleaseDC(g_app.hwnd != NULL ? g_app.hwnd : NULL, hdc);
@@ -326,7 +383,7 @@ static int ui_row_top(int row_index) {
 }
 
 static int ui_directory_left_margin(void) {
-    int margin = ui_panel_padding_y() + (ui_row_height() - ui_font_height()) / 2;
+    int margin = ui_panel_padding_y() + (ui_row_height() - ui_reference_glyph_height()) / 2;
     if (margin < 1) {
         return 1;
     }
@@ -1697,6 +1754,31 @@ static void draw_status_dot(HDC hdc, const RECT *rect, const char *status, COLOR
     fill_soft_dot(hdc, rect, status_color(status), row_background, 255, ui_static_dot_soft_edge(), 0);
 }
 
+static void draw_directory_text(HDC hdc, const wchar_t *text, const RECT *rect, int row_top) {
+    GlyphVerticalMetrics metrics;
+    SIZE size;
+    int length;
+    int x;
+    int baseline_y;
+    UINT old_align;
+    if (text == NULL || text[0] == L'\0' || rect == NULL) {
+        return;
+    }
+    length = (int)wcslen(text);
+    if (!GetTextExtentPoint32W(hdc, text, length, &size)) {
+        return;
+    }
+    glyph_vertical_metrics(hdc, &metrics);
+    x = rect->right - size.cx;
+    if (x < rect->left) {
+        x = rect->left;
+    }
+    baseline_y = row_top + (ui_row_height() - metrics.black_box_y) / 2 + metrics.origin_y;
+    old_align = SetTextAlign(hdc, TA_LEFT | TA_BASELINE);
+    ExtTextOutW(hdc, x, baseline_y, ETO_CLIPPED, rect, text, length, NULL);
+    SetTextAlign(hdc, old_align);
+}
+
 static void paint_widget(HWND hwnd, HDC hdc) {
     RECT client;
     HBRUSH background;
@@ -1735,8 +1817,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         text_rect.top = row_rect.top;
         text_rect.right = text_rect.left + g_app.directory_column_width;
         text_rect.bottom = row_rect.bottom;
-        DrawTextW(hdc, display_name_wide, -1, &text_rect,
-            DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_END_ELLIPSIS | DT_NOPREFIX);
+        draw_directory_text(hdc, display_name_wide, &text_rect, row_rect.top);
         for (dot = 0; dot < g_app.rows[row].session_count; dot++) {
             int session_index = g_app.rows[row].session_indexes[dot];
             RECT rect = dot_rect(row, dot);
