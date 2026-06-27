@@ -22,10 +22,10 @@ The widget polls `http://localhost:8765/api/sessions` by default. To use another
 endpoint, pass it as the first argument or set `CODEX_MONITOR_API_URL`.
 
 The floating panel is a headerless table grouped by directory. Each row shows
-the directory name in the first column and one or more antialiased process
+the directory name in the first column and one or more softened-edge process
 status dots in the second column. The table width is calculated from the
 visible directory names and status dots instead of reserving a large fixed
-directory column. Running sessions are shown with a breathing blue dot; other
+directory column. Running sessions are shown with a blue breathing glow; other
 status dots remain static. The widget saves its last position and display size,
 restores them on launch, and keeps dynamic size changes inside the visible work
 area by anchoring to the touched edge.

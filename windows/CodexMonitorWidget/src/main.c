@@ -17,7 +17,7 @@
 #define REFRESH_INTERVAL_MS 500
 #define EMPTY_RESULT_CONFIRMATIONS 1
 #define ANIMATION_INTERVAL_MS 16
-#define RUNNING_PULSE_PERIOD_MS 1600
+#define RUNNING_PULSE_PERIOD_MS 1400
 #define WM_FETCH_DONE (WM_APP + 1)
 #define MENU_EXIT_ID 1001
 #define MENU_ABOUT_ID 1002
@@ -26,6 +26,8 @@
 #define DOT_SIZE 14
 #define DOT_GAP 8
 #define DOT_EDGE_SAMPLES 4
+#define DOT_SOFT_EDGE 3
+#define RUNNING_SHADOW_SPREAD 6
 #define PADDING_X 10
 #define PADDING_Y 1
 #define ROW_HEIGHT 26
@@ -222,10 +224,16 @@ static int ui_dot_gap(void) {
     return scale_px(DOT_GAP);
 }
 
-static int ui_dot_halo_expand(int pulse) {
-    int base = scale_px(2);
-    int extra = scale_px(2);
-    return base + (pulse * extra + 50) / 100;
+static int ui_dot_soft_edge(void) {
+    return scale_px(DOT_SOFT_EDGE);
+}
+
+static int ui_running_shadow_spread(void) {
+    return scale_px(RUNNING_SHADOW_SPREAD);
+}
+
+static int ui_dot_effect_padding(void) {
+    return ui_running_shadow_spread();
 }
 
 static int ui_padding_x(void) {
@@ -238,7 +246,7 @@ static int ui_padding_y(void) {
 
 static int ui_row_height(void) {
     int height = scale_px(ROW_HEIGHT);
-    int min_height = ui_dot_size() + scale_px(4) * 2 + 2;
+    int min_height = ui_dot_size() + ui_dot_effect_padding() * 2;
     if (height < min_height) {
         return min_height;
     }
@@ -300,7 +308,7 @@ static int row_dot_width(int count) {
     if (count <= 0) {
         return 0;
     }
-    return count * ui_dot_size() + (count - 1) * ui_dot_gap();
+    return ui_dot_effect_padding() * 2 + count * ui_dot_size() + (count - 1) * ui_dot_gap();
 }
 
 static int max_row_session_count(void) {
@@ -315,7 +323,7 @@ static int max_row_session_count(void) {
 }
 
 static int dot_column_left(void) {
-    return ui_padding_x() + g_app.directory_column_width + ui_column_gap();
+    return ui_padding_x() + g_app.directory_column_width + ui_column_gap() + ui_dot_effect_padding();
 }
 
 static int panel_width(void) {
@@ -817,10 +825,12 @@ static COLORREF status_color(const char *status) {
 static int running_pulse_level(void) {
     DWORD elapsed = GetTickCount() % RUNNING_PULSE_PERIOD_MS;
     DWORD half_period = RUNNING_PULSE_PERIOD_MS / 2;
+    int raw;
     if (elapsed > half_period) {
         elapsed = RUNNING_PULSE_PERIOD_MS - elapsed;
     }
-    return (int)(elapsed * 100 / half_period);
+    raw = (int)(elapsed * 100 / half_period);
+    return (raw * raw * (300 - 2 * raw) + 5000) / 10000;
 }
 
 static const char *skip_space(const char *p, const char *end) {
@@ -1428,27 +1438,76 @@ static COLORREF blend_color(COLORREF foreground, COLORREF background, int alpha)
     return RGB(red, green, blue);
 }
 
-static void fill_dot(HDC hdc, const RECT *rect, COLORREF color, COLORREF background) {
+static int clamp_int(int value, int minimum, int maximum) {
+    if (value < minimum) {
+        return minimum;
+    }
+    if (value > maximum) {
+        return maximum;
+    }
+    return value;
+}
+
+static RECT centered_square_rect(const RECT *rect, int diameter) {
+    RECT result;
+    int center_x2 = rect->left + rect->right;
+    int center_y2 = rect->top + rect->bottom;
+    if (diameter < 1) {
+        diameter = 1;
+    }
+    result.left = (center_x2 - diameter) / 2;
+    result.top = (center_y2 - diameter) / 2;
+    result.right = result.left + diameter;
+    result.bottom = result.top + diameter;
+    return result;
+}
+
+static void fill_soft_dot(
+    HDC hdc,
+    const RECT *rect,
+    COLORREF color,
+    COLORREF fallback_background,
+    int max_alpha,
+    int edge_blur,
+    int composite_over_current
+) {
     int width = rect->right - rect->left;
     int height = rect->bottom - rect->top;
     int diameter = width < height ? width : height;
     double center_x;
     double center_y;
     double radius;
-    double radius_squared;
+    double outer_radius_squared;
+    double inner_radius;
+    double inner_radius_squared;
+    double fade_denominator;
     int total_samples = DOT_EDGE_SAMPLES * DOT_EDGE_SAMPLES;
     int x;
     int y;
     if (width <= 0 || height <= 0 || diameter <= 0) {
         return;
     }
+    max_alpha = clamp_int(max_alpha, 0, 255);
+    if (max_alpha <= 0) {
+        return;
+    }
+    edge_blur = clamp_int(edge_blur, 1, diameter);
     center_x = rect->left + width / 2.0;
     center_y = rect->top + height / 2.0;
     radius = diameter / 2.0;
-    radius_squared = radius * radius;
+    inner_radius = radius - edge_blur;
+    if (inner_radius < 0.0) {
+        inner_radius = 0.0;
+    }
+    outer_radius_squared = radius * radius;
+    inner_radius_squared = inner_radius * inner_radius;
+    fade_denominator = outer_radius_squared - inner_radius_squared;
+    if (fade_denominator <= 0.0) {
+        fade_denominator = outer_radius_squared;
+    }
     for (y = rect->top; y < rect->bottom; y++) {
         for (x = rect->left; x < rect->right; x++) {
-            int inside_samples = 0;
+            int alpha_sum = 0;
             int sample_y;
             for (sample_y = 0; sample_y < DOT_EDGE_SAMPLES; sample_y++) {
                 int sample_x;
@@ -1457,15 +1516,24 @@ static void fill_dot(HDC hdc, const RECT *rect, COLORREF color, COLORREF backgro
                 for (sample_x = 0; sample_x < DOT_EDGE_SAMPLES; sample_x++) {
                     double px = x + (sample_x + 0.5) / DOT_EDGE_SAMPLES;
                     double dx = px - center_x;
-                    if (dx * dx + dy * dy <= radius_squared) {
-                        inside_samples++;
+                    double distance_squared = dx * dx + dy * dy;
+                    if (distance_squared <= inner_radius_squared) {
+                        alpha_sum += max_alpha;
+                    } else if (distance_squared <= outer_radius_squared) {
+                        double fade = (outer_radius_squared - distance_squared) / fade_denominator;
+                        alpha_sum += (int)(max_alpha * fade + 0.5);
                     }
                 }
             }
-            if (inside_samples == total_samples) {
-                SetPixelV(hdc, x, y, color);
-            } else if (inside_samples > 0) {
-                int alpha = (inside_samples * 255 + total_samples / 2) / total_samples;
+            if (alpha_sum > 0) {
+                int alpha = (alpha_sum + total_samples / 2) / total_samples;
+                COLORREF background = fallback_background;
+                if (composite_over_current) {
+                    background = GetPixel(hdc, x, y);
+                    if (background == CLR_INVALID) {
+                        background = fallback_background;
+                    }
+                }
                 SetPixelV(hdc, x, y, blend_color(color, background, alpha));
             }
         }
@@ -1475,19 +1543,24 @@ static void fill_dot(HDC hdc, const RECT *rect, COLORREF color, COLORREF backgro
 static void draw_status_dot(HDC hdc, const RECT *rect, const char *status, COLORREF row_background) {
     if (is_running_status(status)) {
         int pulse = running_pulse_level();
-        int expand = ui_dot_halo_expand(pulse);
-        int inset = pulse >= 100 ? 0 : scale_px(1);
-        RECT halo = *rect;
-        RECT core = *rect;
-        COLORREF halo_color = RGB(22 + pulse * 10 / 100, 50 + pulse * 35 / 100, 120 + pulse * 65 / 100);
-        COLORREF core_color = RGB(37 + pulse * 38 / 100, 99 + pulse * 56 / 100, 235 + pulse * 20 / 100);
-        InflateRect(&halo, expand, expand);
-        InflateRect(&core, -inset, -inset);
-        fill_dot(hdc, &halo, halo_color, row_background);
-        fill_dot(hdc, &core, core_color, halo_color);
+        int dot_size = ui_dot_size();
+        int core_scale = 82 + pulse * 26 / 100;
+        int core_alpha = 191 + pulse * 64 / 100;
+        int shadow_spread = (pulse * ui_running_shadow_spread() + 50) / 100;
+        int shadow_alpha = 115 * (100 - pulse) / 100;
+        int core_diameter = (dot_size * core_scale + 50) / 100;
+        int halo_diameter = core_diameter + shadow_spread * 2;
+        RECT halo = centered_square_rect(rect, halo_diameter);
+        RECT core = centered_square_rect(rect, core_diameter);
+        COLORREF running_blue = RGB(37, 99, 235);
+        if (shadow_alpha > 0 && halo_diameter > core_diameter) {
+            fill_soft_dot(hdc, &halo, running_blue, row_background, shadow_alpha,
+                ui_dot_soft_edge() + shadow_spread / 2, 1);
+        }
+        fill_soft_dot(hdc, &core, running_blue, row_background, core_alpha, ui_dot_soft_edge(), 1);
         return;
     }
-    fill_dot(hdc, rect, status_color(status), row_background);
+    fill_soft_dot(hdc, rect, status_color(status), row_background, 245, ui_dot_soft_edge(), 0);
 }
 
 static void paint_widget(HWND hwnd, HDC hdc) {
