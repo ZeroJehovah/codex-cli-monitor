@@ -12,6 +12,7 @@
 
 #define APP_CLASS_NAME L"CodexMonitorWidget"
 #define DEFAULT_API_URL L"http://localhost:8765/api/sessions"
+#define SINGLE_INSTANCE_MUTEX_NAME L"Local\\ZeroJehovah.CodexMonitorWidget.SingleInstance"
 #define REFRESH_TIMER_ID 1
 #define ANIMATION_TIMER_ID 2
 #define REFRESH_INTERVAL_MS 500
@@ -1937,6 +1938,8 @@ static void resolve_api_url(void) {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR command_line, int show_command) {
     WNDCLASSW wc;
     HWND hwnd;
+    HANDLE single_instance_mutex;
+    DWORD mutex_error;
     RECT work_area;
     RECT initial_rect;
     int initial_width;
@@ -1945,6 +1948,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
     (void)previous_instance;
     (void)command_line;
     (void)show_command;
+
+    SetLastError(ERROR_SUCCESS);
+    single_instance_mutex = CreateMutexW(NULL, TRUE, SINGLE_INSTANCE_MUTEX_NAME);
+    mutex_error = GetLastError();
+    if (single_instance_mutex == NULL) {
+        return mutex_error == ERROR_ACCESS_DENIED ? 0 : 1;
+    }
+    if (mutex_error == ERROR_ALREADY_EXISTS) {
+        CloseHandle(single_instance_mutex);
+        return 0;
+    }
 
     ZeroMemory(&g_app, sizeof(g_app));
     g_app.display_font_points = DEFAULT_DISPLAY_FONT_POINTS;
@@ -1964,6 +1978,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
             DeleteObject(g_app.font);
             g_app.font = NULL;
         }
+        CloseHandle(single_instance_mutex);
         return 1;
     }
     initial_width = panel_width();
@@ -1977,6 +1992,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
             DeleteObject(g_app.font);
             g_app.font = NULL;
         }
+        CloseHandle(single_instance_mutex);
         return 1;
     }
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -1985,5 +2001,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
+    CloseHandle(single_instance_mutex);
     return (int)message.wParam;
 }
