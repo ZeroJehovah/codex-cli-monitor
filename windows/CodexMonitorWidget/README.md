@@ -1,6 +1,8 @@
 # CodexMonitorWidget
 
-Native Win32 floating status widget for `codex-cli-monitor`.
+Native Win32 floating status widget for `codex-cli-monitor`. The widget is
+single-instance per Windows logon session; launching it again while it is
+already running exits immediately without opening another floating panel.
 
 Run the monitor API first from Linux or WSL:
 
