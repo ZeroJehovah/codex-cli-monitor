@@ -20,7 +20,7 @@
 #define EMPTY_RESULT_CONFIRMATIONS 1
 #define ANIMATION_INTERVAL_MS 16
 #define RUNNING_PULSE_PERIOD_MS 1200
-#define EDGE_TUCK_DELAY_MS 3000
+#define EDGE_TUCK_DELAY_MS 1000
 #define EDGE_TUCK_ANIMATION_DURATION_MS 260
 #define EDGE_TUCK_PROGRESS_MAX 1000
 #define EDGE_TUCK_ATTACH_TOLERANCE 1
@@ -101,6 +101,7 @@ typedef struct AppState {
     int edge_tuck_target_collapsed;
     int edge_tuck_progress;
     int edge_tuck_enabled;
+    int edge_tuck_side;
     DWORD edge_tuck_last_tick;
     int anchor_right;
     int anchor_bottom;
@@ -131,6 +132,9 @@ static void cancel_edge_tuck_delay(void);
 static void schedule_edge_tuck_delay(void);
 static void set_edge_tuck_target(int collapsed);
 static void sync_edge_tuck_after_layout_change(void);
+static int edge_tuck_side(void);
+static int panel_width(void);
+static int directory_column_left(void);
 
 static void utf8_to_wide(const char *source, wchar_t *target, int target_count) {
     if (target_count <= 0) {
@@ -458,7 +462,38 @@ static int max_row_session_count(void) {
 }
 
 static int dot_column_left(void) {
-    return ui_directory_left_margin() + current_directory_column_width() + current_text_dot_gap();
+    return directory_column_left() + current_directory_column_width() + current_text_dot_gap();
+}
+
+static int current_content_width(int max_sessions_in_row) {
+    if (max_sessions_in_row <= 0) {
+        return 0;
+    }
+    return ui_directory_left_margin() + current_directory_column_width() + current_text_dot_gap() +
+        row_dot_width(max_sessions_in_row) + ui_dot_right_margin();
+}
+
+static int content_origin_x(void) {
+    int max_sessions_in_row;
+    int width;
+    int content_width;
+    if (g_app.row_count <= 0) {
+        return 0;
+    }
+    max_sessions_in_row = max_row_session_count();
+    content_width = current_content_width(max_sessions_in_row);
+    width = panel_width();
+    if (content_width >= width) {
+        return 0;
+    }
+    if (edge_tuck_side() > 0) {
+        return width - content_width;
+    }
+    return 0;
+}
+
+static int directory_column_left(void) {
+    return content_origin_x() + ui_directory_left_margin();
 }
 
 static int current_min_panel_width(int max_sessions_in_row) {
@@ -481,8 +516,7 @@ static int panel_width(void) {
         return ui_min_panel_width();
     }
     max_sessions_in_row = max_row_session_count();
-    width = ui_directory_left_margin() + current_directory_column_width() + current_text_dot_gap() +
-        row_dot_width(max_sessions_in_row) + ui_dot_right_margin();
+    width = current_content_width(max_sessions_in_row);
     if (width < current_min_panel_width(max_sessions_in_row)) {
         return current_min_panel_width(max_sessions_in_row);
     }
@@ -738,6 +772,10 @@ static void save_widget_placement(void) {
 static int edge_tuck_side(void) {
     RECT rect;
     RECT work_area;
+    if ((g_app.edge_tuck_target_collapsed || g_app.edge_tuck_progress != 0) &&
+        g_app.edge_tuck_side != 0) {
+        return g_app.edge_tuck_side;
+    }
     if (g_app.hwnd == NULL) {
         return 0;
     }
@@ -790,6 +828,7 @@ static int attach_horizontal_edge_anchor(void) {
         rect.right = work_area.right;
         rect.left = rect.right - width;
     }
+    g_app.edge_tuck_side = side;
     update_placement_offsets_from_rect(&rect, &work_area);
     if (old_anchor_right != g_app.anchor_right ||
         old_offset_x != g_app.placement_offset_x ||
@@ -859,6 +898,7 @@ static void sync_edge_tuck_after_layout_change(void) {
         cancel_edge_tuck_delay();
         g_app.edge_tuck_target_collapsed = 0;
         g_app.edge_tuck_progress = 0;
+        g_app.edge_tuck_side = 0;
         if (old_progress != g_app.edge_tuck_progress ||
             old_target != g_app.edge_tuck_target_collapsed) {
             update_animation_timer();
@@ -1558,6 +1598,9 @@ static void advance_edge_tuck_animation(void) {
         (direction < 0 && g_app.edge_tuck_progress < target)) {
         g_app.edge_tuck_progress = target;
     }
+    if (g_app.edge_tuck_progress == 0 && target == 0) {
+        g_app.edge_tuck_side = 0;
+    }
     resize_panel();
     update_tool_rect();
 }
@@ -2085,7 +2128,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         }
         directory_display_name(g_app.rows[row].directory, display_name, sizeof(display_name));
         utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
-        text_rect.left = ui_directory_left_margin();
+        text_rect.left = directory_column_left();
         text_rect.top = row_rect.top;
         text_rect.right = text_rect.left + current_directory_column_width();
         text_rect.bottom = row_rect.bottom;
