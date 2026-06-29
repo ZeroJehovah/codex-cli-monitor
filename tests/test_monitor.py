@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from codex_cli_monitor.hook_state import append_hook_event
@@ -453,6 +455,183 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions_by_pid[100].display_status, "成功")
         self.assertEqual(sessions_by_pid[200].display_status, "未运行")
 
+    def test_same_pid_session_start_ignores_old_success_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 60
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _write_session_records(
+                home,
+                "old-success.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"session_id": "s", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base + 1),
+                        "payload": {"turn_id": "old"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base + 3),
+                        "payload": {"type": "task_complete"},
+                    },
+                ],
+            )
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 1,
+                path=hook_log,
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 4,
+                path=hook_log,
+            )
+            append_hook_event(
+                "session_start",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 10,
+                path=hook_log,
+            )
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "未运行")
+        self.assertIsNone(sessions[0].state_activity)
+
+    def test_same_cwd_interruption_only_marks_matching_process_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 60
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _write_process(proc, 200, "codex", "S", 1, ["codex"], "/work/a")
+            _write_session_records(
+                home,
+                "old-success.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"session_id": "old", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base + 1),
+                        "payload": {"turn_id": "old-turn"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": _iso(base + 2),
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base + 3),
+                        "payload": {"type": "task_complete"},
+                    },
+                ],
+            )
+            _write_session_records(
+                home,
+                "new-failure.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"session_id": "new", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base + 20),
+                        "payload": {"turn_id": "new-turn"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": _iso(base + 21),
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base + 25),
+                        "payload": {
+                            "type": "turn_aborted",
+                            "reason": "interrupted",
+                        },
+                    },
+                ],
+            )
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 1,
+                path=hook_log,
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 4,
+                path=hook_log,
+            )
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=200,
+                timestamp=base + 20,
+                path=hook_log,
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=200,
+                timestamp=base + 26,
+                path=hook_log,
+            )
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        sessions_by_pid = {session.root.pid: session for session in sessions}
+        self.assertEqual(sessions_by_pid[100].display_status, "成功")
+        self.assertEqual(sessions_by_pid[200].display_status, "失败")
+        self.assertEqual(
+            sessions_by_pid[100].state_activity.relative_path,
+            "sessions/2026/06/26/old-success.jsonl",
+        )
+        self.assertEqual(
+            sessions_by_pid[200].state_activity.relative_path,
+            "sessions/2026/06/26/new-failure.jsonl",
+        )
+
     def test_new_process_ignores_session_activity_from_before_process_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -542,6 +721,23 @@ def _write_session(home: Path, cwd: str, last_record: str) -> Path:
         encoding="utf-8",
     )
     return session
+
+
+def _write_session_records(home: Path, name: str, records: list[dict]) -> Path:
+    session = home / "sessions" / "2026" / "06" / "26" / name
+    session.parent.mkdir(parents=True, exist_ok=True)
+    session.write_text(
+        "\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    return session
+
+
+def _iso(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat().replace(
+        "+00:00",
+        "Z",
+    )
 
 
 def _stat_line(

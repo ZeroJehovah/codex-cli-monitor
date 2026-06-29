@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -292,6 +293,123 @@ class CodexStateTests(unittest.TestCase):
         self.assertEqual(len(activities), 1)
         self.assertTrue(activities[0].terminal_event)
         self.assertTrue(activities[0].failed_event)
+
+    def test_scan_session_activities_marks_latest_turn_failure_after_later_task_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            _write_jsonl(
+                session,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"session_id": "s", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": "2026-06-29T08:00:00Z",
+                        "payload": {"turn_id": "turn-1"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-06-29T08:00:01Z",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": "go",
+                        },
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-06-29T08:00:02Z",
+                        "payload": {
+                            "type": "agent_message",
+                            "message": "■ exceeded retry limit, last status: 429 Too Many Requests",
+                        },
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-06-29T08:00:03Z",
+                        "payload": {"type": "token_count"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-06-29T08:00:04Z",
+                        "payload": {"type": "task_complete"},
+                    },
+                ],
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0].turn_id, "turn-1")
+        self.assertTrue(activities[0].terminal_event)
+        self.assertTrue(activities[0].failed_event)
+        self.assertIsNotNone(activities[0].turn_started_at)
+        self.assertIsNotNone(activities[0].terminal_event_at)
+
+    def test_scan_session_activities_uses_latest_turn_not_previous_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            _write_jsonl(
+                session,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"session_id": "s", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": "2026-06-29T08:00:00Z",
+                        "payload": {"turn_id": "old-turn"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-06-29T08:00:01Z",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": "old",
+                        },
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-06-29T08:00:02Z",
+                        "payload": {"type": "task_complete"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": "2026-06-29T08:01:00Z",
+                        "payload": {"turn_id": "new-turn"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-06-29T08:01:01Z",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": "new",
+                        },
+                    },
+                ],
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0].turn_id, "new-turn")
+        self.assertFalse(activities[0].terminal_event)
+        self.assertFalse(activities[0].failed_event)
+
+
+def _write_jsonl(path: Path, records: list[dict]) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n",
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

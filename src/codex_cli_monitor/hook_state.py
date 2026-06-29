@@ -40,6 +40,9 @@ class HookSessionState:
     updated_at: float
     last_event: str
     in_turn: bool
+    turn_started_at: float | None = None
+    last_stopped_at: float | None = None
+    session_started_at: float | None = None
     active_tool_count: int = 0
     last_tool: str | None = None
     codex_pid: int | None = None
@@ -52,6 +55,9 @@ class HookSessionState:
             "age_seconds": max(0.0, time.time() - self.updated_at),
             "last_event": self.last_event,
             "in_turn": self.in_turn,
+            "turn_started_at": self.turn_started_at,
+            "last_stopped_at": self.last_stopped_at,
+            "session_started_at": self.session_started_at,
             "active_tool_count": self.active_tool_count,
             "last_tool": self.last_tool,
             "codex_pid": self.codex_pid,
@@ -139,6 +145,9 @@ def summarize_hook_events(
     states: dict[tuple[str, int | None], HookSessionState] = {}
     active_tools: dict[tuple[str, int | None], int] = {}
     in_turn: dict[tuple[str, int | None], bool] = {}
+    turn_started_at: dict[tuple[str, int | None], float | None] = {}
+    last_stopped_at: dict[tuple[str, int | None], float | None] = {}
+    session_started_at: dict[tuple[str, int | None], float | None] = {}
 
     for event in sorted(events, key=lambda item: item.timestamp):
         cwd = _normalize_path(event.cwd)
@@ -148,21 +157,39 @@ def summarize_hook_events(
         if event.event in {"session_start", "user_prompt_submit"}:
             in_turn[key] = event.event == "user_prompt_submit"
             active_tools[key] = 0
+            if event.event == "session_start":
+                turn_started_at[key] = None
+                last_stopped_at[key] = None
+                session_started_at[key] = event.timestamp
+            else:
+                turn_started_at[key] = event.timestamp
+                last_stopped_at[key] = None
         elif event.event == "pre_tool_use":
+            was_in_turn = in_turn.get(key, False)
             in_turn[key] = True
             active_tools[key] = active_tools.get(key, 0) + 1
+            if not was_in_turn or turn_started_at.get(key) is None:
+                turn_started_at[key] = event.timestamp
+                last_stopped_at[key] = None
         elif event.event == "post_tool_use":
             active_tools[key] = max(0, active_tools.get(key, 0) - 1)
             in_turn[key] = True
+            if turn_started_at.get(key) is None:
+                turn_started_at[key] = event.timestamp
+                last_stopped_at[key] = None
         elif event.event == "stop":
             in_turn[key] = False
             active_tools[key] = 0
+            last_stopped_at[key] = event.timestamp
 
         states[key] = HookSessionState(
             cwd=cwd,
             updated_at=event.timestamp,
             last_event=event.event,
             in_turn=in_turn.get(key, False),
+            turn_started_at=turn_started_at.get(key),
+            last_stopped_at=last_stopped_at.get(key),
+            session_started_at=session_started_at.get(key),
             active_tool_count=active_tools.get(key, 0),
             last_tool=event.tool,
             codex_pid=event.ppid,
