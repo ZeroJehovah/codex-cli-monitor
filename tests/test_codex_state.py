@@ -403,6 +403,82 @@ class CodexStateTests(unittest.TestCase):
         self.assertFalse(activities[0].terminal_event)
         self.assertFalse(activities[0].failed_event)
 
+    def test_scan_session_activities_scans_latest_turn_beyond_tail_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            records = [
+                {
+                    "type": "session_meta",
+                    "payload": {"session_id": "s", "cwd": "/work/a"},
+                },
+                {
+                    "type": "turn_context",
+                    "timestamp": "2026-06-29T08:00:00Z",
+                    "payload": {"turn_id": "old-turn"},
+                },
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-06-29T08:00:01Z",
+                    "payload": {"type": "task_complete"},
+                },
+            ]
+            records.extend(
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "old_count": index},
+                }
+                for index in range(10)
+            )
+            records.extend(
+                [
+                    {
+                        "type": "turn_context",
+                        "timestamp": "2026-06-29T08:01:00Z",
+                        "payload": {"turn_id": "new-turn"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-06-29T08:01:01Z",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": "new",
+                        },
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-06-29T08:01:02Z",
+                        "payload": {
+                            "type": "agent_message",
+                            "message": "■ exceeded retry limit, last status: 429 Too Many Requests",
+                        },
+                    },
+                ]
+            )
+            records.extend(
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "new_count": index},
+                }
+                for index in range(220)
+            )
+            records.append(
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-06-29T08:01:03Z",
+                    "payload": {"type": "task_complete"},
+                }
+            )
+            _write_jsonl(session, records)
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0].turn_id, "new-turn")
+        self.assertTrue(activities[0].terminal_event)
+        self.assertTrue(activities[0].failed_event)
+
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
     path.parent.mkdir(parents=True)
