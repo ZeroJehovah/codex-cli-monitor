@@ -103,6 +103,7 @@ class SessionActivity:
     last_payload_reason: str | None = None
     terminal_event: bool = False
     failed_event: bool = False
+    latest_turn_has_user: bool = False
 
     @property
     def modified_age_seconds(self) -> float:
@@ -132,6 +133,7 @@ class SessionActivity:
             "last_payload_reason": self.last_payload_reason,
             "terminal_event": self.terminal_event,
             "failed_event": self.failed_event,
+            "latest_turn_has_user": self.latest_turn_has_user,
         }
 
 

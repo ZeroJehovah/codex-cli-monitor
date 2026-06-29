@@ -59,6 +59,8 @@ TERMINAL_ERROR_PHRASES = (
     "timed out",
     "timeout",
     "too many requests",
+    "transport error",
+    "error decoding response body",
 )
 TERMINAL_PAYLOAD_TYPES = {
     "task_complete",
@@ -293,6 +295,7 @@ def _session_activity(
         last_payload_reason=last_payload_reason,
         terminal_event=latest_terminal_record is not None,
         failed_event=failed_event,
+        latest_turn_has_user=latest_turn.saw_user,
     )
 
 
@@ -488,7 +491,10 @@ def _is_failed_message_record(record_type: str | None, payload: dict) -> bool:
         and payload_role == "assistant"
     ):
         text = _message_content_text(payload.get("content"))
-        return _message_text_has_terminal_error(text, require_red_ansi=True)
+        return _message_text_has_terminal_error(
+            text,
+            require_red_ansi=True,
+        ) or _message_text_is_terminal_diagnostic(text)
     else:
         return False
 
@@ -523,6 +529,26 @@ def _message_text_has_terminal_error(text: str, *, require_red_ansi: bool) -> bo
         ):
             return True
     return False
+
+
+def _message_text_is_terminal_diagnostic(text: str) -> bool:
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    normalized_first = _normalize_terminal_message_line(lines[0])
+    if not normalized_first:
+        return False
+    if not (
+        _line_has_terminal_error_marker(lines[0])
+        or normalized_first.startswith(TERMINAL_ERROR_PREFIXES)
+    ):
+        return False
+    normalized_text = _normalize_terminal_message_line("\n".join(lines))
+    return (
+        normalized_text.startswith(TERMINAL_ERROR_PREFIXES)
+        or HTTP_ERROR_STATUS_RE.search(normalized_text) is not None
+        or any(phrase in normalized_text for phrase in TERMINAL_ERROR_PHRASES)
+    )
 
 
 def _line_has_terminal_error_marker(line: str) -> bool:

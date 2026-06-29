@@ -259,6 +259,8 @@ def _display_status(
                 if state_activity.failed_event:
                     return "失败"
                 return "成功"
+            if _activity_is_idle_reset_after_stop(state_activity, hook_state):
+                return "未运行"
         if hook_state.in_turn or hook_state.active_tool_count > 0:
             return "运行中"
         if state_activity is not None and state_activity.failed_event:
@@ -317,13 +319,33 @@ def _activity_matches_hook(
     if stop_at is None and hook_state.last_event == "stop":
         stop_at = hook_state.updated_at
     if stop_at is not None and event_at > stop_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS:
-        return False
+        return _activity_is_idle_reset_after_stop(activity, hook_state)
 
     if hook_state.in_turn or hook_state.active_tool_count > 0:
         started_at = hook_state.turn_started_at or hook_state.updated_at
         return event_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS >= started_at
 
     return True
+
+
+def _activity_is_idle_reset_after_stop(
+    activity: SessionActivity | None,
+    hook_state: HookSessionState,
+) -> bool:
+    if activity is None:
+        return False
+    stop_at = hook_state.last_stopped_at
+    if stop_at is None and hook_state.last_event == "stop":
+        stop_at = hook_state.updated_at
+    if stop_at is None:
+        return False
+    event_at = _activity_event_time(activity)
+    return (
+        event_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS >= stop_at
+        and not activity.latest_turn_has_user
+        and not activity.terminal_event
+        and not activity.failed_event
+    )
 
 
 def _activity_event_time(activity: SessionActivity) -> float:
