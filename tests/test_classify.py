@@ -233,6 +233,7 @@ def _activity(
     return SessionActivity(
         relative_path="sessions/2026/06/26/rollout.jsonl",
         session_id="session",
+        turn_id="turn",
         cwd="/work/a",
         size_bytes=100,
         modified_at=observed_at - age,

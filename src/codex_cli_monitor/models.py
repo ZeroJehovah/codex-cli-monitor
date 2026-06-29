@@ -88,10 +88,14 @@ class CodexStateSummary:
 class SessionActivity:
     relative_path: str
     session_id: str | None
+    turn_id: str | None
     cwd: str | None
     size_bytes: int
     modified_at: float
     observed_at: float
+    last_record_at: float | None = None
+    turn_started_at: float | None = None
+    terminal_event_at: float | None = None
     changed_during_sample: bool = False
     last_record_type: str | None = None
     last_payload_type: str | None = None
@@ -113,10 +117,14 @@ class SessionActivity:
         return {
             "relative_path": self.relative_path,
             "session_id": self.session_id,
+            "turn_id": self.turn_id,
             "cwd": self.cwd,
             "size_bytes": self.size_bytes,
             "modified_at": self.modified_at,
             "modified_age_seconds": self.modified_age_seconds,
+            "last_record_at": self.last_record_at,
+            "turn_started_at": self.turn_started_at,
+            "terminal_event_at": self.terminal_event_at,
             "changed_during_sample": self.changed_during_sample,
             "last_record_type": self.last_record_type,
             "last_payload_type": self.last_payload_type,

@@ -5,6 +5,7 @@ import os
 import re
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -201,7 +202,7 @@ def _session_activity(
     except ValueError:
         relative_path = path.as_posix()
 
-    records = _iter_jsonl_records(path, head_limit=8, tail_limit=24)
+    records = _iter_jsonl_records(path, head_limit=8, tail_limit=160)
     first_record = None
     last_record = None
     for record in records:
@@ -216,23 +217,39 @@ def _session_activity(
     last_payload_type = _optional_str(last_payload.get("type"))
     last_record_type = _optional_str(last_record.get("type")) if isinstance(last_record, dict) else None
     last_payload_reason = _optional_str(last_payload.get("reason"))
-    recent_turn_records = _records_since_latest_user(records)
+    recent_turn_records = _records_since_latest_turn(records)
+    latest_terminal_record = _latest_terminal_record(recent_turn_records)
+    latest_terminal_payload = (
+        latest_terminal_record.get("payload")
+        if isinstance(latest_terminal_record, dict)
+        else None
+    )
+    latest_terminal_payload = (
+        latest_terminal_payload if isinstance(latest_terminal_payload, dict) else {}
+    )
+    terminal_payload_type = _optional_str(latest_terminal_payload.get("type"))
     failed_event = any(
         _record_is_failed_event(record) for record in recent_turn_records
-    ) or _turn_completed_without_visible_response(recent_turn_records, last_payload_type)
+    ) or _turn_completed_without_visible_response(
+        recent_turn_records, terminal_payload_type
+    )
 
     return SessionActivity(
         relative_path=relative_path,
         session_id=session_id,
+        turn_id=_turn_id_from_records(recent_turn_records),
         cwd=cwd,
         size_bytes=stat.st_size,
         modified_at=stat.st_mtime,
         observed_at=observed_at,
+        last_record_at=_timestamp_from_record(last_record),
+        turn_started_at=_turn_started_at(recent_turn_records),
+        terminal_event_at=_timestamp_from_record(latest_terminal_record),
         last_record_type=last_record_type,
         last_payload_type=last_payload_type,
         last_payload_role=_optional_str(last_payload.get("role")),
         last_payload_reason=last_payload_reason,
-        terminal_event=last_payload_type in TERMINAL_PAYLOAD_TYPES,
+        terminal_event=latest_terminal_record is not None,
         failed_event=failed_event,
     )
 
@@ -325,6 +342,81 @@ def _records_since_latest_user(records: tuple[dict, ...]) -> tuple[dict, ...]:
     if latest_user_index is None:
         return records
     return records[latest_user_index:]
+
+
+def _records_since_latest_turn(records: tuple[dict, ...]) -> tuple[dict, ...]:
+    latest_turn_index = None
+    for index, record in enumerate(records):
+        if _is_turn_start_record(record):
+            latest_turn_index = index
+    if latest_turn_index is not None:
+        return records[latest_turn_index:]
+    return _records_since_latest_user(records)
+
+
+def _is_turn_start_record(record: dict) -> bool:
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    record_type = _optional_str(record.get("type"))
+    payload_type = _optional_str(payload.get("type"))
+    return record_type == "turn_context" or (
+        record_type == "event_msg" and payload_type == "task_started"
+    )
+
+
+def _latest_terminal_record(records: tuple[dict, ...]) -> dict | None:
+    latest = None
+    for record in records:
+        payload = record.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        if _optional_str(payload.get("type")) in TERMINAL_PAYLOAD_TYPES:
+            latest = record
+    return latest
+
+
+def _turn_id_from_records(records: tuple[dict, ...]) -> str | None:
+    for record in records:
+        turn_id = _turn_id_from_record(record)
+        if turn_id is not None:
+            return turn_id
+    return None
+
+
+def _turn_id_from_record(record: dict) -> str | None:
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    metadata = payload.get("internal_chat_message_metadata_passthrough")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return _optional_str(
+        payload.get("turn_id")
+        or metadata.get("turn_id")
+        or record.get("turn_id")
+    )
+
+
+def _turn_started_at(records: tuple[dict, ...]) -> float | None:
+    for record in records:
+        if _is_turn_start_record(record) or _is_user_message_record(record):
+            timestamp = _timestamp_from_record(record)
+            if timestamp is not None:
+                return timestamp
+    return None
+
+
+def _timestamp_from_record(record: dict | None) -> float | None:
+    if not isinstance(record, dict):
+        return None
+    raw = record.get("timestamp")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return (
+            datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            .astimezone(timezone.utc)
+            .timestamp()
+        )
+    except ValueError:
+        return None
 
 
 def _record_is_failed_event(record: dict) -> bool:

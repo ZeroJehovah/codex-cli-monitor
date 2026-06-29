@@ -89,8 +89,12 @@ def discover_sessions(
     for root in codex_roots:
         descendants = descendants_by_pid[root.pid]
         connections = _connections_for((root, *descendants), connections_by_pid)
-        state_activity = _state_activity_for_root(root, session_activities)
         hook_state = _hook_state_for_root(root, hook_states)
+        state_activity = _state_activity_for_root(
+            root,
+            session_activities,
+            hook_state,
+        )
         inference = infer_status(
             root,
             descendants,
@@ -198,7 +202,11 @@ def _connections_for(
 def _state_activity_for_root(
     root: ProcessInfo,
     activities: tuple[SessionActivity, ...],
+    hook_state: HookSessionState | None = None,
 ) -> SessionActivity | None:
+    if hook_state is not None and hook_state.last_event == "session_start":
+        return None
+
     root_cwd = _normalize_path(root.cwd)
     candidates = []
     for activity in activities:
@@ -207,6 +215,11 @@ def _state_activity_for_root(
             continue
         if root_cwd == activity_cwd:
             if _is_before_process_start(activity.modified_at, root):
+                continue
+            if hook_state is not None and not _activity_matches_hook(
+                activity,
+                hook_state,
+            ):
                 continue
             candidates.append(activity)
     if not candidates:
@@ -282,6 +295,42 @@ def _activity_is_current_for_hook(
     return (
         state_activity.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS
         >= hook_state.updated_at
+    )
+
+
+def _activity_matches_hook(
+    activity: SessionActivity,
+    hook_state: HookSessionState,
+) -> bool:
+    if hook_state.last_event == "session_start":
+        return False
+
+    event_at = _activity_event_time(activity)
+    turn_started_at = hook_state.turn_started_at
+    if (
+        turn_started_at is not None
+        and event_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < turn_started_at
+    ):
+        return False
+
+    stop_at = hook_state.last_stopped_at
+    if stop_at is None and hook_state.last_event == "stop":
+        stop_at = hook_state.updated_at
+    if stop_at is not None and event_at > stop_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS:
+        return False
+
+    if hook_state.in_turn or hook_state.active_tool_count > 0:
+        started_at = hook_state.turn_started_at or hook_state.updated_at
+        return event_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS >= started_at
+
+    return True
+
+
+def _activity_event_time(activity: SessionActivity) -> float:
+    return (
+        activity.terminal_event_at
+        or activity.last_record_at
+        or activity.modified_at
     )
 
 
