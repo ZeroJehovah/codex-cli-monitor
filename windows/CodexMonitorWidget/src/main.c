@@ -128,13 +128,16 @@ static void show_context_menu(HWND hwnd, POINT point);
 static void update_animation_timer(void);
 static void update_tool_rect(void);
 static void resize_panel(void);
+static void update_window_region(int actual_width, int visible_width, int height);
 static void cancel_edge_tuck_delay(void);
 static void schedule_edge_tuck_delay(void);
 static void set_edge_tuck_target(int collapsed);
 static void sync_edge_tuck_after_layout_change(void);
 static int edge_tuck_side(void);
 static int panel_width(void);
+static int actual_panel_width(void);
 static int directory_column_left(void);
+static int rect_width(const RECT *rect);
 
 static void utf8_to_wide(const char *source, wchar_t *target, int target_count) {
     if (target_count <= 0) {
@@ -473,6 +476,21 @@ static int current_content_width(int max_sessions_in_row) {
         row_dot_width(max_sessions_in_row) + ui_dot_right_margin();
 }
 
+static int expanded_panel_width(void) {
+    int width;
+    int max_sessions_in_row;
+    if (g_app.row_count <= 0) {
+        return ui_min_panel_width();
+    }
+    max_sessions_in_row = max_row_session_count();
+    width = ui_directory_left_margin() + g_app.directory_column_width + ui_text_dot_gap() +
+        row_dot_width(max_sessions_in_row) + ui_dot_right_margin();
+    if (width < ui_min_panel_width()) {
+        return ui_min_panel_width();
+    }
+    return width;
+}
+
 static int content_origin_x(void) {
     int max_sessions_in_row;
     int width;
@@ -482,7 +500,7 @@ static int content_origin_x(void) {
     }
     max_sessions_in_row = max_row_session_count();
     content_width = current_content_width(max_sessions_in_row);
-    width = panel_width();
+    width = actual_panel_width();
     if (content_width >= width) {
         return 0;
     }
@@ -521,6 +539,30 @@ static int panel_width(void) {
         return current_min_panel_width(max_sessions_in_row);
     }
     return width;
+}
+
+static int right_edge_tuck_region_active(void) {
+    return edge_tuck_side() > 0 &&
+        (g_app.edge_tuck_target_collapsed || g_app.edge_tuck_progress != 0);
+}
+
+static int actual_panel_width(void) {
+    if (right_edge_tuck_region_active()) {
+        return expanded_panel_width();
+    }
+    return panel_width();
+}
+
+static RECT visible_window_rect_from_rect(const RECT *rect) {
+    RECT visible = *rect;
+    if (right_edge_tuck_region_active()) {
+        int visible_width = panel_width();
+        int actual_width = rect_width(rect);
+        if (visible_width < actual_width) {
+            visible.left = visible.right - visible_width;
+        }
+    }
+    return visible;
 }
 
 static int panel_height(void) {
@@ -850,13 +892,15 @@ static void cancel_edge_tuck_delay(void) {
 static int cursor_inside_widget(void) {
     POINT point;
     RECT rect;
+    RECT visible;
     if (g_app.hwnd == NULL) {
         return 0;
     }
     if (!GetCursorPos(&point) || !GetWindowRect(g_app.hwnd, &rect)) {
         return 0;
     }
-    return PtInRect(&rect, point);
+    visible = visible_window_rect_from_rect(&rect);
+    return PtInRect(&visible, point);
 }
 
 static void schedule_edge_tuck_delay(void) {
@@ -1541,11 +1585,38 @@ static void start_fetch(void) {
     CloseHandle(thread);
 }
 
+static void update_window_region(int actual_width, int visible_width, int height) {
+    HRGN region;
+    int region_left;
+    if (g_app.hwnd == NULL) {
+        return;
+    }
+    if (visible_width < 1) {
+        visible_width = 1;
+    }
+    if (visible_width > actual_width) {
+        visible_width = actual_width;
+    }
+    if (visible_width >= actual_width) {
+        SetWindowRgn(g_app.hwnd, NULL, TRUE);
+        return;
+    }
+    region_left = actual_width - visible_width;
+    region = CreateRectRgn(region_left, 0, actual_width, height);
+    if (region == NULL) {
+        return;
+    }
+    if (SetWindowRgn(g_app.hwnd, region, TRUE) == 0) {
+        DeleteObject(region);
+    }
+}
+
 static void resize_panel(void) {
     RECT rect;
     RECT work_area;
     RECT target;
-    int width = panel_width();
+    int visible_width = panel_width();
+    int width = actual_panel_width();
     int height = panel_height();
     int old_anchor_right = g_app.anchor_right;
     int old_anchor_bottom = g_app.anchor_bottom;
@@ -1561,6 +1632,7 @@ static void resize_panel(void) {
         flags |= SWP_NOZORDER;
     }
     SetWindowPos(g_app.hwnd, insert_after, target.left, target.top, width, height, flags);
+    update_window_region(width, visible_width, height);
     if ((!edge_tuck_animating() &&
             (old_anchor_right != g_app.anchor_right ||
                 old_offset_x != g_app.placement_offset_x)) ||
