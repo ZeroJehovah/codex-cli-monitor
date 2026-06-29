@@ -30,7 +30,10 @@ visible directory names and status dots instead of reserving a large fixed
 directory column. Running sessions are shown with a blue breathing glow; other
 status dots remain static. The widget saves its last position and display size,
 restores them on launch, and keeps dynamic size changes inside the visible work
-area by anchoring to the touched edge.
+area by anchoring to the touched edge. When attached to the left or right edge,
+the widget waits three seconds after the pointer leaves, then animates into a
+compact dot-only view. Moving the pointer back over the widget interrupts the
+tuck animation and expands the directory names again.
 
 Right-click the floating widget to change display size, open the About page, or
 choose Exit to close it.

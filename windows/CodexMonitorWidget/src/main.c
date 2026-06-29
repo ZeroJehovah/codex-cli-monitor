@@ -15,10 +15,15 @@
 #define SINGLE_INSTANCE_MUTEX_NAME L"Local\\ZeroJehovah.CodexMonitorWidget.SingleInstance"
 #define REFRESH_TIMER_ID 1
 #define ANIMATION_TIMER_ID 2
+#define EDGE_TUCK_TIMER_ID 3
 #define REFRESH_INTERVAL_MS 500
 #define EMPTY_RESULT_CONFIRMATIONS 1
 #define ANIMATION_INTERVAL_MS 16
 #define RUNNING_PULSE_PERIOD_MS 1200
+#define EDGE_TUCK_DELAY_MS 3000
+#define EDGE_TUCK_ANIMATION_DURATION_MS 260
+#define EDGE_TUCK_PROGRESS_MAX 1000
+#define EDGE_TUCK_ATTACH_TOLERANCE 1
 #define WM_FETCH_DONE (WM_APP + 1)
 #define MENU_EXIT_ID 1001
 #define MENU_ABOUT_ID 1002
@@ -88,6 +93,12 @@ typedef struct AppState {
     int drag_refresh_pending;
     int context_menu_open;
     int animation_timer_active;
+    int mouse_inside;
+    int mouse_tracking;
+    int edge_tuck_delay_active;
+    int edge_tuck_target_collapsed;
+    int edge_tuck_progress;
+    DWORD edge_tuck_last_tick;
     int anchor_right;
     int anchor_bottom;
     int placement_offset_x;
@@ -110,6 +121,13 @@ static AppState g_app;
 
 static void set_tooltip_for_hover(int index);
 static void show_context_menu(HWND hwnd, POINT point);
+static void update_animation_timer(void);
+static void update_tool_rect(void);
+static void resize_panel(void);
+static void cancel_edge_tuck_delay(void);
+static void schedule_edge_tuck_delay(void);
+static void set_edge_tuck_target(int collapsed);
+static void sync_edge_tuck_after_layout_change(void);
 
 static void utf8_to_wide(const char *source, wchar_t *target, int target_count) {
     if (target_count <= 0) {
@@ -377,6 +395,47 @@ static int ui_text_dot_gap(void) {
     return ui_dot_right_margin();
 }
 
+static int edge_tuck_target_progress(void) {
+    return g_app.edge_tuck_target_collapsed ? EDGE_TUCK_PROGRESS_MAX : 0;
+}
+
+static int edge_tuck_animating(void) {
+    return g_app.edge_tuck_progress != edge_tuck_target_progress();
+}
+
+static int edge_tuck_eased_progress(void) {
+    int progress = g_app.edge_tuck_progress;
+    if (progress <= 0) {
+        return 0;
+    }
+    if (progress >= EDGE_TUCK_PROGRESS_MAX) {
+        return EDGE_TUCK_PROGRESS_MAX;
+    }
+    return (progress * progress * (3 * EDGE_TUCK_PROGRESS_MAX - 2 * progress) +
+        (EDGE_TUCK_PROGRESS_MAX * EDGE_TUCK_PROGRESS_MAX) / 2) /
+        (EDGE_TUCK_PROGRESS_MAX * EDGE_TUCK_PROGRESS_MAX);
+}
+
+static int interpolate_by_edge_tuck(int expanded, int collapsed) {
+    int progress = edge_tuck_eased_progress();
+    return (expanded * (EDGE_TUCK_PROGRESS_MAX - progress) +
+        collapsed * progress + EDGE_TUCK_PROGRESS_MAX / 2) /
+        EDGE_TUCK_PROGRESS_MAX;
+}
+
+static int current_directory_column_width(void) {
+    return interpolate_by_edge_tuck(g_app.directory_column_width, 0);
+}
+
+static int current_text_dot_gap(void) {
+    return interpolate_by_edge_tuck(ui_text_dot_gap(), 0);
+}
+
+static int directory_text_alpha(void) {
+    int progress = edge_tuck_eased_progress();
+    return 255 * (EDGE_TUCK_PROGRESS_MAX - progress) / EDGE_TUCK_PROGRESS_MAX;
+}
+
 static int row_dot_width(int count) {
     if (count <= 0) {
         return 0;
@@ -396,18 +455,33 @@ static int max_row_session_count(void) {
 }
 
 static int dot_column_left(void) {
-    return ui_directory_left_margin() + g_app.directory_column_width + ui_text_dot_gap();
+    return ui_directory_left_margin() + current_directory_column_width() + current_text_dot_gap();
+}
+
+static int current_min_panel_width(int max_sessions_in_row) {
+    int collapsed_width;
+    if (max_sessions_in_row <= 0) {
+        return ui_min_panel_width();
+    }
+    collapsed_width = ui_directory_left_margin() +
+        row_dot_width(max_sessions_in_row) + ui_dot_right_margin();
+    if (collapsed_width < 1) {
+        collapsed_width = 1;
+    }
+    return interpolate_by_edge_tuck(ui_min_panel_width(), collapsed_width);
 }
 
 static int panel_width(void) {
     int width;
+    int max_sessions_in_row;
     if (g_app.row_count <= 0) {
         return ui_min_panel_width();
     }
-    width = ui_directory_left_margin() + g_app.directory_column_width + ui_text_dot_gap() +
-        row_dot_width(max_row_session_count()) + ui_dot_right_margin();
-    if (width < ui_min_panel_width()) {
-        return ui_min_panel_width();
+    max_sessions_in_row = max_row_session_count();
+    width = ui_directory_left_margin() + current_directory_column_width() + current_text_dot_gap() +
+        row_dot_width(max_sessions_in_row) + ui_dot_right_margin();
+    if (width < current_min_panel_width(max_sessions_in_row)) {
+        return current_min_panel_width(max_sessions_in_row);
     }
     return width;
 }
@@ -652,6 +726,161 @@ static void save_widget_placement(void) {
     write_registry_dword(key, SETTINGS_VALUE_OFFSET_Y, g_app.placement_offset_y);
     write_registry_dword(key, SETTINGS_VALUE_DISPLAY_SIZE, g_app.display_font_points);
     RegCloseKey(key);
+}
+
+static int edge_tuck_side(void) {
+    RECT rect;
+    RECT work_area;
+    if (g_app.hwnd == NULL) {
+        return 0;
+    }
+    if (!GetWindowRect(g_app.hwnd, &rect)) {
+        return 0;
+    }
+    get_work_area_for_rect(&rect, &work_area);
+    if (rect.left <= work_area.left + EDGE_TUCK_ATTACH_TOLERANCE) {
+        return -1;
+    }
+    if (rect.right >= work_area.right - EDGE_TUCK_ATTACH_TOLERANCE) {
+        return 1;
+    }
+    return 0;
+}
+
+static int edge_tuck_available(void) {
+    return g_app.row_count > 0 && edge_tuck_side() != 0;
+}
+
+static int attach_horizontal_edge_anchor(void) {
+    RECT rect;
+    RECT work_area;
+    int side;
+    int width;
+    int old_anchor_right;
+    int old_offset_x;
+    int old_offset_y;
+    if (g_app.hwnd == NULL || !GetWindowRect(g_app.hwnd, &rect)) {
+        return 0;
+    }
+    get_work_area_for_rect(&rect, &work_area);
+    if (rect.left <= work_area.left + EDGE_TUCK_ATTACH_TOLERANCE) {
+        side = -1;
+    } else if (rect.right >= work_area.right - EDGE_TUCK_ATTACH_TOLERANCE) {
+        side = 1;
+    } else {
+        return 0;
+    }
+    width = rect_width(&rect);
+    old_anchor_right = g_app.anchor_right;
+    old_offset_x = g_app.placement_offset_x;
+    old_offset_y = g_app.placement_offset_y;
+    if (side < 0) {
+        g_app.anchor_right = 0;
+        rect.left = work_area.left;
+        rect.right = rect.left + width;
+    } else {
+        g_app.anchor_right = 1;
+        rect.right = work_area.right;
+        rect.left = rect.right - width;
+    }
+    update_placement_offsets_from_rect(&rect, &work_area);
+    if (old_anchor_right != g_app.anchor_right ||
+        old_offset_x != g_app.placement_offset_x ||
+        old_offset_y != g_app.placement_offset_y) {
+        save_widget_placement();
+    }
+    return side;
+}
+
+static void cancel_edge_tuck_delay(void) {
+    if (!g_app.edge_tuck_delay_active || g_app.hwnd == NULL) {
+        g_app.edge_tuck_delay_active = 0;
+        return;
+    }
+    KillTimer(g_app.hwnd, EDGE_TUCK_TIMER_ID);
+    g_app.edge_tuck_delay_active = 0;
+}
+
+static int cursor_inside_widget(void) {
+    POINT point;
+    RECT rect;
+    if (g_app.hwnd == NULL) {
+        return 0;
+    }
+    if (!GetCursorPos(&point) || !GetWindowRect(g_app.hwnd, &rect)) {
+        return 0;
+    }
+    return PtInRect(&rect, point);
+}
+
+static void schedule_edge_tuck_delay(void) {
+    if (g_app.hwnd == NULL ||
+        g_app.dragging ||
+        g_app.context_menu_open ||
+        g_app.mouse_inside ||
+        cursor_inside_widget() ||
+        !edge_tuck_available()) {
+        return;
+    }
+    attach_horizontal_edge_anchor();
+    if (!g_app.edge_tuck_delay_active) {
+        SetTimer(g_app.hwnd, EDGE_TUCK_TIMER_ID, EDGE_TUCK_DELAY_MS, NULL);
+        g_app.edge_tuck_delay_active = 1;
+    }
+}
+
+static void set_edge_tuck_target(int collapsed) {
+    int normalized = collapsed ? 1 : 0;
+    if (normalized && !edge_tuck_available()) {
+        normalized = 0;
+    }
+    if (normalized) {
+        attach_horizontal_edge_anchor();
+    }
+    if (g_app.edge_tuck_target_collapsed == normalized) {
+        return;
+    }
+    g_app.edge_tuck_target_collapsed = normalized;
+    g_app.edge_tuck_last_tick = GetTickCount();
+    update_animation_timer();
+}
+
+static void sync_edge_tuck_after_layout_change(void) {
+    int old_progress = g_app.edge_tuck_progress;
+    int old_target = g_app.edge_tuck_target_collapsed;
+    if (!edge_tuck_available()) {
+        cancel_edge_tuck_delay();
+        g_app.edge_tuck_target_collapsed = 0;
+        g_app.edge_tuck_progress = 0;
+        if (old_progress != g_app.edge_tuck_progress ||
+            old_target != g_app.edge_tuck_target_collapsed) {
+            update_animation_timer();
+            resize_panel();
+            update_tool_rect();
+            InvalidateRect(g_app.hwnd, NULL, FALSE);
+        }
+        return;
+    }
+    if (g_app.mouse_inside || g_app.dragging || g_app.context_menu_open) {
+        cancel_edge_tuck_delay();
+        set_edge_tuck_target(0);
+    } else if (!g_app.edge_tuck_target_collapsed && g_app.edge_tuck_progress == 0) {
+        schedule_edge_tuck_delay();
+    }
+}
+
+static void track_mouse_leave(HWND hwnd) {
+    TRACKMOUSEEVENT event;
+    if (g_app.mouse_tracking) {
+        return;
+    }
+    ZeroMemory(&event, sizeof(event));
+    event.cbSize = sizeof(event);
+    event.dwFlags = TME_LEAVE;
+    event.hwndTrack = hwnd;
+    if (TrackMouseEvent(&event)) {
+        g_app.mouse_tracking = 1;
+    }
 }
 
 static RECT dot_rect(int row_index, int dot_index) {
@@ -1285,12 +1514,45 @@ static void resize_panel(void) {
         flags |= SWP_NOZORDER;
     }
     SetWindowPos(g_app.hwnd, insert_after, target.left, target.top, width, height, flags);
-    if (old_anchor_right != g_app.anchor_right ||
+    if ((!edge_tuck_animating() &&
+            (old_anchor_right != g_app.anchor_right ||
+                old_offset_x != g_app.placement_offset_x)) ||
         old_anchor_bottom != g_app.anchor_bottom ||
-        old_offset_x != g_app.placement_offset_x ||
         old_offset_y != g_app.placement_offset_y) {
         save_widget_placement();
     }
+}
+
+static void advance_edge_tuck_animation(void) {
+    DWORD now;
+    DWORD elapsed;
+    int target = edge_tuck_target_progress();
+    int direction;
+    int delta;
+    if (!edge_tuck_animating()) {
+        return;
+    }
+    now = GetTickCount();
+    if (g_app.edge_tuck_last_tick == 0) {
+        g_app.edge_tuck_last_tick = now;
+    }
+    elapsed = now - g_app.edge_tuck_last_tick;
+    g_app.edge_tuck_last_tick = now;
+    if (elapsed > EDGE_TUCK_ANIMATION_DURATION_MS) {
+        elapsed = EDGE_TUCK_ANIMATION_DURATION_MS;
+    }
+    direction = target > g_app.edge_tuck_progress ? 1 : -1;
+    delta = (int)(elapsed * EDGE_TUCK_PROGRESS_MAX / EDGE_TUCK_ANIMATION_DURATION_MS);
+    if (delta < 1) {
+        delta = 1;
+    }
+    g_app.edge_tuck_progress += direction * delta;
+    if ((direction > 0 && g_app.edge_tuck_progress > target) ||
+        (direction < 0 && g_app.edge_tuck_progress < target)) {
+        g_app.edge_tuck_progress = target;
+    }
+    resize_panel();
+    update_tool_rect();
 }
 
 static void update_tool_rect(void) {
@@ -1301,7 +1563,7 @@ static void update_tool_rect(void) {
 }
 
 static void update_animation_timer(void) {
-    if (has_running_sessions()) {
+    if (has_running_sessions() || edge_tuck_animating()) {
         if (!g_app.animation_timer_active) {
             SetTimer(g_app.hwnd, ANIMATION_TIMER_ID, ANIMATION_INTERVAL_MS, NULL);
             g_app.animation_timer_active = 1;
@@ -1313,6 +1575,7 @@ static void update_animation_timer(void) {
 }
 
 static void refresh_widget_view(void) {
+    sync_edge_tuck_after_layout_change();
     resize_panel();
     update_tool_rect();
     update_animation_timer();
@@ -1419,6 +1682,7 @@ static void apply_display_font_points(int points) {
     if (points == g_app.display_font_points) {
         return;
     }
+    set_edge_tuck_target(0);
     g_app.display_font_points = points;
     update_display_font();
     update_directory_column_width();
@@ -1474,6 +1738,7 @@ static void show_context_menu(HWND hwnd, POINT point) {
     if (g_app.tooltip != NULL) {
         SendMessageW(g_app.tooltip, TTM_POP, 0, 0);
     }
+    set_edge_tuck_target(0);
     g_app.context_menu_open = 1;
     SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
@@ -1484,6 +1749,9 @@ static void show_context_menu(HWND hwnd, POINT point) {
     DestroyMenu(menu);
     g_app.context_menu_open = 0;
     PostMessageW(hwnd, WM_NULL, 0, 0);
+    if (!g_app.mouse_inside && !cursor_inside_widget()) {
+        schedule_edge_tuck_delay();
+    }
     if (command == MENU_EXIT_ID) {
         DestroyWindow(hwnd);
         return;
@@ -1790,9 +2058,12 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
         text_rect.left = ui_directory_left_margin();
         text_rect.top = row_rect.top;
-        text_rect.right = text_rect.left + g_app.directory_column_width;
+        text_rect.right = text_rect.left + current_directory_column_width();
         text_rect.bottom = row_rect.bottom;
-        draw_directory_text(hdc, display_name_wide, &text_rect, row_rect.top);
+        if (text_rect.right > text_rect.left && directory_text_alpha() > 0) {
+            SetTextColor(hdc, blend_color(RGB(225, 225, 225), row_color, directory_text_alpha()));
+            draw_directory_text(hdc, display_name_wide, &text_rect, row_rect.top);
+        }
         for (dot = 0; dot < g_app.rows[row].session_count; dot++) {
             int session_index = g_app.rows[row].session_indexes[dot];
             RECT rect = dot_rect(row, dot);
@@ -1847,7 +2118,17 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         if (wparam == REFRESH_TIMER_ID) {
             start_fetch();
         } else if (wparam == ANIMATION_TIMER_ID) {
+            advance_edge_tuck_animation();
             InvalidateRect(hwnd, NULL, FALSE);
+            update_animation_timer();
+        } else if (wparam == EDGE_TUCK_TIMER_ID) {
+            cancel_edge_tuck_delay();
+            if (!g_app.mouse_inside &&
+                !cursor_inside_widget() &&
+                !g_app.dragging &&
+                !g_app.context_menu_open) {
+                set_edge_tuck_target(1);
+            }
         }
         return 0;
     case WM_ERASEBKGND:
@@ -1891,6 +2172,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return 0;
     }
     case WM_LBUTTONDOWN:
+        cancel_edge_tuck_delay();
+        set_edge_tuck_target(0);
         g_app.dragging = 1;
         g_app.drag_refresh_pending = 0;
         g_app.drag_start.x = GET_X_LPARAM(lparam);
@@ -1904,6 +2187,12 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         int hovered;
         point.x = GET_X_LPARAM(lparam);
         point.y = GET_Y_LPARAM(lparam);
+        if (!g_app.mouse_inside) {
+            g_app.mouse_inside = 1;
+        }
+        track_mouse_leave(hwnd);
+        cancel_edge_tuck_delay();
+        set_edge_tuck_target(0);
         if (g_app.dragging) {
             RECT desired = g_app.drag_window;
             RECT target;
@@ -1925,6 +2214,13 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         }
         return 0;
     }
+    case WM_MOUSELEAVE:
+        g_app.mouse_inside = 0;
+        g_app.mouse_tracking = 0;
+        g_app.hovered_session = -1;
+        set_tooltip_for_hover(-1);
+        schedule_edge_tuck_delay();
+        return 0;
     case WM_LBUTTONUP:
         if (g_app.dragging) {
             g_app.dragging = 0;
@@ -1933,6 +2229,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             if (g_app.drag_refresh_pending) {
                 g_app.drag_refresh_pending = 0;
                 refresh_widget_view();
+            } else {
+                sync_edge_tuck_after_layout_change();
             }
         }
         return 0;
@@ -1943,6 +2241,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             ReleaseCapture();
             save_widget_placement();
         }
+        cancel_edge_tuck_delay();
+        set_edge_tuck_target(0);
         point.x = GET_X_LPARAM(lparam);
         point.y = GET_Y_LPARAM(lparam);
         ClientToScreen(hwnd, &point);
@@ -1951,6 +2251,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     }
     case WM_CONTEXTMENU: {
         POINT point;
+        cancel_edge_tuck_delay();
+        set_edge_tuck_target(0);
         if ((int)(short)LOWORD(lparam) == -1 && (int)(short)HIWORD(lparam) == -1) {
             RECT rect;
             GetWindowRect(hwnd, &rect);
@@ -1984,12 +2286,15 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         update_tool_rect();
         return 0;
     case WM_MOUSEWHEEL:
+        cancel_edge_tuck_delay();
+        set_edge_tuck_target(0);
         apply_display_font_wheel_delta(GET_WHEEL_DELTA_WPARAM(wparam));
         return 0;
     case WM_DESTROY:
         save_widget_placement();
         KillTimer(hwnd, REFRESH_TIMER_ID);
         KillTimer(hwnd, ANIMATION_TIMER_ID);
+        KillTimer(hwnd, EDGE_TUCK_TIMER_ID);
         if (g_app.font != NULL) {
             DeleteObject(g_app.font);
             g_app.font = NULL;
