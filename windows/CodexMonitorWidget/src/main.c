@@ -553,7 +553,7 @@ static int actual_panel_width(void) {
     return panel_width();
 }
 
-static RECT visible_window_rect_from_rect(const RECT *rect) {
+static RECT visible_rect_from_rect(const RECT *rect) {
     RECT visible = *rect;
     if (right_edge_tuck_region_active()) {
         int visible_width = panel_width();
@@ -899,7 +899,7 @@ static int cursor_inside_widget(void) {
     if (!GetCursorPos(&point) || !GetWindowRect(g_app.hwnd, &rect)) {
         return 0;
     }
-    visible = visible_window_rect_from_rect(&rect);
+    visible = visible_rect_from_rect(&rect);
     return PtInRect(&visible, point);
 }
 
@@ -2168,6 +2168,7 @@ static void draw_directory_text(HDC hdc, const wchar_t *text, const RECT *rect, 
 
 static void paint_widget(HWND hwnd, HDC hdc) {
     RECT client;
+    RECT visible_client;
     HBRUSH background;
     HBRUSH row_background;
     HPEN border;
@@ -2175,6 +2176,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
     HGDIOBJ old_pen;
     int row;
     GetClientRect(hwnd, &client);
+    visible_client = visible_rect_from_rect(&client);
     background = CreateSolidBrush(RGB(34, 34, 34));
     FillRect(hdc, &client, background);
     DeleteObject(background);
@@ -2218,7 +2220,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
     border = CreatePen(PS_SOLID, 1, RGB(86, 86, 86));
     old_pen = SelectObject(hdc, border);
     SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    Rectangle(hdc, client.left, client.top, client.right, client.bottom);
+    Rectangle(hdc, visible_client.left, visible_client.top, visible_client.right, visible_client.bottom);
     SelectObject(hdc, old_pen);
     DeleteObject(border);
 }
