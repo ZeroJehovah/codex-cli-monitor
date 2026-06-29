@@ -77,6 +77,54 @@ STATE_PATTERNS = (
 )
 
 
+class _TurnRecordSummary:
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.seen = False
+        self.turn_id: str | None = None
+        self.turn_started_at: float | None = None
+        self.latest_terminal_record: dict | None = None
+        self.failed_event = False
+        self.saw_user = False
+        self.saw_token_count = False
+        self.saw_visible_assistant_or_tool = False
+
+    def add(self, record: dict) -> None:
+        self.seen = True
+        if self.turn_id is None:
+            self.turn_id = _turn_id_from_record(record)
+        if self.turn_started_at is None and (
+            _is_turn_start_record(record) or _is_user_message_record(record)
+        ):
+            self.turn_started_at = _timestamp_from_record(record)
+
+        payload = record.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        if _optional_str(payload.get("type")) in TERMINAL_PAYLOAD_TYPES:
+            self.latest_terminal_record = record
+        if _optional_str(payload.get("type")) == "token_count":
+            self.saw_token_count = True
+        if _is_user_message_record(record):
+            self.saw_user = True
+        if _is_visible_assistant_or_tool_record(record):
+            self.saw_visible_assistant_or_tool = True
+        if _record_is_failed_event(record):
+            self.failed_event = True
+
+    def completed_without_visible_response(
+        self,
+        terminal_payload_type: str | None,
+    ) -> bool:
+        return (
+            terminal_payload_type in TERMINAL_PAYLOAD_TYPES
+            and self.saw_user
+            and self.saw_token_count
+            and not self.saw_visible_assistant_or_tool
+        )
+
+
 def default_codex_home(env: Mapping[str, str] | None = None) -> Path:
     env = env or os.environ
     if env.get("CODEX_HOME"):
@@ -202,13 +250,10 @@ def _session_activity(
     except ValueError:
         relative_path = path.as_posix()
 
-    records = _iter_jsonl_records(path, head_limit=8, tail_limit=160)
-    first_record = None
-    last_record = None
-    for record in records:
-        if first_record is None:
-            first_record = record
-        last_record = record
+    scanned = _scan_session_records(path)
+    if scanned is None:
+        return None
+    first_record, last_record, latest_turn = scanned
 
     session_id = _session_id_from_record(first_record) or _session_id_from_name(path.name)
     cwd = _cwd_from_record(first_record)
@@ -217,8 +262,7 @@ def _session_activity(
     last_payload_type = _optional_str(last_payload.get("type"))
     last_record_type = _optional_str(last_record.get("type")) if isinstance(last_record, dict) else None
     last_payload_reason = _optional_str(last_payload.get("reason"))
-    recent_turn_records = _records_since_latest_turn(records)
-    latest_terminal_record = _latest_terminal_record(recent_turn_records)
+    latest_terminal_record = latest_turn.latest_terminal_record
     latest_terminal_payload = (
         latest_terminal_record.get("payload")
         if isinstance(latest_terminal_record, dict)
@@ -228,22 +272,20 @@ def _session_activity(
         latest_terminal_payload if isinstance(latest_terminal_payload, dict) else {}
     )
     terminal_payload_type = _optional_str(latest_terminal_payload.get("type"))
-    failed_event = any(
-        _record_is_failed_event(record) for record in recent_turn_records
-    ) or _turn_completed_without_visible_response(
-        recent_turn_records, terminal_payload_type
+    failed_event = latest_turn.failed_event or latest_turn.completed_without_visible_response(
+        terminal_payload_type
     )
 
     return SessionActivity(
         relative_path=relative_path,
         session_id=session_id,
-        turn_id=_turn_id_from_records(recent_turn_records),
+        turn_id=latest_turn.turn_id,
         cwd=cwd,
         size_bytes=stat.st_size,
         modified_at=stat.st_mtime,
         observed_at=observed_at,
         last_record_at=_timestamp_from_record(last_record),
-        turn_started_at=_turn_started_at(recent_turn_records),
+        turn_started_at=latest_turn.turn_started_at,
         terminal_event_at=_timestamp_from_record(latest_terminal_record),
         last_record_type=last_record_type,
         last_payload_type=last_payload_type,
@@ -254,37 +296,51 @@ def _session_activity(
     )
 
 
-def _iter_jsonl_records(
+def _scan_session_records(
     path: Path,
-    head_limit: int,
-    tail_limit: int,
-) -> tuple[dict, ...]:
+) -> tuple[dict | None, dict | None, _TurnRecordSummary] | None:
+    first_record = None
+    last_record = None
+    all_records = _TurnRecordSummary()
+    explicit_turn = _TurnRecordSummary()
+    user_turn = _TurnRecordSummary()
+
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
-            head = []
-            tail = []
-            for index, line in enumerate(handle):
-                if index < head_limit:
-                    head.append(line)
-                tail.append(line)
-                if len(tail) > tail_limit:
-                    tail.pop(0)
-    except OSError:
-        return ()
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
 
-    records = []
-    seen_lines = set()
-    for line in [*head, *tail]:
-        if line in seen_lines:
-            continue
-        seen_lines.add(line)
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(record, dict):
-            records.append(record)
-    return tuple(records)
+                if first_record is None:
+                    first_record = record
+                last_record = record
+                all_records.add(record)
+
+                if _is_turn_start_record(record):
+                    explicit_turn.reset()
+                    explicit_turn.add(record)
+                elif explicit_turn.seen:
+                    explicit_turn.add(record)
+
+                if _is_user_message_record(record):
+                    user_turn.reset()
+                    user_turn.add(record)
+                elif user_turn.seen:
+                    user_turn.add(record)
+    except OSError:
+        return None
+
+    if explicit_turn.seen:
+        latest_turn = explicit_turn
+    elif user_turn.seen:
+        latest_turn = user_turn
+    else:
+        latest_turn = all_records
+    return first_record, last_record, latest_turn
 
 
 def _session_id_from_record(record: dict | None) -> str | None:
@@ -334,26 +390,6 @@ def _is_failed_event(
     )
 
 
-def _records_since_latest_user(records: tuple[dict, ...]) -> tuple[dict, ...]:
-    latest_user_index = None
-    for index, record in enumerate(records):
-        if _is_user_message_record(record):
-            latest_user_index = index
-    if latest_user_index is None:
-        return records
-    return records[latest_user_index:]
-
-
-def _records_since_latest_turn(records: tuple[dict, ...]) -> tuple[dict, ...]:
-    latest_turn_index = None
-    for index, record in enumerate(records):
-        if _is_turn_start_record(record):
-            latest_turn_index = index
-    if latest_turn_index is not None:
-        return records[latest_turn_index:]
-    return _records_since_latest_user(records)
-
-
 def _is_turn_start_record(record: dict) -> bool:
     payload = record.get("payload")
     payload = payload if isinstance(payload, dict) else {}
@@ -362,24 +398,6 @@ def _is_turn_start_record(record: dict) -> bool:
     return record_type == "turn_context" or (
         record_type == "event_msg" and payload_type == "task_started"
     )
-
-
-def _latest_terminal_record(records: tuple[dict, ...]) -> dict | None:
-    latest = None
-    for record in records:
-        payload = record.get("payload")
-        payload = payload if isinstance(payload, dict) else {}
-        if _optional_str(payload.get("type")) in TERMINAL_PAYLOAD_TYPES:
-            latest = record
-    return latest
-
-
-def _turn_id_from_records(records: tuple[dict, ...]) -> str | None:
-    for record in records:
-        turn_id = _turn_id_from_record(record)
-        if turn_id is not None:
-            return turn_id
-    return None
 
 
 def _turn_id_from_record(record: dict) -> str | None:
@@ -392,15 +410,6 @@ def _turn_id_from_record(record: dict) -> str | None:
         or metadata.get("turn_id")
         or record.get("turn_id")
     )
-
-
-def _turn_started_at(records: tuple[dict, ...]) -> float | None:
-    for record in records:
-        if _is_turn_start_record(record) or _is_user_message_record(record):
-            timestamp = _timestamp_from_record(record)
-            if timestamp is not None:
-                return timestamp
-    return None
 
 
 def _timestamp_from_record(record: dict | None) -> float | None:
@@ -430,26 +439,6 @@ def _record_is_failed_event(record: dict) -> bool:
         payload_type,
         payload_reason,
     ) or _is_failed_message_record(record_type, payload)
-
-
-def _turn_completed_without_visible_response(
-    records: tuple[dict, ...],
-    last_payload_type: str | None,
-) -> bool:
-    if last_payload_type not in TERMINAL_PAYLOAD_TYPES:
-        return False
-    saw_user = False
-    saw_token_count = False
-    for record in records:
-        if _is_user_message_record(record):
-            saw_user = True
-        if _is_visible_assistant_or_tool_record(record):
-            return False
-        payload = record.get("payload")
-        payload = payload if isinstance(payload, dict) else {}
-        if _optional_str(payload.get("type")) == "token_count":
-            saw_token_count = True
-    return saw_user and saw_token_count
 
 
 def _is_visible_assistant_or_tool_record(record: dict) -> bool:
