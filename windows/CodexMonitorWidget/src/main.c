@@ -27,6 +27,7 @@
 #define WM_FETCH_DONE (WM_APP + 1)
 #define MENU_EXIT_ID 1001
 #define MENU_ABOUT_ID 1002
+#define MENU_EDGE_TUCK_ID 1003
 #define MENU_SIZE_BASE_ID 1100
 #define MAX_SESSIONS 128
 #define DOT_SIZE 14
@@ -46,6 +47,7 @@
 #define SETTINGS_VALUE_OFFSET_X L"OffsetX"
 #define SETTINGS_VALUE_OFFSET_Y L"OffsetY"
 #define SETTINGS_VALUE_DISPLAY_SIZE L"DisplaySize"
+#define SETTINGS_VALUE_EDGE_TUCK_ENABLED L"EdgeTuckEnabled"
 #define PROJECT_GITHUB_URL L"https://github.com/ZeroJehovah/api-alive"
 
 typedef struct Session {
@@ -98,6 +100,7 @@ typedef struct AppState {
     int edge_tuck_delay_active;
     int edge_tuck_target_collapsed;
     int edge_tuck_progress;
+    int edge_tuck_enabled;
     DWORD edge_tuck_last_tick;
     int anchor_right;
     int anchor_bottom;
@@ -711,6 +714,9 @@ static void load_widget_placement(void) {
     if (read_registry_dword(key, SETTINGS_VALUE_DISPLAY_SIZE, &value)) {
         g_app.display_font_points = normalized_display_font_points(value);
     }
+    if (read_registry_dword(key, SETTINGS_VALUE_EDGE_TUCK_ENABLED, &value)) {
+        g_app.edge_tuck_enabled = value != 0;
+    }
     RegCloseKey(key);
 }
 
@@ -725,6 +731,7 @@ static void save_widget_placement(void) {
     write_registry_dword(key, SETTINGS_VALUE_OFFSET_X, g_app.placement_offset_x);
     write_registry_dword(key, SETTINGS_VALUE_OFFSET_Y, g_app.placement_offset_y);
     write_registry_dword(key, SETTINGS_VALUE_DISPLAY_SIZE, g_app.display_font_points);
+    write_registry_dword(key, SETTINGS_VALUE_EDGE_TUCK_ENABLED, g_app.edge_tuck_enabled);
     RegCloseKey(key);
 }
 
@@ -748,7 +755,7 @@ static int edge_tuck_side(void) {
 }
 
 static int edge_tuck_available(void) {
-    return g_app.row_count > 0 && edge_tuck_side() != 0;
+    return g_app.edge_tuck_enabled && g_app.row_count > 0 && edge_tuck_side() != 0;
 }
 
 static int attach_horizontal_edge_anchor(void) {
@@ -1720,10 +1727,23 @@ static void open_about_page(HWND hwnd) {
     ShellExecuteW(hwnd, L"open", PROJECT_GITHUB_URL, NULL, NULL, SW_SHOWNORMAL);
 }
 
+static void apply_edge_tuck_enabled(int enabled) {
+    int normalized = enabled ? 1 : 0;
+    if (g_app.edge_tuck_enabled == normalized) {
+        return;
+    }
+    g_app.edge_tuck_enabled = normalized;
+    cancel_edge_tuck_delay();
+    set_edge_tuck_target(0);
+    refresh_widget_view();
+    save_widget_placement();
+}
+
 static void show_context_menu(HWND hwnd, POINT point) {
     HMENU menu = CreatePopupMenu();
     UINT command;
     int selected_points;
+    UINT edge_tuck_flags = MF_STRING;
     if (g_app.context_menu_open) {
         return;
     }
@@ -1731,6 +1751,10 @@ static void show_context_menu(HWND hwnd, POINT point) {
         return;
     }
     append_display_size_menu(menu);
+    if (g_app.edge_tuck_enabled) {
+        edge_tuck_flags |= MF_CHECKED;
+    }
+    AppendMenuW(menu, edge_tuck_flags, MENU_EDGE_TUCK_ID, L"\x8d34\x8fb9\x6536\x7eb3");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, MENU_ABOUT_ID, L"\x5173\x4e8e");
     AppendMenuW(menu, MF_STRING, MENU_EXIT_ID, L"\x9000\x51fa");
@@ -1754,6 +1778,11 @@ static void show_context_menu(HWND hwnd, POINT point) {
     }
     if (command == MENU_EXIT_ID) {
         DestroyWindow(hwnd);
+        return;
+    }
+    if (command == MENU_EDGE_TUCK_ID) {
+        apply_edge_tuck_enabled(!g_app.edge_tuck_enabled);
+        restore_widget_topmost(hwnd);
         return;
     }
     if (display_size_from_command(command, &selected_points)) {
@@ -2274,6 +2303,10 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             open_about_page(hwnd);
             return 0;
         }
+        if (LOWORD(wparam) == MENU_EDGE_TUCK_ID) {
+            apply_edge_tuck_enabled(!g_app.edge_tuck_enabled);
+            return 0;
+        }
         {
             int selected_points;
             if (display_size_from_command((UINT)LOWORD(wparam), &selected_points)) {
@@ -2359,6 +2392,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
 
     ZeroMemory(&g_app, sizeof(g_app));
     g_app.display_font_points = DEFAULT_DISPLAY_FONT_POINTS;
+    g_app.edge_tuck_enabled = 1;
     resolve_api_url();
     get_primary_work_area(&work_area);
     set_default_widget_placement(&work_area);
