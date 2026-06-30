@@ -224,20 +224,28 @@ def infer_status(
 
 
 def is_codex_process(process: ProcessInfo) -> bool:
-    names = {
-        _clean_process_name(Path(value).name)
-        for value in (process.command_name, process.comm or "", process.exe or "")
-        if value
-    }
-    if names.intersection({"codex", "codex.exe"}):
+    if is_native_codex_process(process):
         return True
 
     cmdline_text = "\0".join(process.cmdline)
     if "@openai/codex" in cmdline_text:
         return True
-    if "/codex/bin/" in cmdline_text and "node" in names:
+    if "/codex/bin/" in cmdline_text and "node" in _process_names(process):
         return True
     return False
+
+
+def is_native_codex_process(process: ProcessInfo) -> bool:
+    return bool(_process_names(process).intersection({"codex", "codex.exe"}))
+
+
+def _process_names(process: ProcessInfo) -> set[str]:
+    names = {
+        _clean_process_name(Path(value).name)
+        for value in (process.command_name, process.comm or "", process.exe or "")
+        if value
+    }
+    return names
 
 
 def _clean_process_name(value: str) -> str:

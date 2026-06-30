@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from .classify import infer_status, is_codex_process
+from .classify import infer_status, is_native_codex_process
 from .codex_state import scan_codex_state, scan_session_activities
 from .models import (
     CodexSession,
@@ -22,6 +22,26 @@ from .shim import default_log_path, load_launch_records
 
 ACTIVITY_TIMESTAMP_GRACE_SECONDS = 5.0
 INACTIVE_ROOT_STATES = {"T", "t", "Z", "X", "x"}
+SESSION_BINDING_UNKNOWN_DELTA_SECONDS = 365 * 24 * 3600.0
+CODEX_MAINTENANCE_ARGS = {
+    "--self-update",
+    "--self_update",
+    "--update",
+    "--upgrade",
+    "add",
+    "install",
+    "self-update",
+    "self_update",
+    "update",
+    "upgrade",
+}
+PACKAGE_MANAGER_COMMANDS = {
+    "corepack",
+    "npm",
+    "npx",
+    "pnpm",
+    "yarn",
+}
 
 
 def inspect_runtime(
@@ -84,17 +104,28 @@ def discover_sessions(
     connections_by_pid = read_network_connections(proc_root, relevant_pids)
     launch_records = load_launch_records(shim_log or default_log_path())
     hook_states = summarize_hook_events(load_hook_events(hook_log))
+    hook_states_by_pid = {
+        root.pid: _hook_state_for_root(root, hook_states) for root in codex_roots
+    }
+    state_activities_by_pid = _state_activities_for_roots(
+        codex_roots,
+        session_activities,
+        hook_states_by_pid,
+    )
 
     sessions = []
     for root in codex_roots:
         descendants = descendants_by_pid[root.pid]
         connections = _connections_for((root, *descendants), connections_by_pid)
-        hook_state = _hook_state_for_root(root, hook_states)
-        state_activity = _state_activity_for_root(
+        hook_state = hook_states_by_pid[root.pid]
+        state_activity = state_activities_by_pid.get(root.pid)
+        if _should_ignore_maintenance_root(
             root,
-            session_activities,
+            descendants,
             hook_state,
-        )
+            state_activity,
+        ):
+            continue
         inference = infer_status(
             root,
             descendants,
@@ -142,7 +173,9 @@ def _with_cpu_deltas(
 
 
 def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, ...]:
-    codex_pids = {pid for pid, process in processes.items() if is_codex_process(process)}
+    codex_pids = {
+        pid for pid, process in processes.items() if is_native_codex_process(process)
+    }
     visible_codex_pids = {
         pid
         for pid in codex_pids
@@ -199,13 +232,45 @@ def _connections_for(
     return tuple(result)
 
 
-def _state_activity_for_root(
+def _state_activities_for_roots(
+    roots: tuple[ProcessInfo, ...],
+    activities: tuple[SessionActivity, ...],
+    hook_states_by_pid: dict[int, HookSessionState | None],
+) -> dict[int, SessionActivity]:
+    candidate_pairs: list[
+        tuple[tuple[float, float, float, float], int, str, SessionActivity]
+    ] = []
+    for root in roots:
+        hook_state = hook_states_by_pid.get(root.pid)
+        for activity in _activity_candidates_for_root(root, activities, hook_state):
+            candidate_pairs.append(
+                (
+                    _activity_sort_key_for_root(root, activity, hook_state),
+                    root.pid,
+                    activity.relative_path,
+                    activity,
+                )
+            )
+
+    assigned_roots: set[int] = set()
+    assigned_activities: set[str] = set()
+    result: dict[int, SessionActivity] = {}
+    for _, pid, relative_path, activity in sorted(candidate_pairs):
+        if pid in assigned_roots or relative_path in assigned_activities:
+            continue
+        result[pid] = activity
+        assigned_roots.add(pid)
+        assigned_activities.add(relative_path)
+    return result
+
+
+def _activity_candidates_for_root(
     root: ProcessInfo,
     activities: tuple[SessionActivity, ...],
     hook_state: HookSessionState | None = None,
-) -> SessionActivity | None:
+) -> tuple[SessionActivity, ...]:
     if hook_state is not None and hook_state.last_event == "session_start":
-        return None
+        return ()
 
     root_cwd = _normalize_path(root.cwd)
     candidates = []
@@ -214,7 +279,7 @@ def _state_activity_for_root(
         if root_cwd is None or activity_cwd is None:
             continue
         if root_cwd == activity_cwd:
-            if _is_before_process_start(activity.modified_at, root):
+            if _activity_is_before_process_start(activity, root):
                 continue
             if hook_state is not None and not _activity_matches_hook(
                 activity,
@@ -222,9 +287,63 @@ def _state_activity_for_root(
             ):
                 continue
             candidates.append(activity)
-    if not candidates:
+    return tuple(candidates)
+
+
+def _activity_sort_key_for_root(
+    root: ProcessInfo,
+    activity: SessionActivity,
+    hook_state: HookSessionState | None,
+) -> tuple[float, float, float, float]:
+    hook_rank = 0.0 if hook_state is not None else 1.0
+    idle_reset_rank = (
+        0.0
+        if hook_state is not None
+        and _activity_is_idle_reset_after_stop(activity, hook_state)
+        else 1.0
+    )
+    delta = _activity_hook_delta(activity, hook_state)
+    if delta is None:
+        delta = _activity_process_start_delta(activity, root)
+    if delta is None:
+        delta = SESSION_BINDING_UNKNOWN_DELTA_SECONDS
+    event_at = _activity_event_time(activity)
+    recency = -(event_at or activity.modified_at)
+    return hook_rank, idle_reset_rank, delta, recency
+
+
+def _activity_hook_delta(
+    activity: SessionActivity,
+    hook_state: HookSessionState | None,
+) -> float | None:
+    if hook_state is None:
         return None
-    return sorted(candidates, key=lambda item: item.modified_at, reverse=True)[0]
+    if hook_state.turn_started_at is not None and activity.turn_started_at is not None:
+        return abs(activity.turn_started_at - hook_state.turn_started_at)
+    if (
+        hook_state.last_stopped_at is not None
+        and activity.terminal_event_at is not None
+    ):
+        return abs(activity.terminal_event_at - hook_state.last_stopped_at)
+    event_at = _activity_event_time(activity)
+    if event_at is not None:
+        return abs(event_at - hook_state.updated_at)
+    return None
+
+
+def _activity_process_start_delta(
+    activity: SessionActivity,
+    root: ProcessInfo,
+) -> float | None:
+    if root.started_at is None:
+        return None
+    activity_started_at = (
+        activity.session_started_at
+        or activity.turn_started_at
+        or activity.last_record_at
+        or activity.modified_at
+    )
+    return abs(activity_started_at - root.started_at)
 
 
 def _hook_state_for_root(
@@ -244,6 +363,56 @@ def _hook_state_for_root(
         if state.codex_pid is None and not _is_before_process_start(state.updated_at, root):
             return state
     return None
+
+
+def _should_ignore_maintenance_root(
+    root: ProcessInfo,
+    descendants: tuple[ProcessInfo, ...],
+    hook_state: HookSessionState | None,
+    state_activity: SessionActivity | None,
+) -> bool:
+    if not _looks_like_codex_maintenance_tree(root, descendants):
+        return False
+    if hook_state is not None and (
+        hook_state.in_turn or hook_state.active_tool_count > 0
+    ):
+        return False
+    if (
+        state_activity is not None
+        and state_activity.latest_turn_has_user
+        and not state_activity.terminal_event
+    ):
+        return False
+    return True
+
+
+def _looks_like_codex_maintenance_tree(
+    root: ProcessInfo,
+    descendants: tuple[ProcessInfo, ...],
+) -> bool:
+    if _process_has_codex_maintenance_args(root):
+        return True
+    return any(_process_is_codex_package_manager(process) for process in descendants)
+
+
+def _process_has_codex_maintenance_args(process: ProcessInfo) -> bool:
+    args = tuple(_normalized_arg(arg) for arg in process.cmdline[1:])
+    return any(arg in CODEX_MAINTENANCE_ARGS for arg in args)
+
+
+def _process_is_codex_package_manager(process: ProcessInfo) -> bool:
+    command = _normalized_arg(process.command_name)
+    if command not in PACKAGE_MANAGER_COMMANDS:
+        return False
+    args = tuple(_normalized_arg(arg) for arg in process.cmdline[1:])
+    if not any(arg in CODEX_MAINTENANCE_ARGS for arg in args):
+        return False
+    command_text = "\0".join(process.cmdline).lower()
+    return "@openai/codex" in command_text or "openai/codex" in command_text
+
+
+def _normalized_arg(value: str) -> str:
+    return Path(value).name.lower()
 
 
 def _display_status(
@@ -369,3 +538,18 @@ def _is_before_process_start(timestamp: float, process: ProcessInfo) -> bool:
     if process.started_at is None:
         return False
     return timestamp < process.started_at
+
+
+def _activity_is_before_process_start(
+    activity: SessionActivity,
+    process: ProcessInfo,
+) -> bool:
+    if process.started_at is None:
+        return False
+    if activity.modified_at < process.started_at:
+        return True
+    return (
+        activity.session_started_at is not None
+        and activity.session_started_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS
+        < process.started_at
+    )
