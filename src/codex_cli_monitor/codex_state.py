@@ -257,6 +257,33 @@ def scan_session_activities(
     return tuple(activities)
 
 
+def scan_new_session_markers(
+    codex_home: Path | None = None,
+    max_files: int = 80,
+) -> tuple[SessionActivity, ...]:
+    home = (codex_home or default_codex_home()).expanduser()
+    if not home.is_dir():
+        return ()
+
+    observed_at = time.time()
+    session_ids = _session_ids_for_home(home)
+    try:
+        paths = sorted(
+            home.glob("shell_snapshots/*.sh"),
+            key=lambda path: _mtime_or_zero(path),
+            reverse=True,
+        )[:max_files]
+    except OSError:
+        return ()
+
+    markers = []
+    for path in paths:
+        marker = _new_session_marker(home, path, observed_at, session_ids)
+        if marker is not None:
+            markers.append(marker)
+    return tuple(markers)
+
+
 def _state_file(home: Path, path: Path) -> StateFile | None:
     try:
         stat = path.stat()
@@ -374,6 +401,43 @@ def _session_activity_metadata(
         size_bytes=stat.st_size,
         modified_at=stat.st_mtime,
         observed_at=observed_at,
+    )
+
+
+def _new_session_marker(
+    home: Path,
+    path: Path,
+    observed_at: float,
+    session_ids: set[str],
+) -> SessionActivity | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+
+    session_id = _session_id_from_shell_snapshot_name(path.name)
+    if session_id is None or session_id in session_ids:
+        return None
+
+    try:
+        relative_path = path.relative_to(home).as_posix()
+    except ValueError:
+        relative_path = path.as_posix()
+
+    return SessionActivity(
+        relative_path=relative_path,
+        session_id=session_id,
+        turn_id=None,
+        cwd=None,
+        size_bytes=stat.st_size,
+        modified_at=stat.st_mtime,
+        observed_at=observed_at,
+        session_started_at=stat.st_mtime,
+        last_record_at=stat.st_mtime,
+        last_record_type="shell_snapshot",
+        last_payload_type="new_session",
     )
 
 
@@ -759,6 +823,26 @@ def _session_id_from_name(name: str) -> str | None:
     if len(parts) < 7:
         return None
     return "-".join(parts[-5:])
+
+
+def _session_id_from_shell_snapshot_name(name: str) -> str | None:
+    if not name.endswith(".sh"):
+        return None
+    prefix = name.removesuffix(".sh").split(".", 1)[0]
+    return prefix if re.fullmatch(UUID_RE, prefix) else None
+
+
+def _session_ids_for_home(home: Path) -> set[str]:
+    session_ids: set[str] = set()
+    try:
+        paths = tuple(home.glob("sessions/**/*.jsonl"))
+    except OSError:
+        return session_ids
+    for path in paths:
+        session_id = _session_id_from_name(path.name)
+        if session_id is not None:
+            session_ids.add(session_id)
+    return session_ids
 
 
 def _cwd_from_record(record: dict | None) -> str | None:
