@@ -93,6 +93,7 @@ class SessionActivity:
     size_bytes: int
     modified_at: float
     observed_at: float
+    session_started_at: float | None = None
     last_record_at: float | None = None
     turn_started_at: float | None = None
     terminal_event_at: float | None = None
@@ -123,6 +124,7 @@ class SessionActivity:
             "size_bytes": self.size_bytes,
             "modified_at": self.modified_at,
             "modified_age_seconds": self.modified_age_seconds,
+            "session_started_at": self.session_started_at,
             "last_record_at": self.last_record_at,
             "turn_started_at": self.turn_started_at,
             "terminal_event_at": self.terminal_event_at,

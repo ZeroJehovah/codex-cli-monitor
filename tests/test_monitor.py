@@ -63,6 +63,109 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].root.pid, 200)
         self.assertEqual(sessions[0].display_status, "未运行")
 
+    def test_node_codex_wrapper_without_native_binary_is_not_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            _write_common_proc(proc)
+            _write_process(
+                proc,
+                100,
+                "MainThread",
+                "S",
+                1,
+                [
+                    "node",
+                    "/home/coder/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/bin/codex",
+                ],
+                "/work/a",
+            )
+
+            sessions = discover_sessions(proc, sample_window=0)
+
+        self.assertEqual(sessions, ())
+
+    def test_codex_upgrade_install_tree_is_not_reported_without_active_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _write_process(
+                proc,
+                101,
+                "npm",
+                "S",
+                100,
+                ["npm", "install", "-g", "@openai/codex@latest"],
+                "/work/a",
+            )
+
+            sessions = discover_sessions(proc, sample_window=0)
+
+        self.assertEqual(sessions, ())
+
+    def test_codex_package_install_during_active_turn_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _write_process(
+                proc,
+                101,
+                "npm",
+                "S",
+                100,
+                ["npm", "install", "-g", "@openai/codex@latest"],
+                "/work/a",
+            )
+            append_hook_event("user_prompt_submit", cwd="/work/a", ppid=100, path=hook_log)
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].root.pid, 100)
+        self.assertEqual(sessions[0].display_status, "运行中")
+
+    def test_codex_package_install_with_user_turn_state_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _write_process(
+                proc,
+                101,
+                "npm",
+                "S",
+                100,
+                ["npm", "install", "-g", "@openai/codex@latest"],
+                "/work/a",
+            )
+            _write_session(
+                home,
+                "/work/a",
+                '{"type":"response_item","payload":{"type":"message","role":"user"}}',
+            )
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].root.pid, 100)
+        self.assertEqual(sessions[0].display_status, "运行中")
+
     def test_network_alone_does_not_classify_api_inflight_likely(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc = Path(tmp)
@@ -749,6 +852,123 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(
             sessions_by_pid[200].state_activity.relative_path,
             "sessions/2026/06/26/new-failure.jsonl",
+        )
+
+    def test_same_cwd_sessions_bind_distinct_files_without_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time()
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(
+                proc,
+                100,
+                "codex",
+                "S",
+                1,
+                ["codex"],
+                "/work/a",
+                start_ticks=1000,
+            )
+            _write_process(
+                proc,
+                200,
+                "codex",
+                "S",
+                1,
+                ["codex"],
+                "/work/a",
+                start_ticks=5000,
+            )
+            first_session = _write_session_records(
+                home,
+                "first-success.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": _iso(base - 189),
+                        "payload": {"session_id": "first", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base - 188),
+                        "payload": {"turn_id": "first-turn"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": _iso(base - 187),
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base - 185),
+                        "payload": {"type": "task_complete"},
+                    },
+                ],
+            )
+            second_records = [
+                {
+                    "type": "session_meta",
+                    "timestamp": _iso(base - 149),
+                    "payload": {"session_id": "second", "cwd": "/work/a"},
+                },
+                {
+                    "type": "turn_context",
+                    "timestamp": _iso(base - 148),
+                    "payload": {"turn_id": "second-turn"},
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": _iso(base - 147),
+                    "payload": {"type": "message", "role": "user"},
+                },
+            ]
+            second_session = _write_session_records(
+                home,
+                "second-running.jsonl",
+                second_records,
+            )
+            os.utime(first_session, (base - 185, base - 185))
+            os.utime(second_session, (base - 147, base - 147))
+
+            def mutate_second_session(_: float) -> None:
+                _write_session_records(
+                    home,
+                    "second-running.jsonl",
+                    [
+                        *second_records,
+                        {
+                            "type": "response_item",
+                            "timestamp": _iso(base - 146),
+                            "payload": {
+                                "type": "function_call",
+                                "name": "exec_command",
+                            },
+                        },
+                    ],
+                )
+                os.utime(second_session, (base + 1, base + 1))
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=1,
+                codex_home=home,
+                sleep=mutate_second_session,
+            )
+
+        sessions_by_pid = {session.root.pid: session for session in sessions}
+        self.assertEqual(sessions_by_pid[100].display_status, "成功")
+        self.assertEqual(sessions_by_pid[200].display_status, "运行中")
+        self.assertEqual(
+            sessions_by_pid[100].state_activity.relative_path,
+            "sessions/2026/06/26/first-success.jsonl",
+        )
+        self.assertEqual(
+            sessions_by_pid[200].state_activity.relative_path,
+            "sessions/2026/06/26/second-running.jsonl",
         )
 
     def test_new_process_ignores_session_activity_from_before_process_start(self) -> None:

@@ -286,6 +286,7 @@ def _session_activity(
         size_bytes=stat.st_size,
         modified_at=stat.st_mtime,
         observed_at=observed_at,
+        session_started_at=_timestamp_from_record(first_record),
         last_record_at=_timestamp_from_record(last_record),
         turn_started_at=latest_turn.turn_started_at,
         terminal_event_at=_timestamp_from_record(latest_terminal_record),
