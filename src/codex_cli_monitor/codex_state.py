@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import time
+from dataclasses import dataclass
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +15,15 @@ from .models import CodexStateSummary, SessionActivity, StateFile
 
 
 DEFAULT_MAX_FILES = 12
+RUNTIME_LOG_DATABASE = "logs_2.sqlite"
+RUNTIME_LOG_WAL = f"{RUNTIME_LOG_DATABASE}-wal"
+RUNTIME_FAILURE_LOOKBACK_SECONDS = 24 * 3600.0
+RUNTIME_FAILURE_MATCH_GRACE_SECONDS = 30.0
+RUNTIME_FAILURE_SQLITE_LIMIT = 2000
+RUNTIME_FAILURE_SQLITE_TIMEOUT_SECONDS = 0.05
+RUNTIME_FAILURE_WAL_MAX_BYTES = 8 * 1024 * 1024
+RUNTIME_FAILURE_WAL_SNIPPET_BYTES = 6000
+RUNTIME_FAILURE_WAL_SOURCE_MARKER = "codex_core::session::turncore/src/session/turn.rs"
 FAILED_RECORD_TYPES = {"error"}
 FAILED_PAYLOAD_TYPES = {
     "error",
@@ -30,6 +41,14 @@ FAILED_PAYLOAD_REASONS = {
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 HTTP_ERROR_STATUS_RE = re.compile(
     r"\b(?:unexpected\s+status|last\s+status:?|status:?)\s*(4\d\d|5\d\d)\b"
+)
+UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+THREAD_ID_RE = re.compile(rf"\b(?:thread_id|thread\.id)=({UUID_RE})\b")
+TURN_ID_RE = re.compile(rf"\b(?:turn_id|turn\.id)=({UUID_RE})\b")
+CWD_RE = re.compile(r"\bcwd=([^}:]+)")
+RUNTIME_WAL_RECORD_START_RE = re.compile(
+    rf"(?:INFO|WARN|ERROR)codex_core::session::turn"
+    rf"session_loop\{{thread_id=({UUID_RE})\}}"
 )
 TERMINAL_ERROR_PREFIXES = (
     "error:",
@@ -77,6 +96,15 @@ STATE_PATTERNS = (
     "*.sqlite-wal",
     "*.sqlite-shm",
 )
+
+
+@dataclass(frozen=True)
+class _RuntimeFailure:
+    thread_id: str | None
+    turn_id: str | None
+    cwd: str | None
+    timestamp: float | None
+    source: str
 
 
 class _TurnRecordSummary:
@@ -213,6 +241,9 @@ def scan_session_activities(
                 ),
             )
         activities.append(activity)
+
+    if activities:
+        activities = _merge_runtime_failures(home, activities)
     return tuple(activities)
 
 
@@ -347,6 +378,295 @@ def _scan_session_records(
     return first_record, last_record, latest_turn
 
 
+def _merge_runtime_failures(
+    home: Path,
+    activities: list[SessionActivity],
+) -> list[SessionActivity]:
+    failures = _scan_runtime_failures(home, activities)
+    if not failures:
+        return activities
+
+    merged = []
+    for activity in activities:
+        if activity.failed_event or not activity.terminal_event:
+            merged.append(activity)
+            continue
+        if any(_runtime_failure_matches_activity(failure, activity) for failure in failures):
+            merged.append(replace(activity, failed_event=True))
+        else:
+            merged.append(activity)
+    return merged
+
+
+def _scan_runtime_failures(
+    home: Path,
+    activities: list[SessionActivity],
+) -> tuple[_RuntimeFailure, ...]:
+    session_ids = {activity.session_id for activity in activities if activity.session_id}
+    turn_ids = {activity.turn_id for activity in activities if activity.turn_id}
+    if not session_ids and not turn_ids:
+        return ()
+
+    timestamps = [
+        value
+        for activity in activities
+        for value in (
+            activity.turn_started_at,
+            activity.terminal_event_at,
+            activity.last_record_at,
+            activity.modified_at,
+        )
+        if value is not None
+    ]
+    min_timestamp = max(
+        0.0,
+        (min(timestamps) if timestamps else time.time()) - RUNTIME_FAILURE_LOOKBACK_SECONDS,
+    )
+
+    failures = []
+    failures.extend(
+        _scan_runtime_failure_sqlite(
+            home / RUNTIME_LOG_DATABASE,
+            session_ids=session_ids,
+            min_timestamp=min_timestamp,
+        )
+    )
+    failures.extend(
+        _scan_runtime_failure_wal(
+            home / RUNTIME_LOG_WAL,
+            session_ids=session_ids,
+            turn_ids=turn_ids,
+        )
+    )
+    return tuple(_dedupe_runtime_failures(failures))
+
+
+def _scan_runtime_failure_sqlite(
+    path: Path,
+    *,
+    session_ids: set[str],
+    min_timestamp: float,
+) -> tuple[_RuntimeFailure, ...]:
+    if not path.is_file() or not session_ids:
+        return ()
+
+    try:
+        connection = sqlite3.connect(
+            f"file:{path}?mode=ro",
+            uri=True,
+            timeout=RUNTIME_FAILURE_SQLITE_TIMEOUT_SECONDS,
+        )
+    except sqlite3.Error:
+        return ()
+
+    try:
+        try:
+            connection.execute("PRAGMA query_only = ON")
+        except sqlite3.Error:
+            pass
+
+        columns = _sqlite_table_columns(connection, "logs")
+        if "logs" not in _sqlite_table_names(connection) or not columns:
+            return ()
+        if "feedback_log_body" not in columns or "ts" not in columns:
+            return ()
+
+        select_thread_id = "thread_id" if "thread_id" in columns else "NULL"
+        target_column = "target" if "target" in columns else "NULL"
+        if "thread_id" in columns:
+            placeholders = ",".join("?" for _ in session_ids)
+            query = (
+                f"SELECT ts, {select_thread_id}, {target_column}, feedback_log_body "
+                "FROM logs "
+                f"WHERE thread_id IN ({placeholders}) AND ts >= ? "
+                "ORDER BY ts DESC LIMIT ?"
+            )
+            parameters = (
+                *tuple(sorted(session_ids)),
+                int(min_timestamp),
+                RUNTIME_FAILURE_SQLITE_LIMIT,
+            )
+        else:
+            query = (
+                f"SELECT ts, {select_thread_id}, {target_column}, feedback_log_body "
+                "FROM logs "
+                "WHERE ts >= ? "
+                "ORDER BY ts DESC LIMIT ?"
+            )
+            parameters = (int(min_timestamp), RUNTIME_FAILURE_SQLITE_LIMIT)
+
+        rows = connection.execute(query, parameters)
+        failures = []
+        for timestamp, thread_id, target, body in rows:
+            failure = _runtime_failure_from_log_body(
+                timestamp=_float_or_none(timestamp),
+                thread_id=_optional_str(thread_id),
+                target=_optional_str(target),
+                body=_optional_str(body) or "",
+                source=RUNTIME_LOG_DATABASE,
+            )
+            if failure is not None:
+                failures.append(failure)
+        return tuple(failures)
+    except sqlite3.Error:
+        return ()
+    finally:
+        connection.close()
+
+
+def _sqlite_table_names(connection: sqlite3.Connection) -> set[str]:
+    rows = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def _sqlite_table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return set()
+    return {str(row[1]) for row in rows}
+
+
+def _scan_runtime_failure_wal(
+    path: Path,
+    *,
+    session_ids: set[str],
+    turn_ids: set[str],
+) -> tuple[_RuntimeFailure, ...]:
+    if not path.is_file():
+        return ()
+
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ()
+    offset = max(0, size - RUNTIME_FAILURE_WAL_MAX_BYTES)
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            data = handle.read(RUNTIME_FAILURE_WAL_MAX_BYTES)
+    except OSError:
+        return ()
+
+    text = data.decode("utf-8", errors="ignore")
+    failures = []
+    for match in RUNTIME_WAL_RECORD_START_RE.finditer(text):
+        snippet = text[match.start() : match.start() + RUNTIME_FAILURE_WAL_SNIPPET_BYTES]
+        error_index = snippet.find("Turn error:")
+        if error_index < 0:
+            continue
+        if RUNTIME_FAILURE_WAL_SOURCE_MARKER not in snippet:
+            continue
+        body = snippet[: error_index + RUNTIME_FAILURE_WAL_SNIPPET_BYTES]
+        failure = _runtime_failure_from_log_body(
+            timestamp=None,
+            thread_id=match.group(1),
+            target="codex_core::session::turn",
+            body=body,
+            source=RUNTIME_LOG_WAL,
+        )
+        if failure is None:
+            continue
+        if failure.thread_id not in session_ids and failure.turn_id not in turn_ids:
+            continue
+        failures.append(failure)
+    return tuple(failures)
+
+
+def _dedupe_runtime_failures(
+    failures: list[_RuntimeFailure],
+) -> tuple[_RuntimeFailure, ...]:
+    seen = set()
+    result = []
+    for failure in failures:
+        key = (
+            failure.thread_id,
+            failure.turn_id,
+            failure.cwd,
+            failure.timestamp,
+            failure.source,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(failure)
+    return tuple(result)
+
+
+def _runtime_failure_from_log_body(
+    *,
+    timestamp: float | None,
+    thread_id: str | None,
+    target: str | None,
+    body: str,
+    source: str,
+) -> _RuntimeFailure | None:
+    if target != "codex_core::session::turn":
+        return None
+    if "Turn error:" not in body:
+        return None
+
+    parsed_thread_id = thread_id or _regex_first(THREAD_ID_RE, body)
+    return _RuntimeFailure(
+        thread_id=parsed_thread_id,
+        turn_id=_regex_first(TURN_ID_RE, body),
+        cwd=_regex_first(CWD_RE, body),
+        timestamp=timestamp,
+        source=source,
+    )
+
+
+def _runtime_failure_matches_activity(
+    failure: _RuntimeFailure,
+    activity: SessionActivity,
+) -> bool:
+    if failure.thread_id is not None and activity.session_id is not None:
+        if failure.thread_id != activity.session_id:
+            return False
+    elif failure.thread_id is not None:
+        return False
+
+    if failure.turn_id is not None and activity.turn_id is not None:
+        return failure.turn_id == activity.turn_id
+    if failure.turn_id is not None:
+        return False
+
+    if failure.cwd is not None and activity.cwd is not None:
+        if _normalize_runtime_path(failure.cwd) != _normalize_runtime_path(activity.cwd):
+            return False
+
+    if failure.timestamp is not None:
+        if (
+            activity.turn_started_at is not None
+            and failure.timestamp + RUNTIME_FAILURE_MATCH_GRACE_SECONDS
+            < activity.turn_started_at
+        ):
+            return False
+        if (
+            activity.terminal_event_at is not None
+            and failure.timestamp - RUNTIME_FAILURE_MATCH_GRACE_SECONDS
+            > activity.terminal_event_at
+        ):
+            return False
+
+    return failure.thread_id is not None or (
+        failure.cwd is not None and failure.timestamp is not None
+    )
+
+
+def _regex_first(pattern: re.Pattern[str], text: str) -> str | None:
+    match = pattern.search(text)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _normalize_runtime_path(value: str) -> str:
+    return str(Path(value).expanduser())
+
+
 def _session_id_from_record(record: dict | None) -> str | None:
     if not isinstance(record, dict):
         return None
@@ -379,6 +699,15 @@ def _optional_str(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_failed_event(
