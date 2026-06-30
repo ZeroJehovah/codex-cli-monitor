@@ -150,7 +150,6 @@ class _TurnRecordSummary:
         return (
             terminal_payload_type in TERMINAL_PAYLOAD_TYPES
             and self.saw_user
-            and self.saw_token_count
             and not self.saw_visible_assistant_or_tool
         )
 
