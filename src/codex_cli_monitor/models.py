@@ -103,6 +103,7 @@ class SessionActivity:
     last_payload_role: str | None = None
     last_payload_reason: str | None = None
     terminal_event: bool = False
+    terminal_agent_message_missing: bool = False
     failed_event: bool = False
     latest_turn_has_user: bool = False
 
@@ -134,6 +135,7 @@ class SessionActivity:
             "last_payload_role": self.last_payload_role,
             "last_payload_reason": self.last_payload_reason,
             "terminal_event": self.terminal_event,
+            "terminal_agent_message_missing": self.terminal_agent_message_missing,
             "failed_event": self.failed_event,
             "latest_turn_has_user": self.latest_turn_has_user,
         }

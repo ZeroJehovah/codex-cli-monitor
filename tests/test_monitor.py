@@ -622,7 +622,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].display_status, "失败")
         self.assertTrue(sessions[0].state_activity.failed_event)
 
-    def test_missing_stop_hook_stale_failed_terminal_event_becomes_not_running(self) -> None:
+    def test_missing_stop_hook_stale_failed_terminal_event_remains_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = time.time() - 60
             root = Path(tmp)
@@ -678,8 +678,59 @@ class MonitorTests(unittest.TestCase):
             )
 
         self.assertEqual(len(sessions), 1)
-        self.assertEqual(sessions[0].display_status, "未运行")
+        self.assertEqual(sessions[0].display_status, "失败")
         self.assertTrue(sessions[0].state_activity.failed_event)
+
+    def test_missing_stop_hook_stale_empty_terminal_event_becomes_not_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 60
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            session = _write_session_records(
+                home,
+                "empty-reset.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"session_id": "empty", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base + 5),
+                        "payload": {"turn_id": "empty-turn"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base + 6),
+                        "payload": {"type": "task_complete"},
+                    },
+                ],
+            )
+            os.utime(session, (base + 6, base + 6))
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 1,
+                path=hook_log,
+            )
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "未运行")
+        self.assertFalse(sessions[0].state_activity.failed_event)
 
     def test_same_cwd_new_session_does_not_inherit_old_success_hook_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
