@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Callable
 
 from .classify import infer_status, is_native_codex_process
-from .codex_state import scan_codex_state, scan_session_activities
+from .codex_state import (
+    scan_codex_state,
+    scan_new_session_markers,
+    scan_session_activities,
+)
 from .models import (
     CodexSession,
     CodexStateSummary,
@@ -92,6 +96,7 @@ def discover_sessions(
     else:
         second_snapshot = first_snapshot
         session_activities = scan_session_activities(codex_home)
+    new_session_markers = scan_new_session_markers(codex_home)
 
     processes = _with_cpu_deltas(first_snapshot, second_snapshot, sample_window)
     codex_roots = _find_codex_roots(processes)
@@ -115,6 +120,12 @@ def discover_sessions(
     state_activities_by_pid = _state_activities_for_roots(
         codex_roots,
         session_activities,
+        hook_states_by_pid,
+    )
+    state_activities_by_pid = _apply_new_session_markers(
+        codex_roots,
+        state_activities_by_pid,
+        new_session_markers,
         hook_states_by_pid,
     )
 
@@ -269,6 +280,43 @@ def _state_activities_for_roots(
     return result
 
 
+def _apply_new_session_markers(
+    roots: tuple[ProcessInfo, ...],
+    state_activities_by_pid: dict[int, SessionActivity],
+    markers: tuple[SessionActivity, ...],
+    hook_states_by_pid: dict[int, HookSessionState | None],
+) -> dict[int, SessionActivity]:
+    if not markers:
+        return state_activities_by_pid
+
+    candidate_pairs: list[tuple[tuple[float, float, float], int, str, SessionActivity]] = []
+    assigned_markers: set[str] = set()
+    result = dict(state_activities_by_pid)
+    for root in roots:
+        state_activity = state_activities_by_pid.get(root.pid)
+        hook_state = hook_states_by_pid.get(root.pid)
+        for marker in markers:
+            if not _marker_can_reset_activity(marker, state_activity, hook_state, root):
+                continue
+            candidate_pairs.append(
+                (
+                    _marker_sort_key_for_root(root, marker, state_activity, hook_state),
+                    root.pid,
+                    marker.relative_path,
+                    marker,
+                )
+            )
+
+    assigned_roots: set[int] = set()
+    for _, pid, relative_path, marker in sorted(candidate_pairs):
+        if pid in assigned_roots or relative_path in assigned_markers:
+            continue
+        result[pid] = marker
+        assigned_roots.add(pid)
+        assigned_markers.add(relative_path)
+    return result
+
+
 def _activity_candidates_for_root(
     root: ProcessInfo,
     activities: tuple[SessionActivity, ...],
@@ -329,6 +377,61 @@ def _activity_sort_key_for_root(
         delta,
         recency,
     )
+
+
+def _marker_can_reset_activity(
+    marker: SessionActivity,
+    state_activity: SessionActivity | None,
+    hook_state: HookSessionState | None,
+    root: ProcessInfo,
+) -> bool:
+    if not _activity_is_new_session_marker(marker):
+        return False
+    if root.started_at is not None and marker.modified_at < root.started_at:
+        return False
+    if state_activity is None:
+        return False
+    if (
+        state_activity.cwd is not None
+        and _normalize_path(state_activity.cwd) != _normalize_path(root.cwd)
+    ):
+        return False
+    previous_event_at = _activity_event_time(state_activity)
+    if marker.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < previous_event_at:
+        return False
+    if not state_activity.terminal_event:
+        return False
+    if hook_state is not None and hook_state.codex_pid not in {None, root.pid}:
+        return False
+    if hook_state is not None:
+        started_at = hook_state.turn_started_at or hook_state.updated_at
+        if marker.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < started_at:
+            return False
+    return True
+
+
+def _marker_sort_key_for_root(
+    root: ProcessInfo,
+    marker: SessionActivity,
+    state_activity: SessionActivity | None,
+    hook_state: HookSessionState | None,
+) -> tuple[float, float, float]:
+    reference = (
+        hook_state.updated_at
+        if hook_state is not None
+        else (
+            _activity_event_time(state_activity)
+            if state_activity is not None
+            else root.started_at
+        )
+    )
+    delta = abs(marker.modified_at - reference) if reference is not None else 0.0
+    start_delta = (
+        abs(marker.modified_at - root.started_at)
+        if root.started_at is not None
+        else SESSION_BINDING_UNKNOWN_DELTA_SECONDS
+    )
+    return (delta, start_delta, -marker.modified_at)
 
 
 def _hook_lifecycle_sort_rank(hook_state: HookSessionState | None) -> float:
@@ -448,6 +551,8 @@ def _display_status(
     state_activity: SessionActivity | None,
 ) -> str:
     if hook_state is not None:
+        if _activity_is_new_session_marker(state_activity):
+            return "未运行"
         if hook_state.last_event == "session_start":
             return "未运行"
         if _activity_is_current_for_hook(state_activity, hook_state):
@@ -472,6 +577,8 @@ def _display_status(
         return "未运行"
 
     if state_activity is not None:
+        if _activity_is_new_session_marker(state_activity):
+            return "未运行"
         if _activity_is_unprompted_session_context(state_activity):
             return "未运行"
         if state_activity.failed_event:
@@ -594,6 +701,18 @@ def _activity_is_unprompted_session_context(activity: SessionActivity | None) ->
     if activity.latest_turn_has_user or activity.terminal_event or activity.failed_event:
         return False
     return activity.last_record_type in {"session_meta", "turn_context"}
+
+
+def _activity_is_new_session_marker(activity: SessionActivity | None) -> bool:
+    if activity is None:
+        return False
+    return (
+        activity.last_record_type == "shell_snapshot"
+        and activity.last_payload_type == "new_session"
+        and not activity.latest_turn_has_user
+        and not activity.terminal_event
+        and not activity.failed_event
+    )
 
 
 def _activity_can_reset_hook(

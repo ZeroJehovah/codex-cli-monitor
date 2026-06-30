@@ -681,6 +681,83 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].display_status, "失败")
         self.assertTrue(sessions[0].state_activity.failed_event)
 
+    def test_new_shell_snapshot_after_failed_turn_resets_same_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 60
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            session = _write_session_records(
+                home,
+                "rollout-2026-06-30T17-23-27-019f17d7-35cc-7cf0-8f6f-5c945f851ca9.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": _iso(base + 1),
+                        "payload": {
+                            "session_id": "019f17d7-35cc-7cf0-8f6f-5c945f851ca9",
+                            "cwd": "/work/a",
+                        },
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base + 1),
+                        "payload": {"type": "task_started"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": _iso(base + 2),
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base + 2),
+                        "payload": {"turn_id": "failed-turn"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base + 3),
+                        "payload": {
+                            "type": "task_complete",
+                            "last_agent_message": None,
+                        },
+                    },
+                ],
+            )
+            os.utime(session, (base + 3, base + 3))
+            marker = _write_shell_snapshot(
+                home,
+                "019f17d7-5cd7-7831-9a96-b59554e31b1a.1782811417817756780.sh",
+            )
+            os.utime(marker, (base + 8, base + 8))
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 2,
+                path=hook_log,
+            )
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "未运行")
+        self.assertEqual(
+            sessions[0].state_activity.relative_path,
+            "shell_snapshots/019f17d7-5cd7-7831-9a96-b59554e31b1a.1782811417817756780.sh",
+        )
+        self.assertEqual(sessions[0].state_activity.last_payload_type, "new_session")
+
     def test_missing_stop_hook_stale_empty_terminal_event_becomes_not_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = time.time() - 60
@@ -1659,6 +1736,13 @@ def _write_session_records(home: Path, name: str, records: list[dict]) -> Path:
         encoding="utf-8",
     )
     return session
+
+
+def _write_shell_snapshot(home: Path, name: str) -> Path:
+    snapshot = home / "shell_snapshots" / name
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_text("# Snapshot file\n", encoding="utf-8")
+    return snapshot
 
 
 def _iso(timestamp: float) -> str:
