@@ -243,7 +243,7 @@ def _state_activities_for_roots(
     hook_states_by_pid: dict[int, HookSessionState | None],
 ) -> dict[int, SessionActivity]:
     candidate_pairs: list[
-        tuple[tuple[float, float, float, float, float], int, str, SessionActivity]
+        tuple[tuple[float, float, float, float, float, float], int, str, SessionActivity]
     ] = []
     for root in roots:
         hook_state = hook_states_by_pid.get(root.pid)
@@ -299,13 +299,19 @@ def _activity_sort_key_for_root(
     root: ProcessInfo,
     activity: SessionActivity,
     hook_state: HookSessionState | None,
-) -> tuple[float, float, float, float, float]:
+) -> tuple[float, float, float, float, float, float]:
     hook_rank = 0.0 if hook_state is not None else 1.0
     hook_lifecycle_rank = _hook_lifecycle_sort_rank(hook_state)
     idle_reset_rank = (
         0.0
         if hook_state is not None
         and _activity_is_idle_reset_after_stop(activity, hook_state)
+        else 1.0
+    )
+    unprompted_session_rank = (
+        0.0
+        if _activity_is_unprompted_session_context(activity)
+        and _activity_can_reset_hook(activity, hook_state)
         else 1.0
     )
     delta = _activity_hook_delta(activity, hook_state)
@@ -315,7 +321,14 @@ def _activity_sort_key_for_root(
         delta = SESSION_BINDING_UNKNOWN_DELTA_SECONDS
     event_at = _activity_event_time(activity)
     recency = -(event_at or activity.modified_at)
-    return hook_rank, hook_lifecycle_rank, idle_reset_rank, delta, recency
+    return (
+        hook_rank,
+        hook_lifecycle_rank,
+        idle_reset_rank,
+        unprompted_session_rank,
+        delta,
+        recency,
+    )
 
 
 def _hook_lifecycle_sort_rank(hook_state: HookSessionState | None) -> float:
@@ -438,6 +451,8 @@ def _display_status(
         if hook_state.last_event == "session_start":
             return "未运行"
         if _activity_is_current_for_hook(state_activity, hook_state):
+            if _activity_is_unprompted_session_context(state_activity):
+                return "未运行"
             if state_activity is not None and state_activity.terminal_event:
                 if state_activity.failed_event:
                     return "失败"
@@ -457,6 +472,8 @@ def _display_status(
         return "未运行"
 
     if state_activity is not None:
+        if _activity_is_unprompted_session_context(state_activity):
+            return "未运行"
         if state_activity.failed_event:
             return "失败"
         if state_activity.terminal_event:
@@ -569,6 +586,23 @@ def _activity_is_idle_after_missing_stop(
     if activity.observed_at - stable_since < MISSING_STOP_IDLE_RESET_SECONDS:
         return False
     return not activity.latest_turn_has_user
+
+
+def _activity_is_unprompted_session_context(activity: SessionActivity | None) -> bool:
+    if activity is None:
+        return False
+    if activity.latest_turn_has_user or activity.terminal_event or activity.failed_event:
+        return False
+    return activity.last_record_type in {"session_meta", "turn_context"}
+
+
+def _activity_can_reset_hook(
+    activity: SessionActivity,
+    hook_state: HookSessionState | None,
+) -> bool:
+    if hook_state is None:
+        return True
+    return _activity_event_time(activity) + ACTIVITY_TIMESTAMP_GRACE_SECONDS >= hook_state.updated_at
 
 
 def _activity_event_time(activity: SessionActivity) -> float:
