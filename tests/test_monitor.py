@@ -772,6 +772,15 @@ class MonitorTests(unittest.TestCase):
                         "payload": {"type": "message", "role": "user"},
                     },
                     {
+                        "type": "response_item",
+                        "timestamp": _iso(base + 3),
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": "done",
+                        },
+                    },
+                    {
                         "type": "event_msg",
                         "timestamp": _iso(base + 3),
                         "payload": {"type": "task_complete"},
@@ -901,6 +910,15 @@ class MonitorTests(unittest.TestCase):
                         "type": "response_item",
                         "timestamp": _iso(base - 187),
                         "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": _iso(base - 186),
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": "done",
+                        },
                     },
                     {
                         "type": "event_msg",
