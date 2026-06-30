@@ -763,6 +763,107 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions_by_pid[100].display_status, "成功")
         self.assertEqual(sessions_by_pid[200].display_status, "未运行")
 
+    def test_same_cwd_active_hook_gets_new_activity_before_old_stopped_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 60
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _write_process(proc, 200, "codex", "S", 1, ["codex"], "/work/a")
+            old_session = _write_session_records(
+                home,
+                "old-success.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": _iso(base + 1),
+                        "payload": {"session_id": "old", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base + 2),
+                        "payload": {"turn_id": "old-turn"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base + 3),
+                        "payload": {"type": "task_complete"},
+                    },
+                ],
+            )
+            new_session = _write_session_records(
+                home,
+                "new-active.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": _iso(base + 20),
+                        "payload": {"session_id": "new", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base + 21),
+                        "payload": {"turn_id": "new-turn"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": _iso(base + 22),
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base + 23),
+                        "payload": {"type": "token_count"},
+                    },
+                ],
+            )
+            os.utime(old_session, (base + 3, base + 3))
+            os.utime(new_session, (base + 23, base + 23))
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 2,
+                path=hook_log,
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 4,
+                path=hook_log,
+            )
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=200,
+                timestamp=base + 20,
+                path=hook_log,
+            )
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        sessions_by_pid = {session.root.pid: session for session in sessions}
+        self.assertEqual(
+            sessions_by_pid[100].state_activity.relative_path,
+            "sessions/2026/06/26/old-success.jsonl",
+        )
+        self.assertEqual(
+            sessions_by_pid[200].state_activity.relative_path,
+            "sessions/2026/06/26/new-active.jsonl",
+        )
+        self.assertEqual(sessions_by_pid[200].display_status, "运行中")
+
     def test_same_pid_session_start_ignores_old_success_activity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = time.time() - 60

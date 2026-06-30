@@ -243,7 +243,7 @@ def _state_activities_for_roots(
     hook_states_by_pid: dict[int, HookSessionState | None],
 ) -> dict[int, SessionActivity]:
     candidate_pairs: list[
-        tuple[tuple[float, float, float, float], int, str, SessionActivity]
+        tuple[tuple[float, float, float, float, float], int, str, SessionActivity]
     ] = []
     for root in roots:
         hook_state = hook_states_by_pid.get(root.pid)
@@ -299,8 +299,9 @@ def _activity_sort_key_for_root(
     root: ProcessInfo,
     activity: SessionActivity,
     hook_state: HookSessionState | None,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float]:
     hook_rank = 0.0 if hook_state is not None else 1.0
+    hook_lifecycle_rank = _hook_lifecycle_sort_rank(hook_state)
     idle_reset_rank = (
         0.0
         if hook_state is not None
@@ -314,7 +315,15 @@ def _activity_sort_key_for_root(
         delta = SESSION_BINDING_UNKNOWN_DELTA_SECONDS
     event_at = _activity_event_time(activity)
     recency = -(event_at or activity.modified_at)
-    return hook_rank, idle_reset_rank, delta, recency
+    return hook_rank, hook_lifecycle_rank, idle_reset_rank, delta, recency
+
+
+def _hook_lifecycle_sort_rank(hook_state: HookSessionState | None) -> float:
+    if hook_state is None:
+        return 2.0
+    if hook_state.in_turn or hook_state.active_tool_count > 0:
+        return 0.0
+    return 1.0
 
 
 def _activity_hook_delta(
