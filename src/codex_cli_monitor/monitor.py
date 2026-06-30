@@ -21,6 +21,7 @@ from .shim import default_log_path, load_launch_records
 
 
 ACTIVITY_TIMESTAMP_GRACE_SECONDS = 5.0
+MISSING_STOP_IDLE_RESET_SECONDS = 10.0
 INACTIVE_ROOT_STATES = {"T", "t", "Z", "X", "x"}
 SESSION_BINDING_UNKNOWN_DELTA_SECONDS = 365 * 24 * 3600.0
 CODEX_MAINTENANCE_ARGS = {
@@ -427,6 +428,8 @@ def _display_status(
     if hook_state is not None:
         if hook_state.last_event == "session_start":
             return "未运行"
+        if _activity_is_idle_after_missing_stop(state_activity, hook_state):
+            return "未运行"
         if _activity_is_current_for_hook(state_activity, hook_state):
             if state_activity is not None and state_activity.terminal_event:
                 if state_activity.failed_event:
@@ -519,6 +522,40 @@ def _activity_is_idle_reset_after_stop(
         and not activity.terminal_event
         and not activity.failed_event
     )
+
+
+def _activity_is_idle_after_missing_stop(
+    activity: SessionActivity | None,
+    hook_state: HookSessionState,
+) -> bool:
+    if activity is None:
+        return False
+    if not activity.terminal_event:
+        return False
+    if not hook_state.in_turn:
+        return False
+    if hook_state.active_tool_count > 0:
+        return False
+    if hook_state.last_stopped_at is not None or hook_state.last_event == "stop":
+        return False
+    if activity.changed_during_sample:
+        return False
+
+    started_at = hook_state.turn_started_at or hook_state.updated_at
+    event_at = activity.terminal_event_at or _activity_event_time(activity)
+    if event_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < started_at:
+        return False
+
+    stable_since = max(
+        timestamp
+        for timestamp in (
+            activity.terminal_event_at,
+            activity.last_record_at,
+            activity.modified_at,
+        )
+        if timestamp is not None
+    )
+    return activity.observed_at - stable_since >= MISSING_STOP_IDLE_RESET_SECONDS
 
 
 def _activity_event_time(activity: SessionActivity) -> float:
