@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -498,12 +499,317 @@ class CodexStateTests(unittest.TestCase):
         self.assertTrue(activities[0].terminal_event)
         self.assertTrue(activities[0].failed_event)
 
+    def test_scan_session_activities_marks_matching_runtime_turn_error_as_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session_id = "019f16aa-1111-7111-8111-111111111111"
+            turn_id = "019f16aa-2222-7222-8222-222222222222"
+            session = home / "sessions" / "2026" / "06" / "30" / "rollout.jsonl"
+            _write_jsonl(
+                session,
+                [
+                    {
+                        "timestamp": "2026-06-30T03:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"session_id": session_id, "cwd": "/work/a"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:01Z",
+                        "type": "turn_context",
+                        "payload": {"turn_id": turn_id},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:02Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": "go",
+                        },
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:03Z",
+                        "type": "event_msg",
+                        "payload": {"type": "task_complete"},
+                    },
+                ],
+            )
+            _write_runtime_log_db(
+                home,
+                [
+                    (
+                        1782788402,
+                        session_id,
+                        _runtime_turn_error_body(session_id, turn_id),
+                    )
+                ],
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].terminal_event)
+        self.assertTrue(activities[0].failed_event)
+
+    def test_scan_session_activities_ignores_runtime_error_from_other_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session_id = "019f16aa-3333-7333-8333-333333333333"
+            current_turn_id = "019f16aa-4444-7444-8444-444444444444"
+            old_turn_id = "019f16aa-5555-7555-8555-555555555555"
+            session = home / "sessions" / "2026" / "06" / "30" / "rollout.jsonl"
+            _write_jsonl(
+                session,
+                [
+                    {
+                        "timestamp": "2026-06-30T03:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"session_id": session_id, "cwd": "/work/a"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:01Z",
+                        "type": "turn_context",
+                        "payload": {"turn_id": current_turn_id},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:02Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": "go",
+                        },
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:03Z",
+                        "type": "event_msg",
+                        "payload": {"type": "task_complete"},
+                    },
+                ],
+            )
+            _write_runtime_log_db(
+                home,
+                [
+                    (
+                        1782788300,
+                        session_id,
+                        _runtime_turn_error_body(session_id, old_turn_id),
+                    )
+                ],
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].terminal_event)
+        self.assertFalse(activities[0].failed_event)
+
+    def test_scan_session_activities_waits_for_terminal_event_before_runtime_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session_id = "019f16aa-6666-7666-8666-666666666666"
+            turn_id = "019f16aa-7777-7777-8777-777777777777"
+            session = home / "sessions" / "2026" / "06" / "30" / "rollout.jsonl"
+            _write_jsonl(
+                session,
+                [
+                    {
+                        "timestamp": "2026-06-30T03:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"session_id": session_id, "cwd": "/work/a"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:01Z",
+                        "type": "turn_context",
+                        "payload": {"turn_id": turn_id},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:02Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": "go",
+                        },
+                    },
+                ],
+            )
+            _write_runtime_log_db(
+                home,
+                [
+                    (
+                        1782788402,
+                        session_id,
+                        _runtime_turn_error_body(session_id, turn_id),
+                    )
+                ],
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertFalse(activities[0].terminal_event)
+        self.assertFalse(activities[0].failed_event)
+
+    def test_scan_session_activities_marks_runtime_turn_error_from_wal_tail_as_failed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session_id = "019f16aa-8888-7888-8888-888888888888"
+            turn_id = "019f16aa-9999-7999-8999-999999999999"
+            session = home / "sessions" / "2026" / "06" / "30" / "rollout.jsonl"
+            _write_jsonl(
+                session,
+                [
+                    {
+                        "timestamp": "2026-06-30T03:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"session_id": session_id, "cwd": "/work/a"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:01Z",
+                        "type": "turn_context",
+                        "payload": {"turn_id": turn_id},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:02Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": "go",
+                        },
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:03Z",
+                        "type": "event_msg",
+                        "payload": {"type": "task_complete"},
+                    },
+                ],
+            )
+            (home / "logs_2.sqlite-wal").write_bytes(
+                (
+                    "\0INFOcodex_core::session::turn"
+                    + _runtime_turn_error_body(session_id, turn_id)
+                    + "codex_core::session::turncore/src/session/turn.rs\0"
+                ).encode("utf-8")
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].failed_event)
+
+    def test_scan_session_activities_ignores_quoted_runtime_error_in_wal_tail(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session_id = "019f16ab-aaaa-7aaa-8aaa-aaaaaaaaaaaa"
+            turn_id = "019f16ab-bbbb-7bbb-8bbb-bbbbbbbbbbbb"
+            session = home / "sessions" / "2026" / "06" / "30" / "rollout.jsonl"
+            _write_jsonl(
+                session,
+                [
+                    {
+                        "timestamp": "2026-06-30T03:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"session_id": session_id, "cwd": "/work/a"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:01Z",
+                        "type": "turn_context",
+                        "payload": {"turn_id": turn_id},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:02Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": "go",
+                        },
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:03Z",
+                        "type": "event_msg",
+                        "payload": {"type": "task_complete"},
+                    },
+                ],
+            )
+            (home / "logs_2.sqlite-wal").write_text(
+                "TRACEcodex_client::transport: POST body quotes "
+                f"INFOcodex_core::session::turn{_runtime_turn_error_body(session_id, turn_id)}",
+                encoding="utf-8",
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertFalse(activities[0].failed_event)
+
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
     path.parent.mkdir(parents=True)
     path.write_text(
         "\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n",
         encoding="utf-8",
+    )
+
+
+def _write_runtime_log_db(
+    home: Path,
+    rows: list[tuple[int, str, str]],
+) -> None:
+    connection = sqlite3.connect(home / "logs_2.sqlite")
+    try:
+        connection.execute(
+            """
+            CREATE TABLE logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                ts_nanos INTEGER NOT NULL DEFAULT 0,
+                level TEXT NOT NULL DEFAULT 'INFO',
+                target TEXT NOT NULL,
+                feedback_log_body TEXT,
+                module_path TEXT,
+                file TEXT,
+                line INTEGER,
+                thread_id TEXT,
+                process_uuid TEXT,
+                estimated_bytes INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO logs (
+                ts,
+                ts_nanos,
+                level,
+                target,
+                feedback_log_body,
+                thread_id
+            )
+            VALUES (?, 0, 'INFO', 'codex_core::session::turn', ?, ?)
+            """,
+            [(timestamp, body, session_id) for timestamp, session_id, body in rows],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _runtime_turn_error_body(session_id: str, turn_id: str) -> str:
+    return (
+        f"session_loop{{thread_id={session_id}}}:"
+        f"submission_dispatch{{otel.name=\"op.dispatch.user_input\" submission.id=\"{turn_id}\" codex.op=\"user_input\"}}:"
+        f"turn{{otel.name=\"session_task.turn\" thread.id={session_id} turn.id={turn_id} model=yuecheng/gpt-5.5}}:"
+        "session_task.run:run_turn: Turn error: unexpected status 503 Service Unavailable: "
+        "auth_unavailable: no auth available (providers=codex, model=yuecheng/gpt-5.5)"
     )
 
 
