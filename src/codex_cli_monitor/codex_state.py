@@ -17,13 +17,13 @@ from .models import CodexStateSummary, SessionActivity, StateFile
 DEFAULT_MAX_FILES = 12
 RUNTIME_LOG_DATABASE = "logs_2.sqlite"
 RUNTIME_LOG_WAL = f"{RUNTIME_LOG_DATABASE}-wal"
-RUNTIME_FAILURE_LOOKBACK_SECONDS = 24 * 3600.0
 RUNTIME_FAILURE_MATCH_GRACE_SECONDS = 30.0
 RUNTIME_FAILURE_SQLITE_LIMIT = 2000
 RUNTIME_FAILURE_SQLITE_TIMEOUT_SECONDS = 0.05
 RUNTIME_FAILURE_WAL_MAX_BYTES = 8 * 1024 * 1024
 RUNTIME_FAILURE_WAL_SNIPPET_BYTES = 6000
 RUNTIME_FAILURE_WAL_SOURCE_MARKER = "codex_core::session::turncore/src/session/turn.rs"
+RUNTIME_FAILURE_SQLITE_LIMIT_PER_THREAD = 20
 FAILED_RECORD_TYPES = {"error"}
 FAILED_PAYLOAD_TYPES = {
     "error",
@@ -402,33 +402,21 @@ def _scan_runtime_failures(
     home: Path,
     activities: list[SessionActivity],
 ) -> tuple[_RuntimeFailure, ...]:
-    session_ids = {activity.session_id for activity in activities if activity.session_id}
-    turn_ids = {activity.turn_id for activity in activities if activity.turn_id}
+    candidates = [
+        activity
+        for activity in activities
+        if activity.terminal_event and not activity.failed_event
+    ]
+    session_ids = {activity.session_id for activity in candidates if activity.session_id}
+    turn_ids = {activity.turn_id for activity in candidates if activity.turn_id}
     if not session_ids and not turn_ids:
         return ()
-
-    timestamps = [
-        value
-        for activity in activities
-        for value in (
-            activity.turn_started_at,
-            activity.terminal_event_at,
-            activity.last_record_at,
-            activity.modified_at,
-        )
-        if value is not None
-    ]
-    min_timestamp = max(
-        0.0,
-        (min(timestamps) if timestamps else time.time()) - RUNTIME_FAILURE_LOOKBACK_SECONDS,
-    )
 
     failures = []
     failures.extend(
         _scan_runtime_failure_sqlite(
             home / RUNTIME_LOG_DATABASE,
-            session_ids=session_ids,
-            min_timestamp=min_timestamp,
+            activities=candidates,
         )
     )
     failures.extend(
@@ -444,9 +432,10 @@ def _scan_runtime_failures(
 def _scan_runtime_failure_sqlite(
     path: Path,
     *,
-    session_ids: set[str],
-    min_timestamp: float,
+    activities: list[SessionActivity],
 ) -> tuple[_RuntimeFailure, ...]:
+    session_windows = _runtime_failure_session_windows(activities)
+    session_ids = set(session_windows)
     if not path.is_file() or not session_ids:
         return ()
 
@@ -474,19 +463,35 @@ def _scan_runtime_failure_sqlite(
         select_thread_id = "thread_id" if "thread_id" in columns else "NULL"
         target_column = "target" if "target" in columns else "NULL"
         if "thread_id" in columns:
-            placeholders = ",".join("?" for _ in session_ids)
             query = (
                 f"SELECT ts, {select_thread_id}, {target_column}, feedback_log_body "
                 "FROM logs "
-                f"WHERE thread_id IN ({placeholders}) AND ts >= ? "
+                "WHERE thread_id = ? AND ts >= ? "
                 "ORDER BY ts DESC LIMIT ?"
             )
-            parameters = (
-                *tuple(sorted(session_ids)),
-                int(min_timestamp),
-                RUNTIME_FAILURE_SQLITE_LIMIT,
-            )
+            failures = []
+            for session_id in sorted(session_ids):
+                rows = connection.execute(
+                    query,
+                    (
+                        session_id,
+                        int(session_windows[session_id]),
+                        RUNTIME_FAILURE_SQLITE_LIMIT_PER_THREAD,
+                    ),
+                )
+                for timestamp, thread_id, target, body in rows:
+                    failure = _runtime_failure_from_log_body(
+                        timestamp=_float_or_none(timestamp),
+                        thread_id=_optional_str(thread_id),
+                        target=_optional_str(target),
+                        body=_optional_str(body) or "",
+                        source=RUNTIME_LOG_DATABASE,
+                    )
+                    if failure is not None:
+                        failures.append(failure)
+            return tuple(failures)
         else:
+            min_timestamp = min(session_windows.values())
             query = (
                 f"SELECT ts, {select_thread_id}, {target_column}, feedback_log_body "
                 "FROM logs "
@@ -512,6 +517,27 @@ def _scan_runtime_failure_sqlite(
         return ()
     finally:
         connection.close()
+
+
+def _runtime_failure_session_windows(
+    activities: list[SessionActivity],
+) -> dict[str, float]:
+    windows: dict[str, float] = {}
+    for activity in activities:
+        if activity.session_id is None:
+            continue
+        timestamp = (
+            activity.turn_started_at
+            or activity.terminal_event_at
+            or activity.last_record_at
+            or activity.modified_at
+            or time.time()
+        )
+        start = max(0.0, timestamp - RUNTIME_FAILURE_MATCH_GRACE_SECONDS)
+        previous = windows.get(activity.session_id)
+        if previous is None or start < previous:
+            windows[activity.session_id] = start
+    return windows
 
 
 def _sqlite_table_names(connection: sqlite3.Connection) -> set[str]:
