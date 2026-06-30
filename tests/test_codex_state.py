@@ -83,6 +83,88 @@ class CodexStateTests(unittest.TestCase):
         self.assertTrue(activities[0].terminal_event)
         self.assertFalse(activities[0].failed_event)
 
+    def test_scan_session_activities_marks_missing_final_agent_message_as_failed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            _write_jsonl(
+                session,
+                [
+                    {
+                        "timestamp": "2026-06-30T03:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"session_id": "s", "cwd": "/work/a"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:01Z",
+                        "type": "turn_context",
+                        "payload": {"turn_id": "t"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:02Z",
+                        "type": "response_item",
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:03Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "last_agent_message": None,
+                        },
+                    },
+                ],
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].terminal_event)
+        self.assertTrue(activities[0].terminal_agent_message_missing)
+        self.assertTrue(activities[0].failed_event)
+
+    def test_scan_session_activities_keeps_final_agent_message_successful(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            _write_jsonl(
+                session,
+                [
+                    {
+                        "timestamp": "2026-06-30T03:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"session_id": "s", "cwd": "/work/a"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:01Z",
+                        "type": "turn_context",
+                        "payload": {"turn_id": "t"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:02Z",
+                        "type": "response_item",
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:03Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "last_agent_message": "done",
+                        },
+                    },
+                ],
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].terminal_event)
+        self.assertFalse(activities[0].terminal_agent_message_missing)
+        self.assertFalse(activities[0].failed_event)
+
     def test_scan_session_activities_marks_interrupted_turn_as_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -643,6 +725,59 @@ class CodexStateTests(unittest.TestCase):
         self.assertTrue(activities[0].terminal_event)
         self.assertFalse(activities[0].failed_event)
 
+    def test_scan_session_activities_marks_runtime_turn_error_with_log_target_as_failed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session_id = "019f16aa-aaaa-7aaa-8aaa-aaaaaaaaaaaa"
+            turn_id = "019f16aa-bbbb-7bbb-8bbb-bbbbbbbbbbbb"
+            session = home / "sessions" / "2026" / "06" / "30" / "rollout.jsonl"
+            _write_jsonl(
+                session,
+                [
+                    {
+                        "timestamp": "2026-06-30T03:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"session_id": session_id, "cwd": "/work/a"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:01Z",
+                        "type": "turn_context",
+                        "payload": {"turn_id": turn_id},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:02Z",
+                        "type": "response_item",
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:03Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "last_agent_message": "done",
+                        },
+                    },
+                ],
+            )
+            _write_runtime_log_db(
+                home,
+                [
+                    (
+                        1782788402,
+                        session_id,
+                        _runtime_turn_error_body(session_id, turn_id),
+                        "log",
+                    )
+                ],
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].failed_event)
+
     def test_scan_session_activities_waits_for_terminal_event_before_runtime_failure(
         self,
     ) -> None:
@@ -751,6 +886,55 @@ class CodexStateTests(unittest.TestCase):
         self.assertEqual(len(activities), 1)
         self.assertTrue(activities[0].failed_event)
 
+    def test_scan_session_activities_marks_runtime_turn_error_from_wal_without_start_regex(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session_id = "019f16ac-1111-7111-8111-111111111111"
+            turn_id = "019f16ac-2222-7222-8222-222222222222"
+            session = home / "sessions" / "2026" / "06" / "30" / "rollout.jsonl"
+            _write_jsonl(
+                session,
+                [
+                    {
+                        "timestamp": "2026-06-30T03:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"session_id": session_id, "cwd": "/work/a"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:01Z",
+                        "type": "turn_context",
+                        "payload": {"turn_id": turn_id},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:02Z",
+                        "type": "response_item",
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "timestamp": "2026-06-30T03:00:03Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "last_agent_message": "done",
+                        },
+                    },
+                ],
+            )
+            (home / "logs_2.sqlite-wal").write_bytes(
+                (
+                    "INFOlog"
+                    + _runtime_turn_error_body(session_id, turn_id)
+                    + "codex_core::session::turncore/src/session/turn.rs"
+                ).encode("utf-8")
+            )
+
+            activities = scan_session_activities(home)
+
+        self.assertEqual(len(activities), 1)
+        self.assertTrue(activities[0].failed_event)
+
     def test_scan_session_activities_ignores_quoted_runtime_error_in_wal_tail(
         self,
     ) -> None:
@@ -819,7 +1003,7 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
 
 def _write_runtime_log_db(
     home: Path,
-    rows: list[tuple[int, str, str]],
+    rows: list[tuple[int, str, str] | tuple[int, str, str, str]],
 ) -> None:
     connection = sqlite3.connect(home / "logs_2.sqlite")
     try:
@@ -853,11 +1037,38 @@ def _write_runtime_log_db(
             )
             VALUES (?, 0, 'INFO', 'codex_core::session::turn', ?, ?)
             """,
-            [(timestamp, body, session_id) for timestamp, session_id, body in rows],
+            [
+                (timestamp, body, session_id)
+                for timestamp, session_id, body, _target in (
+                    _runtime_log_row(row) for row in rows
+                )
+            ],
         )
+        for timestamp, session_id, body, target in (
+            _runtime_log_row(row) for row in rows
+        ):
+            if target == "codex_core::session::turn":
+                continue
+            connection.execute(
+                """
+                UPDATE logs
+                SET target = ?
+                WHERE ts = ? AND thread_id = ? AND feedback_log_body = ?
+                """,
+                (target, timestamp, session_id, body),
+            )
         connection.commit()
     finally:
         connection.close()
+
+
+def _runtime_log_row(
+    row: tuple[int, str, str] | tuple[int, str, str, str],
+) -> tuple[int, str, str, str]:
+    if len(row) == 3:
+        timestamp, session_id, body = row
+        return timestamp, session_id, body, "codex_core::session::turn"
+    return row
 
 
 def _runtime_turn_error_body(session_id: str, turn_id: str) -> str:

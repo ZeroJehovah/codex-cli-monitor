@@ -24,6 +24,7 @@ RUNTIME_FAILURE_WAL_MAX_BYTES = 8 * 1024 * 1024
 RUNTIME_FAILURE_WAL_SNIPPET_BYTES = 6000
 RUNTIME_FAILURE_WAL_SOURCE_MARKER = "codex_core::session::turncore/src/session/turn.rs"
 RUNTIME_FAILURE_SQLITE_LIMIT_PER_THREAD = 20
+RUNTIME_FAILURE_WAL_CONTEXT_BYTES = 2000
 FAILED_RECORD_TYPES = {"error"}
 FAILED_PAYLOAD_TYPES = {
     "error",
@@ -46,10 +47,6 @@ UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA
 THREAD_ID_RE = re.compile(rf"\b(?:thread_id|thread\.id)=({UUID_RE})\b")
 TURN_ID_RE = re.compile(rf"\b(?:turn_id|turn\.id)=({UUID_RE})\b")
 CWD_RE = re.compile(r"\bcwd=([^}:]+)")
-RUNTIME_WAL_RECORD_START_RE = re.compile(
-    rf"(?:INFO|WARN|ERROR)codex_core::session::turn"
-    rf"session_loop\{{thread_id=({UUID_RE})\}}"
-)
 TERMINAL_ERROR_PREFIXES = (
     "error:",
     "unexpected status ",
@@ -146,11 +143,20 @@ class _TurnRecordSummary:
     def completed_without_visible_response(
         self,
         terminal_payload_type: str | None,
+        *,
+        terminal_agent_message_recorded: bool,
+        terminal_agent_message_missing: bool,
     ) -> bool:
         return (
             terminal_payload_type in TERMINAL_PAYLOAD_TYPES
             and self.saw_user
-            and not self.saw_visible_assistant_or_tool
+            and (
+                terminal_agent_message_missing
+                or (
+                    not terminal_agent_message_recorded
+                    and not self.saw_visible_assistant_or_tool
+                )
+            )
         )
 
 
@@ -309,8 +315,15 @@ def _session_activity(
         latest_terminal_payload if isinstance(latest_terminal_payload, dict) else {}
     )
     terminal_payload_type = _optional_str(latest_terminal_payload.get("type"))
+    terminal_agent_message_missing = (
+        terminal_payload_type == "task_complete"
+        and "last_agent_message" in latest_terminal_payload
+        and latest_terminal_payload.get("last_agent_message") is None
+    )
     failed_event = latest_turn.failed_event or latest_turn.completed_without_visible_response(
-        terminal_payload_type
+        terminal_payload_type,
+        terminal_agent_message_recorded="last_agent_message" in latest_terminal_payload,
+        terminal_agent_message_missing=terminal_agent_message_missing,
     )
 
     return SessionActivity(
@@ -330,6 +343,7 @@ def _session_activity(
         last_payload_role=_optional_str(last_payload.get("role")),
         last_payload_reason=last_payload_reason,
         terminal_event=latest_terminal_record is not None,
+        terminal_agent_message_missing=terminal_agent_message_missing,
         failed_event=failed_event,
         latest_turn_has_user=latest_turn.saw_user,
     )
@@ -494,17 +508,17 @@ def _scan_runtime_failure_sqlite(
 
         select_thread_id = "thread_id" if "thread_id" in columns else "NULL"
         target_column = "target" if "target" in columns else "NULL"
+        failures = []
         if "thread_id" in columns:
-            query = (
+            thread_query = (
                 f"SELECT ts, {select_thread_id}, {target_column}, feedback_log_body "
                 "FROM logs "
                 "WHERE thread_id = ? AND ts >= ? "
                 "ORDER BY ts DESC LIMIT ?"
             )
-            failures = []
             for session_id in sorted(session_ids):
                 rows = connection.execute(
-                    query,
+                    thread_query,
                     (
                         session_id,
                         int(session_windows[session_id]),
@@ -521,19 +535,15 @@ def _scan_runtime_failure_sqlite(
                     )
                     if failure is not None:
                         failures.append(failure)
-            return tuple(failures)
-        else:
-            min_timestamp = min(session_windows.values())
-            query = (
-                f"SELECT ts, {select_thread_id}, {target_column}, feedback_log_body "
-                "FROM logs "
-                "WHERE ts >= ? "
-                "ORDER BY ts DESC LIMIT ?"
-            )
-            parameters = (int(min_timestamp), RUNTIME_FAILURE_SQLITE_LIMIT)
 
-        rows = connection.execute(query, parameters)
-        failures = []
+        min_timestamp = min(session_windows.values())
+        query = (
+            f"SELECT ts, {select_thread_id}, {target_column}, feedback_log_body "
+            "FROM logs "
+            "WHERE ts >= ? AND feedback_log_body LIKE '%Turn error:%' "
+            "ORDER BY ts DESC LIMIT ?"
+        )
+        rows = connection.execute(query, (int(min_timestamp), RUNTIME_FAILURE_SQLITE_LIMIT))
         for timestamp, thread_id, target, body in rows:
             failure = _runtime_failure_from_log_body(
                 timestamp=_float_or_none(timestamp),
@@ -610,19 +620,17 @@ def _scan_runtime_failure_wal(
 
     text = data.decode("utf-8", errors="ignore")
     failures = []
-    for match in RUNTIME_WAL_RECORD_START_RE.finditer(text):
-        snippet = text[match.start() : match.start() + RUNTIME_FAILURE_WAL_SNIPPET_BYTES]
-        error_index = snippet.find("Turn error:")
-        if error_index < 0:
-            continue
+    for error_match in re.finditer(r"Turn error:", text):
+        start = max(0, error_match.start() - RUNTIME_FAILURE_WAL_CONTEXT_BYTES)
+        end = min(len(text), error_match.start() + RUNTIME_FAILURE_WAL_SNIPPET_BYTES)
+        snippet = text[start:end]
         if RUNTIME_FAILURE_WAL_SOURCE_MARKER not in snippet:
             continue
-        body = snippet[: error_index + RUNTIME_FAILURE_WAL_SNIPPET_BYTES]
         failure = _runtime_failure_from_log_body(
             timestamp=None,
-            thread_id=match.group(1),
-            target="codex_core::session::turn",
-            body=body,
+            thread_id=None,
+            target=None,
+            body=snippet,
             source=RUNTIME_LOG_WAL,
         )
         if failure is None:
@@ -661,9 +669,9 @@ def _runtime_failure_from_log_body(
     body: str,
     source: str,
 ) -> _RuntimeFailure | None:
-    if target != "codex_core::session::turn":
-        return None
     if "Turn error:" not in body:
+        return None
+    if not _runtime_log_body_is_codex_turn_error(target, body):
         return None
 
     parsed_thread_id = thread_id or _regex_first(THREAD_ID_RE, body)
@@ -673,6 +681,15 @@ def _runtime_failure_from_log_body(
         cwd=_regex_first(CWD_RE, body),
         timestamp=timestamp,
         source=source,
+    )
+
+
+def _runtime_log_body_is_codex_turn_error(target: str | None, body: str) -> bool:
+    if target == "codex_core::session::turn":
+        return True
+    return (
+        "codex_core::session::turn" in body
+        or "session_task.run:run_turn: Turn error:" in body
     )
 
 

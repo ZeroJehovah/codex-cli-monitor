@@ -428,12 +428,12 @@ def _display_status(
     if hook_state is not None:
         if hook_state.last_event == "session_start":
             return "未运行"
-        if _activity_is_idle_after_missing_stop(state_activity, hook_state):
-            return "未运行"
         if _activity_is_current_for_hook(state_activity, hook_state):
             if state_activity is not None and state_activity.terminal_event:
                 if state_activity.failed_event:
                     return "失败"
+                if _activity_is_idle_after_missing_stop(state_activity, hook_state):
+                    return "未运行"
                 return "成功"
             if _activity_is_idle_reset_after_stop(state_activity, hook_state):
                 return "未运行"
@@ -540,6 +540,8 @@ def _activity_is_idle_after_missing_stop(
         return False
     if activity.changed_during_sample:
         return False
+    if activity.failed_event:
+        return False
 
     started_at = hook_state.turn_started_at or hook_state.updated_at
     event_at = activity.terminal_event_at or _activity_event_time(activity)
@@ -555,7 +557,9 @@ def _activity_is_idle_after_missing_stop(
         )
         if timestamp is not None
     )
-    return activity.observed_at - stable_since >= MISSING_STOP_IDLE_RESET_SECONDS
+    if activity.observed_at - stable_since < MISSING_STOP_IDLE_RESET_SECONDS:
+        return False
+    return not activity.latest_turn_has_user
 
 
 def _activity_event_time(activity: SessionActivity) -> float:
