@@ -73,7 +73,11 @@ def discover_sessions(
     sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[CodexSession, ...]:
     first_snapshot = read_processes(proc_root)
-    first_activities = scan_session_activities(codex_home) if sample_window > 0 else ()
+    first_activities = (
+        scan_session_activities(codex_home, metadata_only=True)
+        if sample_window > 0
+        else ()
+    )
     first_activities_by_path = {
         activity.relative_path: activity for activity in first_activities
     }

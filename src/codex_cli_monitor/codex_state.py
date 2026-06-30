@@ -210,6 +210,7 @@ def scan_session_activities(
     codex_home: Path | None = None,
     max_files: int = 80,
     previous: Mapping[str, SessionActivity] | None = None,
+    metadata_only: bool = False,
 ) -> tuple[SessionActivity, ...]:
     home = (codex_home or default_codex_home()).expanduser()
     if not home.is_dir():
@@ -228,7 +229,11 @@ def scan_session_activities(
         return ()
 
     for path in paths:
-        activity = _session_activity(home, path, observed_at)
+        activity = (
+            _session_activity_metadata(home, path, observed_at)
+            if metadata_only
+            else _session_activity(home, path, observed_at)
+        )
         if activity is None:
             continue
         old = previous.get(activity.relative_path)
@@ -242,7 +247,7 @@ def scan_session_activities(
             )
         activities.append(activity)
 
-    if activities:
+    if activities and not metadata_only:
         activities = _merge_runtime_failures(home, activities)
     return tuple(activities)
 
@@ -328,6 +333,34 @@ def _session_activity(
         terminal_event=latest_terminal_record is not None,
         failed_event=failed_event,
         latest_turn_has_user=latest_turn.saw_user,
+    )
+
+
+def _session_activity_metadata(
+    home: Path,
+    path: Path,
+    observed_at: float,
+) -> SessionActivity | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+
+    try:
+        relative_path = path.relative_to(home).as_posix()
+    except ValueError:
+        relative_path = path.as_posix()
+
+    return SessionActivity(
+        relative_path=relative_path,
+        session_id=None,
+        turn_id=None,
+        cwd=None,
+        size_bytes=stat.st_size,
+        modified_at=stat.st_mtime,
+        observed_at=observed_at,
     )
 
 
