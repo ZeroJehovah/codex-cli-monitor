@@ -149,13 +149,16 @@ exe 会直接退出，不会打开第二个悬浮窗。它会轮询 `/api/sessio
 构建 Windows x64 exe：
 
 ```bash
+rm -rf dist/CodexMonitorWidget-win-x64
 mkdir -p dist/CodexMonitorWidget-win-x64
+resource_obj="$(mktemp /tmp/codex-monitor-widget-resource.XXXXXX.o)"
+trap 'rm -f "$resource_obj"' EXIT
 x86_64-w64-mingw32-windres -I windows/CodexMonitorWidget/src \
   windows/CodexMonitorWidget/src/resources.rc \
-  -O coff -o dist/CodexMonitorWidget-win-x64/resources.o
+  -O coff -o "$resource_obj"
 x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
   windows/CodexMonitorWidget/src/main.c \
-  dist/CodexMonitorWidget-win-x64/resources.o \
+  "$resource_obj" \
   -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
   -mwindows -municode -Wl,--subsystem,windows \
   -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32
