@@ -239,6 +239,12 @@ def is_native_codex_process(process: ProcessInfo) -> bool:
     return bool(_process_names(process).intersection({"codex", "codex.exe"}))
 
 
+def is_support_process(process: ProcessInfo) -> bool:
+    return _looks_like_support_process(process) and not _looks_like_active_tool_process(
+        process
+    )
+
+
 def _process_names(process: ProcessInfo) -> set[str]:
     names = {
         _clean_process_name(Path(value).name)
