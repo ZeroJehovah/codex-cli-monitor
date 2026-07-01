@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from .classify import infer_status, is_native_codex_process
+from .classify import infer_status, is_native_codex_process, is_support_process
 from .codex_state import (
     scan_codex_state,
     scan_new_session_markers,
@@ -161,7 +161,13 @@ def discover_sessions(
                 state_activity=state_activity,
                 hook_state=hook_state,
                 launch_record=launch_records.get(root.pid),
-                display_status=_display_status(inference, hook_state, state_activity),
+                display_status=_display_status(
+                    inference,
+                    root,
+                    descendants,
+                    hook_state,
+                    state_activity,
+                ),
             )
         )
 
@@ -663,11 +669,15 @@ def _normalized_arg(value: str) -> str:
 
 def _display_status(
     inference: Inference,
+    root: ProcessInfo,
+    descendants: tuple[ProcessInfo, ...],
     hook_state: HookSessionState | None,
     state_activity: SessionActivity | None,
 ) -> str:
     if hook_state is not None:
         if _activity_is_new_session_marker(state_activity):
+            return "未运行"
+        if _has_new_support_process_after_stop(root, descendants, hook_state, state_activity):
             return "未运行"
         if hook_state.last_event == "session_start":
             return "未运行"
@@ -711,6 +721,34 @@ def _display_status(
     }:
         return "运行中"
     return "未运行"
+
+
+def _has_new_support_process_after_stop(
+    root: ProcessInfo,
+    descendants: tuple[ProcessInfo, ...],
+    hook_state: HookSessionState,
+    state_activity: SessionActivity | None,
+) -> bool:
+    if state_activity is None or not state_activity.terminal_event:
+        return False
+    if hook_state.in_turn or hook_state.active_tool_count > 0:
+        return False
+    if hook_state.codex_pid not in {None, root.pid}:
+        return False
+    stop_at = _hook_stop_time(hook_state)
+    if stop_at is None:
+        return False
+    terminal_at = state_activity.terminal_event_at or _activity_event_time(state_activity)
+    if terminal_at > stop_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS:
+        return False
+    post_stop_descendants = tuple(
+        process
+        for process in descendants
+        if process.started_at is not None and process.started_at > stop_at
+    )
+    return bool(post_stop_descendants) and all(
+        is_support_process(process) for process in post_stop_descendants
+    )
 
 
 def _activity_is_current_for_hook(
