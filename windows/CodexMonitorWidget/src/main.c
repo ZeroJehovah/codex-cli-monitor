@@ -134,6 +134,7 @@ static int actual_panel_width(void);
 static int directory_column_left(void);
 static int rect_width(const RECT *rect);
 static void finish_drag_move(void);
+static void settle_dragged_window(void);
 
 static void utf8_to_wide(const char *source, wchar_t *target, int target_count) {
     if (target_count <= 0) {
@@ -695,41 +696,6 @@ static void place_rect_from_current_placement(const RECT *work_area, int *width,
     }
 
     update_placement_offsets_from_rect(target, work_area);
-}
-
-static void place_drag_rect(const RECT *desired, RECT *target, int *width, int *height) {
-    RECT work_area;
-    *width = rect_width(desired);
-    *height = rect_height(desired);
-    get_work_area_for_rect(desired, &work_area);
-    clamp_panel_size_to_work_area(&work_area, width, height);
-
-    *target = *desired;
-    target->right = target->left + *width;
-    target->bottom = target->top + *height;
-    g_app.anchor_right = 0;
-    g_app.anchor_bottom = 0;
-
-    if (target->left < work_area.left) {
-        target->left = work_area.left;
-        target->right = target->left + *width;
-    }
-    if (target->right > work_area.right) {
-        target->right = work_area.right;
-        target->left = target->right - *width;
-        g_app.anchor_right = 1;
-    }
-    if (target->top < work_area.top) {
-        target->top = work_area.top;
-        target->bottom = target->top + *height;
-    }
-    if (target->bottom > work_area.bottom) {
-        target->bottom = work_area.bottom;
-        target->top = target->bottom - *height;
-        g_app.anchor_bottom = 1;
-    }
-
-    update_placement_offsets_from_rect(target, &work_area);
 }
 
 static int read_registry_dword(HKEY key, const wchar_t *name, int *target) {
@@ -1672,6 +1638,13 @@ static void update_tool_rect(void) {
 }
 
 static void update_animation_timer(void) {
+    if (g_app.dragging) {
+        if (g_app.animation_timer_active) {
+            KillTimer(g_app.hwnd, ANIMATION_TIMER_ID);
+            g_app.animation_timer_active = 0;
+        }
+        return;
+    }
     if (has_running_sessions() || edge_tuck_animating()) {
         if (!g_app.animation_timer_active) {
             SetTimer(g_app.hwnd, ANIMATION_TIMER_ID, ANIMATION_INTERVAL_MS, NULL);
@@ -1692,18 +1665,79 @@ static void refresh_widget_view(void) {
     set_tooltip_for_hover(g_app.hovered_session);
 }
 
+static void settle_dragged_window(void) {
+    RECT rect;
+    RECT work_area;
+    RECT target;
+    int width;
+    int height;
+    int old_anchor_right = g_app.anchor_right;
+    int old_anchor_bottom = g_app.anchor_bottom;
+    int old_offset_x = g_app.placement_offset_x;
+    int old_offset_y = g_app.placement_offset_y;
+    if (g_app.hwnd == NULL || !GetWindowRect(g_app.hwnd, &rect)) {
+        return;
+    }
+    get_work_area_for_rect(&rect, &work_area);
+    width = rect_width(&rect);
+    height = rect_height(&rect);
+    clamp_panel_size_to_work_area(&work_area, &width, &height);
+    target = rect;
+    target.right = target.left + width;
+    target.bottom = target.top + height;
+
+    g_app.anchor_right = 0;
+    g_app.anchor_bottom = 0;
+    if (target.right >= work_area.right - EDGE_TUCK_ATTACH_TOLERANCE) {
+        target.right = work_area.right;
+        target.left = target.right - width;
+        g_app.anchor_right = 1;
+    }
+    if (target.left < work_area.left) {
+        target.left = work_area.left;
+        target.right = target.left + width;
+        g_app.anchor_right = 0;
+    }
+    if (target.bottom >= work_area.bottom - EDGE_TUCK_ATTACH_TOLERANCE) {
+        target.bottom = work_area.bottom;
+        target.top = target.bottom - height;
+        g_app.anchor_bottom = 1;
+    }
+    if (target.top < work_area.top) {
+        target.top = work_area.top;
+        target.bottom = target.top + height;
+        g_app.anchor_bottom = 0;
+    }
+
+    update_placement_offsets_from_rect(&target, &work_area);
+    if (target.left != rect.left || target.top != rect.top ||
+        rect_width(&target) != rect_width(&rect) ||
+        rect_height(&target) != rect_height(&rect)) {
+        SetWindowPos(g_app.hwnd, HWND_TOPMOST, target.left, target.top,
+            width, height, SWP_NOACTIVATE);
+    } else if (old_anchor_right != g_app.anchor_right ||
+        old_anchor_bottom != g_app.anchor_bottom ||
+        old_offset_x != g_app.placement_offset_x ||
+        old_offset_y != g_app.placement_offset_y) {
+        update_tool_rect();
+    }
+}
+
 static void finish_drag_move(void) {
     if (!g_app.dragging) {
         return;
     }
     g_app.dragging = 0;
+    settle_dragged_window();
     save_widget_placement();
     if (g_app.drag_refresh_pending) {
         g_app.drag_refresh_pending = 0;
         refresh_widget_view();
     } else {
         sync_edge_tuck_after_layout_change();
+        update_animation_timer();
     }
+    start_fetch();
 }
 
 static void set_tooltip_for_hover(int index) {
@@ -2263,8 +2297,16 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return 0;
     case WM_TIMER:
         if (wparam == REFRESH_TIMER_ID) {
-            start_fetch();
+            if (g_app.dragging) {
+                g_app.drag_refresh_pending = 1;
+            } else {
+                start_fetch();
+            }
         } else if (wparam == ANIMATION_TIMER_ID) {
+            if (g_app.dragging) {
+                update_animation_timer();
+                return 0;
+            }
             advance_edge_tuck_animation();
             InvalidateRect(hwnd, NULL, FALSE);
             update_animation_timer();
@@ -2315,6 +2357,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         set_edge_tuck_target(0);
         g_app.dragging = 1;
         g_app.drag_refresh_pending = 0;
+        update_animation_timer();
         g_app.hovered_session = -1;
         set_tooltip_for_hover(-1);
         ReleaseCapture();
@@ -2361,17 +2404,6 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         ClientToScreen(hwnd, &point);
         show_context_menu(hwnd, point);
         return 0;
-    }
-    case WM_MOVING: {
-        RECT target;
-        RECT *desired = (RECT *)lparam;
-        int width;
-        int height;
-        if (desired != NULL) {
-            place_drag_rect(desired, &target, &width, &height);
-            *desired = target;
-        }
-        return TRUE;
     }
     case WM_EXITSIZEMOVE:
         finish_drag_move();
