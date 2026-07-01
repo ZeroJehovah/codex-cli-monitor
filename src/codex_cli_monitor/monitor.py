@@ -29,6 +29,7 @@ MISSING_STOP_IDLE_RESET_SECONDS = 10.0
 INACTIVE_ROOT_STATES = {"T", "t", "Z", "X", "x"}
 SESSION_BINDING_UNKNOWN_DELTA_SECONDS = 365 * 24 * 3600.0
 NEW_SESSION_MARKER_HOOK_WINDOW_SECONDS = 5 * 60.0
+NEW_SESSION_MARKER_STOP_WINDOW_SECONDS = 5 * 60.0
 CODEX_MAINTENANCE_ARGS = {
     "--self-update",
     "--self_update",
@@ -303,7 +304,12 @@ def _apply_new_session_markers(
         for marker in markers:
             if not _marker_can_reset_activity(marker, state_activity, hook_state, root):
                 continue
-            precise = _marker_candidate_is_precise(marker, root, hook_state)
+            precise = _marker_candidate_is_precise(
+                marker,
+                root,
+                state_activity,
+                hook_state,
+            )
             candidates_by_marker[marker.relative_path] = (
                 candidates_by_marker.get(marker.relative_path, 0) + 1
             )
@@ -419,6 +425,11 @@ def _marker_can_reset_activity(
         and _normalize_path(state_activity.cwd) != _normalize_path(root.cwd)
     ):
         return False
+    if marker.session_id is not None and marker.session_id in {
+        state_activity.session_id,
+        hook_state.session_id if hook_state is not None else None,
+    }:
+        return False
     previous_event_at = _activity_event_time(state_activity)
     if marker.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < previous_event_at:
         return False
@@ -436,12 +447,22 @@ def _marker_can_reset_activity(
 def _marker_candidate_is_precise(
     marker: SessionActivity,
     root: ProcessInfo,
+    state_activity: SessionActivity | None,
     hook_state: HookSessionState | None,
 ) -> bool:
-    return marker.cwd is not None or _marker_matches_session_start_hook(
-        marker,
-        hook_state,
-        root,
+    return (
+        marker.cwd is not None
+        or _marker_matches_session_start_hook(
+            marker,
+            hook_state,
+            root,
+        )
+        or _marker_matches_recent_stop(
+            marker,
+            state_activity,
+            hook_state,
+            root,
+        )
     )
 
 
@@ -458,28 +479,75 @@ def _marker_matches_session_start_hook(
     return abs(marker.modified_at - event_at) <= NEW_SESSION_MARKER_HOOK_WINDOW_SECONDS
 
 
+def _marker_matches_recent_stop(
+    marker: SessionActivity,
+    state_activity: SessionActivity | None,
+    hook_state: HookSessionState | None,
+    root: ProcessInfo,
+) -> bool:
+    if state_activity is None or hook_state is None:
+        return False
+    if not state_activity.terminal_event:
+        return False
+    if hook_state.codex_pid not in {None, root.pid}:
+        return False
+    stop_at = _hook_stop_time(hook_state)
+    if stop_at is None:
+        return False
+    if marker.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < stop_at:
+        return False
+    if marker.modified_at - stop_at > NEW_SESSION_MARKER_STOP_WINDOW_SECONDS:
+        return False
+    if marker.session_id is not None and marker.session_id in {
+        state_activity.session_id,
+        hook_state.session_id,
+    }:
+        return False
+    terminal_at = state_activity.terminal_event_at or _activity_event_time(state_activity)
+    return terminal_at <= stop_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS
+
+
 def _marker_sort_key_for_root(
     root: ProcessInfo,
     marker: SessionActivity,
     state_activity: SessionActivity | None,
     hook_state: HookSessionState | None,
-) -> tuple[float, float, float]:
-    reference = (
-        hook_state.updated_at
-        if hook_state is not None
-        else (
-            _activity_event_time(state_activity)
-            if state_activity is not None
-            else root.started_at
-        )
+) -> tuple[float, float, float, float]:
+    recent_stop = _marker_matches_recent_stop(
+        marker,
+        state_activity,
+        hook_state,
+        root,
     )
+    reference = _hook_stop_time(hook_state) if recent_stop else None
+    if reference is None:
+        reference = (
+            hook_state.updated_at
+            if hook_state is not None
+            else (
+                _activity_event_time(state_activity)
+                if state_activity is not None
+                else root.started_at
+            )
+        )
     delta = abs(marker.modified_at - reference) if reference is not None else 0.0
     start_delta = (
         abs(marker.modified_at - root.started_at)
         if root.started_at is not None
         else SESSION_BINDING_UNKNOWN_DELTA_SECONDS
     )
-    return (delta, start_delta, -marker.modified_at)
+    recent_stop_rank = 0.0 if recent_stop else 1.0
+    return (recent_stop_rank, delta, start_delta, -marker.modified_at)
+
+
+def _hook_stop_time(hook_state: HookSessionState | None) -> float | None:
+    if hook_state is None:
+        return None
+    if hook_state.last_stopped_at is not None:
+        return hook_state.last_stopped_at
+    if hook_state.last_event == "stop":
+        return hook_state.updated_at
+    return None
 
 
 def _hook_lifecycle_sort_rank(hook_state: HookSessionState | None) -> float:
