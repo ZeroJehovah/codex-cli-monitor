@@ -15,12 +15,10 @@
 #define SINGLE_INSTANCE_MUTEX_NAME L"Local\\ZeroJehovah.CodexMonitorWidget.SingleInstance"
 #define REFRESH_TIMER_ID 1
 #define ANIMATION_TIMER_ID 2
-#define EDGE_TUCK_TIMER_ID 3
 #define REFRESH_INTERVAL_MS 500
 #define EMPTY_RESULT_CONFIRMATIONS 1
 #define ANIMATION_INTERVAL_MS 16
 #define RUNNING_PULSE_PERIOD_MS 1200
-#define EDGE_TUCK_DELAY_MS 1000
 #define EDGE_TUCK_ANIMATION_DURATION_MS 260
 #define EDGE_TUCK_PROGRESS_MAX 1000
 #define EDGE_TUCK_ATTACH_TOLERANCE 1
@@ -97,7 +95,6 @@ typedef struct AppState {
     int animation_timer_active;
     int mouse_inside;
     int mouse_tracking;
-    int edge_tuck_delay_active;
     int edge_tuck_target_collapsed;
     int edge_tuck_progress;
     int edge_tuck_enabled;
@@ -109,8 +106,6 @@ typedef struct AppState {
     int placement_offset_y;
     int display_font_points;
     int display_wheel_delta;
-    POINT drag_start;
-    RECT drag_window;
     LONG fetching;
     char last_error[256];
 } AppState;
@@ -138,6 +133,7 @@ static int panel_width(void);
 static int actual_panel_width(void);
 static int directory_column_left(void);
 static int rect_width(const RECT *rect);
+static void finish_drag_move(void);
 
 static void utf8_to_wide(const char *source, wchar_t *target, int target_count) {
     if (target_count <= 0) {
@@ -881,12 +877,7 @@ static int attach_horizontal_edge_anchor(void) {
 }
 
 static void cancel_edge_tuck_delay(void) {
-    if (!g_app.edge_tuck_delay_active || g_app.hwnd == NULL) {
-        g_app.edge_tuck_delay_active = 0;
-        return;
-    }
-    KillTimer(g_app.hwnd, EDGE_TUCK_TIMER_ID);
-    g_app.edge_tuck_delay_active = 0;
+    return;
 }
 
 static int cursor_inside_widget(void) {
@@ -912,11 +903,7 @@ static void schedule_edge_tuck_delay(void) {
         !edge_tuck_available()) {
         return;
     }
-    attach_horizontal_edge_anchor();
-    if (!g_app.edge_tuck_delay_active) {
-        SetTimer(g_app.hwnd, EDGE_TUCK_TIMER_ID, EDGE_TUCK_DELAY_MS, NULL);
-        g_app.edge_tuck_delay_active = 1;
-    }
+    set_edge_tuck_target(1);
 }
 
 static void set_edge_tuck_target(int collapsed) {
@@ -1211,9 +1198,9 @@ static COLORREF status_color(const char *status) {
         return RGB(235, 87, 87);
     }
     if (strcmp(status, STATUS_IDLE) == 0) {
-        return RGB(139, 143, 152);
+        return RGB(245, 245, 245);
     }
-    return RGB(139, 143, 152);
+    return RGB(245, 245, 245);
 }
 
 static int running_pulse_level(void) {
@@ -1703,6 +1690,20 @@ static void refresh_widget_view(void) {
     update_animation_timer();
     InvalidateRect(g_app.hwnd, NULL, FALSE);
     set_tooltip_for_hover(g_app.hovered_session);
+}
+
+static void finish_drag_move(void) {
+    if (!g_app.dragging) {
+        return;
+    }
+    g_app.dragging = 0;
+    save_widget_placement();
+    if (g_app.drag_refresh_pending) {
+        g_app.drag_refresh_pending = 0;
+        refresh_widget_view();
+    } else {
+        sync_edge_tuck_after_layout_change();
+    }
 }
 
 static void set_tooltip_for_hover(int index) {
@@ -2267,14 +2268,6 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             advance_edge_tuck_animation();
             InvalidateRect(hwnd, NULL, FALSE);
             update_animation_timer();
-        } else if (wparam == EDGE_TUCK_TIMER_ID) {
-            cancel_edge_tuck_delay();
-            if (!g_app.mouse_inside &&
-                !cursor_inside_widget() &&
-                !g_app.dragging &&
-                !g_app.context_menu_open) {
-                set_edge_tuck_target(1);
-            }
         }
         return 0;
     case WM_ERASEBKGND:
@@ -2322,11 +2315,11 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         set_edge_tuck_target(0);
         g_app.dragging = 1;
         g_app.drag_refresh_pending = 0;
-        g_app.drag_start.x = GET_X_LPARAM(lparam);
-        g_app.drag_start.y = GET_Y_LPARAM(lparam);
-        ClientToScreen(hwnd, &g_app.drag_start);
-        GetWindowRect(hwnd, &g_app.drag_window);
-        SetCapture(hwnd);
+        g_app.hovered_session = -1;
+        set_tooltip_for_hover(-1);
+        ReleaseCapture();
+        SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, GetMessagePos());
+        finish_drag_move();
         return 0;
     case WM_MOUSEMOVE: {
         POINT point;
@@ -2339,20 +2332,6 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         track_mouse_leave(hwnd);
         cancel_edge_tuck_delay();
         set_edge_tuck_target(0);
-        if (g_app.dragging) {
-            RECT desired = g_app.drag_window;
-            RECT target;
-            int width;
-            int height;
-            ClientToScreen(hwnd, &point);
-            int dx = point.x - g_app.drag_start.x;
-            int dy = point.y - g_app.drag_start.y;
-            OffsetRect(&desired, dx, dy);
-            place_drag_rect(&desired, &target, &width, &height);
-            SetWindowPos(hwnd, HWND_TOPMOST, target.left, target.top, width, height,
-                SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
-            return 0;
-        }
         hovered = dot_at_point(point);
         if (hovered != g_app.hovered_session) {
             g_app.hovered_session = hovered;
@@ -2368,24 +2347,12 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         schedule_edge_tuck_delay();
         return 0;
     case WM_LBUTTONUP:
-        if (g_app.dragging) {
-            g_app.dragging = 0;
-            ReleaseCapture();
-            save_widget_placement();
-            if (g_app.drag_refresh_pending) {
-                g_app.drag_refresh_pending = 0;
-                refresh_widget_view();
-            } else {
-                sync_edge_tuck_after_layout_change();
-            }
-        }
+        finish_drag_move();
         return 0;
     case WM_RBUTTONUP: {
         POINT point;
         if (g_app.dragging) {
-            g_app.dragging = 0;
-            ReleaseCapture();
-            save_widget_placement();
+            finish_drag_move();
         }
         cancel_edge_tuck_delay();
         set_edge_tuck_target(0);
@@ -2395,6 +2362,20 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         show_context_menu(hwnd, point);
         return 0;
     }
+    case WM_MOVING: {
+        RECT target;
+        RECT *desired = (RECT *)lparam;
+        int width;
+        int height;
+        if (desired != NULL) {
+            place_drag_rect(desired, &target, &width, &height);
+            *desired = target;
+        }
+        return TRUE;
+    }
+    case WM_EXITSIZEMOVE:
+        finish_drag_move();
+        return 0;
     case WM_CONTEXTMENU: {
         POINT point;
         cancel_edge_tuck_delay();
@@ -2444,7 +2425,6 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         save_widget_placement();
         KillTimer(hwnd, REFRESH_TIMER_ID);
         KillTimer(hwnd, ANIMATION_TIMER_ID);
-        KillTimer(hwnd, EDGE_TUCK_TIMER_ID);
         if (g_app.font != NULL) {
             DeleteObject(g_app.font);
             g_app.font = NULL;
