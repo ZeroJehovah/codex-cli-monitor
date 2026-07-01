@@ -26,7 +26,6 @@ from .shim import default_log_path, load_launch_records
 
 ACTIVITY_TIMESTAMP_GRACE_SECONDS = 5.0
 MISSING_STOP_IDLE_RESET_SECONDS = 10.0
-SUCCESS_STATUS_RETENTION_SECONDS = 5 * 60.0
 INACTIVE_ROOT_STATES = {"T", "t", "Z", "X", "x"}
 SESSION_BINDING_UNKNOWN_DELTA_SECONDS = 365 * 24 * 3600.0
 NEW_SESSION_MARKER_HOOK_WINDOW_SECONDS = 5 * 60.0
@@ -604,8 +603,6 @@ def _display_status(
             return "未运行"
         if hook_state.last_event == "session_start":
             return "未运行"
-        if _activity_success_status_expired(state_activity, inference):
-            return "未运行"
         if _activity_is_current_for_hook(state_activity, hook_state):
             if _activity_is_unprompted_session_context(state_activity):
                 return "未运行"
@@ -635,8 +632,6 @@ def _display_status(
         if state_activity.failed_event:
             return "失败"
         if state_activity.terminal_event:
-            if _activity_success_status_expired(state_activity, inference):
-                return "未运行"
             return "成功"
         if state_activity.changed_during_sample:
             return "运行中"
@@ -746,23 +741,6 @@ def _activity_is_idle_after_missing_stop(
     if activity.observed_at - stable_since < MISSING_STOP_IDLE_RESET_SECONDS:
         return False
     return not activity.latest_turn_has_user
-
-
-def _activity_success_status_expired(
-    activity: SessionActivity | None,
-    inference: Inference,
-) -> bool:
-    if activity is None:
-        return False
-    if not activity.terminal_event or activity.failed_event:
-        return False
-    if activity.changed_during_sample:
-        return False
-    if inference.status != "waiting_user_likely":
-        return False
-
-    terminal_at = activity.terminal_event_at or _activity_event_time(activity)
-    return activity.observed_at - terminal_at >= SUCCESS_STATUS_RETENTION_SECONDS
 
 
 def _activity_is_unprompted_session_context(activity: SessionActivity | None) -> bool:
