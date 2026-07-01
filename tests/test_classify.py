@@ -129,6 +129,28 @@ class ClassifyTests(unittest.TestCase):
 
         self.assertEqual(inference.status, "waiting_user_likely")
 
+    def test_idle_terminal_state_reports_unbindable_new_session_limitation(
+        self,
+    ) -> None:
+        root = _process(100, "codex", state="S", tty="/dev/pts/1")
+        activity = _activity(changed=False, age=300, last_payload_type="task_complete")
+
+        inference = infer_status(
+            root,
+            (),
+            (),
+            sample_window=1,
+            state_activity=activity,
+        )
+
+        self.assertEqual(inference.status, "waiting_user_likely")
+        self.assertTrue(
+            any(
+                "/new" in limitation and "cannot be identified" in limitation
+                for limitation in inference.limitations
+            )
+        )
+
     def test_recent_function_call_state_can_indicate_api_inflight(self) -> None:
         root = _process(100, "codex", state="S", tty="/dev/pts/1")
         connection = NetworkConnection(
@@ -241,7 +263,11 @@ def _activity(
         changed_during_sample=changed,
         last_record_type="response_item",
         last_payload_type=last_payload_type,
-        terminal_event=last_payload_type in {"turn_aborted", "thread_rolled_back"},
+        terminal_event=last_payload_type in (
+            "task_complete",
+            "turn_aborted",
+            "thread_rolled_back",
+        ),
     )
 
 
