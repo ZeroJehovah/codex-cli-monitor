@@ -188,6 +188,10 @@ def summarize_hook_events(
         if cwd is None:
             continue
         key = (cwd, event.ppid)
+        if event.event == "session_start":
+            session_id[key] = event.session_id
+        elif event.session_id is not None:
+            session_id[key] = event.session_id
         if event.event in {"session_start", "user_prompt_submit"}:
             in_turn[key] = event.event == "user_prompt_submit"
             active_tools[key] = 0
@@ -196,7 +200,6 @@ def summarize_hook_events(
                 last_stopped_at[key] = None
                 session_started_at[key] = event.timestamp
                 session_start_source[key] = event.hook_source
-                session_id[key] = event.session_id
             else:
                 turn_started_at[key] = event.timestamp
                 last_stopped_at[key] = None

@@ -122,6 +122,36 @@ class HookStateTests(unittest.TestCase):
         self.assertEqual(state.session_start_source, "clear")
         self.assertEqual(state.session_id, "019f-new")
 
+    def test_later_hook_payload_updates_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.jsonl"
+            append_hook_event(
+                "session_start",
+                cwd="/work/a",
+                ppid=100,
+                path=path,
+            )
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                path=path,
+                hook_payload={"session_id": "019f-turn"},
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=100,
+                path=path,
+                hook_payload={"session_id": "019f-turn"},
+            )
+
+            states = summarize_hook_events(load_hook_events(path))
+
+        state = states[str(Path("/work/a").resolve())][0]
+        self.assertEqual(state.last_event, "stop")
+        self.assertEqual(state.session_id, "019f-turn")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -899,6 +899,75 @@ class MonitorTests(unittest.TestCase):
             "shell_snapshots/019f9999-0000-7000-8000-000000000003.100.sh",
         )
 
+    def test_unknown_cwd_new_session_marker_uses_recent_stop_for_same_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 60
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _write_process(proc, 200, "codex", "S", 1, ["codex"], "/work/a")
+            session_a = _write_completed_session(home, "a-success.jsonl", "/work/a", base + 6)
+            session_b = _write_completed_session(home, "b-success.jsonl", "/work/a", base + 36)
+            os.utime(session_a, (base + 11, base + 11))
+            os.utime(session_b, (base + 41, base + 41))
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 7,
+                path=hook_log,
+                hook_payload={"session_id": "a-success"},
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 10,
+                path=hook_log,
+                hook_payload={"session_id": "a-success"},
+            )
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=200,
+                timestamp=base + 37,
+                path=hook_log,
+                hook_payload={"session_id": "b-success"},
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=200,
+                timestamp=base + 40,
+                path=hook_log,
+                hook_payload={"session_id": "b-success"},
+            )
+            marker = _write_shell_snapshot(
+                home,
+                "019f9999-0000-7000-8000-000000000004.100.sh",
+            )
+            os.utime(marker, (base + 43, base + 43))
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        sessions_by_pid = {session.root.pid: session for session in sessions}
+        self.assertEqual(sessions_by_pid[100].display_status, "成功")
+        self.assertEqual(sessions_by_pid[200].display_status, "未运行")
+        self.assertEqual(
+            sessions_by_pid[200].state_activity.relative_path,
+            "shell_snapshots/019f9999-0000-7000-8000-000000000004.100.sh",
+        )
+
     def test_missing_stop_hook_stale_empty_terminal_event_becomes_not_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = time.time() - 60
