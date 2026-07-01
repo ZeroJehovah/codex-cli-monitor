@@ -83,7 +83,7 @@ class CodexStateTests(unittest.TestCase):
         self.assertTrue(activities[0].terminal_event)
         self.assertFalse(activities[0].failed_event)
 
-    def test_scan_session_activities_marks_missing_final_agent_message_as_failed(
+    def test_scan_session_activities_keeps_missing_final_agent_message_diagnostic_only(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,7 +123,7 @@ class CodexStateTests(unittest.TestCase):
         self.assertEqual(len(activities), 1)
         self.assertTrue(activities[0].terminal_event)
         self.assertTrue(activities[0].terminal_agent_message_missing)
-        self.assertTrue(activities[0].failed_event)
+        self.assertFalse(activities[0].failed_event)
 
     def test_scan_session_activities_keeps_final_agent_message_successful(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -240,7 +240,7 @@ class CodexStateTests(unittest.TestCase):
         self.assertTrue(activities[0].terminal_event)
         self.assertTrue(activities[0].failed_event)
 
-    def test_scan_session_activities_marks_empty_terminal_turn_as_failed(self) -> None:
+    def test_scan_session_activities_keeps_empty_terminal_turn_successful(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
@@ -258,9 +258,9 @@ class CodexStateTests(unittest.TestCase):
 
         self.assertEqual(len(activities), 1)
         self.assertTrue(activities[0].terminal_event)
-        self.assertTrue(activities[0].failed_event)
+        self.assertFalse(activities[0].failed_event)
 
-    def test_scan_session_activities_marks_empty_terminal_turn_without_token_count_as_failed(
+    def test_scan_session_activities_keeps_empty_terminal_turn_without_token_count_successful(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -279,7 +279,7 @@ class CodexStateTests(unittest.TestCase):
 
         self.assertEqual(len(activities), 1)
         self.assertTrue(activities[0].terminal_event)
-        self.assertTrue(activities[0].failed_event)
+        self.assertFalse(activities[0].failed_event)
 
     def test_scan_session_activities_ignores_commentary_error_discussion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

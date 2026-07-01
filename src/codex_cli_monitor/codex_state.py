@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -139,25 +140,6 @@ class _TurnRecordSummary:
             self.saw_visible_assistant_or_tool = True
         if _record_is_failed_event(record):
             self.failed_event = True
-
-    def completed_without_visible_response(
-        self,
-        terminal_payload_type: str | None,
-        *,
-        terminal_agent_message_recorded: bool,
-        terminal_agent_message_missing: bool,
-    ) -> bool:
-        return (
-            terminal_payload_type in TERMINAL_PAYLOAD_TYPES
-            and self.saw_user
-            and (
-                terminal_agent_message_missing
-                or (
-                    not terminal_agent_message_recorded
-                    and not self.saw_visible_assistant_or_tool
-                )
-            )
-        )
 
 
 def default_codex_home(env: Mapping[str, str] | None = None) -> Path:
@@ -347,11 +329,7 @@ def _session_activity(
         and "last_agent_message" in latest_terminal_payload
         and latest_terminal_payload.get("last_agent_message") is None
     )
-    failed_event = latest_turn.failed_event or latest_turn.completed_without_visible_response(
-        terminal_payload_type,
-        terminal_agent_message_recorded="last_agent_message" in latest_terminal_payload,
-        terminal_agent_message_missing=terminal_agent_message_missing,
-    )
+    failed_event = latest_turn.failed_event
 
     return SessionActivity(
         relative_path=relative_path,
@@ -430,7 +408,7 @@ def _new_session_marker(
         relative_path=relative_path,
         session_id=session_id,
         turn_id=None,
-        cwd=None,
+        cwd=_cwd_from_shell_snapshot(path),
         size_bytes=stat.st_size,
         modified_at=stat.st_mtime,
         observed_at=observed_at,
@@ -852,6 +830,38 @@ def _cwd_from_record(record: dict | None) -> str | None:
     if not isinstance(payload, dict):
         return None
     return _optional_str(payload.get("cwd"))
+
+
+def _cwd_from_shell_snapshot(path: Path) -> str | None:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+
+    for line in reversed(lines):
+        raw = _shell_assignment_value(line, "PWD")
+        if raw is None:
+            continue
+        try:
+            parts = shlex.split(raw, posix=True)
+        except ValueError:
+            continue
+        if len(parts) == 1 and parts[0]:
+            return parts[0]
+    return None
+
+
+def _shell_assignment_value(line: str, name: str) -> str | None:
+    stripped = line.strip()
+    prefixes = (
+        f"declare -x {name}=",
+        f"export {name}=",
+        f"{name}=",
+    )
+    for prefix in prefixes:
+        if stripped.startswith(prefix):
+            return stripped.removeprefix(prefix)
+    return None
 
 
 def _optional_str(value: object) -> str | None:
