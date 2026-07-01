@@ -819,7 +819,7 @@ class MonitorTests(unittest.TestCase):
             )
 
         sessions_by_pid = {session.root.pid: session for session in sessions}
-        self.assertEqual(sessions_by_pid[100].display_status, "未运行")
+        self.assertEqual(sessions_by_pid[100].display_status, "成功")
         self.assertEqual(sessions_by_pid[200].display_status, "未运行")
         self.assertEqual(
             sessions_by_pid[200].state_activity.relative_path,
@@ -854,8 +854,8 @@ class MonitorTests(unittest.TestCase):
             )
 
         sessions_by_pid = {session.root.pid: session for session in sessions}
-        self.assertEqual(sessions_by_pid[100].display_status, "未运行")
-        self.assertEqual(sessions_by_pid[200].display_status, "未运行")
+        self.assertEqual(sessions_by_pid[100].display_status, "成功")
+        self.assertEqual(sessions_by_pid[200].display_status, "成功")
 
     def test_session_start_hook_consumes_unknown_cwd_new_session_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -892,7 +892,7 @@ class MonitorTests(unittest.TestCase):
             )
 
         sessions_by_pid = {session.root.pid: session for session in sessions}
-        self.assertEqual(sessions_by_pid[100].display_status, "未运行")
+        self.assertEqual(sessions_by_pid[100].display_status, "成功")
         self.assertEqual(sessions_by_pid[200].display_status, "未运行")
         self.assertEqual(
             sessions_by_pid[200].state_activity.relative_path,
@@ -1932,7 +1932,7 @@ class MonitorTests(unittest.TestCase):
             )
 
         sessions_by_pid = {session.root.pid: session for session in sessions}
-        self.assertEqual(sessions_by_pid[100].display_status, "未运行")
+        self.assertEqual(sessions_by_pid[100].display_status, "成功")
         self.assertEqual(sessions_by_pid[200].display_status, "运行中")
         self.assertEqual(
             sessions_by_pid[100].state_activity.relative_path,
@@ -1970,7 +1970,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIsNone(sessions[0].state_activity)
         self.assertEqual(sessions[0].display_status, "未运行")
 
-    def test_idle_stale_success_without_hooks_is_not_user_facing_success(self) -> None:
+    def test_idle_stale_success_remains_success_without_new_session_signal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = time.time() - 600
             root = Path(tmp)
@@ -1996,7 +1996,7 @@ class MonitorTests(unittest.TestCase):
             )
 
         self.assertEqual(len(sessions), 1)
-        self.assertEqual(sessions[0].display_status, "未运行")
+        self.assertEqual(sessions[0].display_status, "成功")
         self.assertIsNotNone(sessions[0].state_activity)
         self.assertTrue(sessions[0].state_activity.terminal_event)
 
