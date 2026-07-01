@@ -422,10 +422,17 @@ def _marker_can_reset_activity(
     marker_cwd = _normalize_path(marker.cwd)
     if marker_cwd is not None and marker_cwd != _normalize_path(root.cwd):
         return False
+    matches_session_start = _marker_matches_session_start_hook(
+        marker,
+        hook_state,
+        root,
+    )
+    if marker_cwd is None and not matches_session_start:
+        return False
     if root.started_at is not None and marker.modified_at < root.started_at:
         return False
     if state_activity is None:
-        return _marker_matches_session_start_hook(marker, hook_state, root)
+        return marker_cwd is not None or matches_session_start
     if (
         state_activity.cwd is not None
         and _normalize_path(state_activity.cwd) != _normalize_path(root.cwd)

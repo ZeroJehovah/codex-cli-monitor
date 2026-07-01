@@ -713,7 +713,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].display_status, "失败")
         self.assertTrue(sessions[0].state_activity.failed_event)
 
-    def test_new_shell_snapshot_after_failed_turn_resets_same_process(self) -> None:
+    def test_unknown_cwd_shell_snapshot_after_failed_turn_preserves_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = time.time() - 60
             root = Path(tmp)
@@ -755,8 +755,8 @@ class MonitorTests(unittest.TestCase):
                         "type": "event_msg",
                         "timestamp": _iso(base + 3),
                         "payload": {
-                            "type": "task_complete",
-                            "last_agent_message": None,
+                            "type": "turn_aborted",
+                            "reason": "interrupted",
                         },
                     },
                 ],
@@ -783,12 +783,12 @@ class MonitorTests(unittest.TestCase):
             )
 
         self.assertEqual(len(sessions), 1)
-        self.assertEqual(sessions[0].display_status, "未运行")
+        self.assertEqual(sessions[0].display_status, "失败")
         self.assertEqual(
             sessions[0].state_activity.relative_path,
-            "shell_snapshots/019f17d7-5cd7-7831-9a96-b59554e31b1a.1782811417817756780.sh",
+            "sessions/2026/06/26/rollout-2026-06-30T17-23-27-019f17d7-35cc-7cf0-8f6f-5c945f851ca9.jsonl",
         )
-        self.assertEqual(sessions[0].state_activity.last_payload_type, "new_session")
+        self.assertTrue(sessions[0].state_activity.failed_event)
 
     def test_new_session_marker_with_cwd_resets_matching_directory_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -899,7 +899,7 @@ class MonitorTests(unittest.TestCase):
             "shell_snapshots/019f9999-0000-7000-8000-000000000003.100.sh",
         )
 
-    def test_unknown_cwd_new_session_marker_uses_recent_stop_for_same_process(self) -> None:
+    def test_unknown_cwd_new_session_marker_does_not_reset_recent_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = time.time() - 60
             root = Path(tmp)
@@ -962,10 +962,67 @@ class MonitorTests(unittest.TestCase):
 
         sessions_by_pid = {session.root.pid: session for session in sessions}
         self.assertEqual(sessions_by_pid[100].display_status, "成功")
-        self.assertEqual(sessions_by_pid[200].display_status, "未运行")
+        self.assertEqual(sessions_by_pid[200].display_status, "成功")
         self.assertEqual(
             sessions_by_pid[200].state_activity.relative_path,
-            "shell_snapshots/019f9999-0000-7000-8000-000000000004.100.sh",
+            "sessions/2026/06/26/b-success.jsonl",
+        )
+
+    def test_unknown_cwd_new_session_marker_after_stop_window_preserves_success(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 900
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            (proc / "uptime").write_text("1200.00 0.00\n", encoding="utf-8")
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            session = _write_completed_session(
+                home,
+                "a-success.jsonl",
+                "/work/a",
+                base + 1,
+            )
+            os.utime(session, (base + 5, base + 5))
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 2,
+                path=hook_log,
+                hook_payload={"session_id": "a-success"},
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 5,
+                path=hook_log,
+                hook_payload={"session_id": "a-success"},
+            )
+            marker = _write_shell_snapshot(
+                home,
+                "019f9999-0000-7000-8000-000000000005.100.sh",
+            )
+            os.utime(marker, (base + 700, base + 700))
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertEqual(
+            sessions[0].state_activity.relative_path,
+            "sessions/2026/06/26/a-success.jsonl",
         )
 
     def test_new_support_process_after_stop_resets_same_process_only(self) -> None:
