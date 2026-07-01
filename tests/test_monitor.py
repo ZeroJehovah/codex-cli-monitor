@@ -1805,6 +1805,36 @@ class MonitorTests(unittest.TestCase):
         self.assertIsNone(sessions[0].state_activity)
         self.assertEqual(sessions[0].display_status, "未运行")
 
+    def test_idle_stale_success_without_new_marker_becomes_not_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 600
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            (proc / "uptime").write_text("1000.00 0.00\n", encoding="utf-8")
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            session = _write_completed_session(
+                home,
+                "old-success.jsonl",
+                "/work/a",
+                base,
+            )
+            os.utime(session, (base + 4, base + 4))
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "未运行")
+        self.assertIsNotNone(sessions[0].state_activity)
+        self.assertTrue(sessions[0].state_activity.terminal_event)
+
     def test_inspect_runtime_returns_sessions_and_state_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
