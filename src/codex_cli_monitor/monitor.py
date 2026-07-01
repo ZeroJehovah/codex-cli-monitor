@@ -28,6 +28,7 @@ ACTIVITY_TIMESTAMP_GRACE_SECONDS = 5.0
 MISSING_STOP_IDLE_RESET_SECONDS = 10.0
 INACTIVE_ROOT_STATES = {"T", "t", "Z", "X", "x"}
 SESSION_BINDING_UNKNOWN_DELTA_SECONDS = 365 * 24 * 3600.0
+NEW_SESSION_MARKER_HOOK_WINDOW_SECONDS = 5 * 60.0
 CODEX_MAINTENANCE_ARGS = {
     "--self-update",
     "--self_update",
@@ -289,7 +290,11 @@ def _apply_new_session_markers(
     if not markers:
         return state_activities_by_pid
 
-    candidate_pairs: list[tuple[tuple[float, float, float], int, str, SessionActivity]] = []
+    candidate_pairs: list[
+        tuple[tuple[float, float, float], int, str, SessionActivity, bool]
+    ] = []
+    candidates_by_marker: dict[str, int] = {}
+    precise_markers: set[str] = set()
     assigned_markers: set[str] = set()
     result = dict(state_activities_by_pid)
     for root in roots:
@@ -298,18 +303,33 @@ def _apply_new_session_markers(
         for marker in markers:
             if not _marker_can_reset_activity(marker, state_activity, hook_state, root):
                 continue
+            precise = _marker_candidate_is_precise(marker, root, hook_state)
+            candidates_by_marker[marker.relative_path] = (
+                candidates_by_marker.get(marker.relative_path, 0) + 1
+            )
+            if precise:
+                precise_markers.add(marker.relative_path)
             candidate_pairs.append(
                 (
                     _marker_sort_key_for_root(root, marker, state_activity, hook_state),
                     root.pid,
                     marker.relative_path,
                     marker,
+                    precise,
                 )
             )
 
     assigned_roots: set[int] = set()
-    for _, pid, relative_path, marker in sorted(candidate_pairs):
+    for _, pid, relative_path, marker, precise in sorted(candidate_pairs):
         if pid in assigned_roots or relative_path in assigned_markers:
+            continue
+        if relative_path in precise_markers and not precise:
+            continue
+        if (
+            marker.cwd is None
+            and relative_path not in precise_markers
+            and candidates_by_marker.get(relative_path, 0) > 1
+        ):
             continue
         result[pid] = marker
         assigned_roots.add(pid)
@@ -387,10 +407,13 @@ def _marker_can_reset_activity(
 ) -> bool:
     if not _activity_is_new_session_marker(marker):
         return False
+    marker_cwd = _normalize_path(marker.cwd)
+    if marker_cwd is not None and marker_cwd != _normalize_path(root.cwd):
+        return False
     if root.started_at is not None and marker.modified_at < root.started_at:
         return False
     if state_activity is None:
-        return False
+        return _marker_matches_session_start_hook(marker, hook_state, root)
     if (
         state_activity.cwd is not None
         and _normalize_path(state_activity.cwd) != _normalize_path(root.cwd)
@@ -408,6 +431,31 @@ def _marker_can_reset_activity(
         if marker.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < started_at:
             return False
     return True
+
+
+def _marker_candidate_is_precise(
+    marker: SessionActivity,
+    root: ProcessInfo,
+    hook_state: HookSessionState | None,
+) -> bool:
+    return marker.cwd is not None or _marker_matches_session_start_hook(
+        marker,
+        hook_state,
+        root,
+    )
+
+
+def _marker_matches_session_start_hook(
+    marker: SessionActivity,
+    hook_state: HookSessionState | None,
+    root: ProcessInfo,
+) -> bool:
+    if hook_state is None or hook_state.last_event != "session_start":
+        return False
+    if hook_state.codex_pid not in {None, root.pid}:
+        return False
+    event_at = hook_state.session_started_at or hook_state.updated_at
+    return abs(marker.modified_at - event_at) <= NEW_SESSION_MARKER_HOOK_WINDOW_SECONDS
 
 
 def _marker_sort_key_for_root(
