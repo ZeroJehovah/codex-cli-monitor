@@ -96,6 +96,32 @@ class HookStateTests(unittest.TestCase):
         self.assertEqual(latest.codex_pid, 200)
         self.assertEqual(latest.last_event, "session_start")
 
+    def test_session_start_payload_keeps_start_source_and_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.jsonl"
+            append_hook_event(
+                "session_start",
+                cwd="/work/a",
+                ppid=100,
+                path=path,
+                hook_payload={
+                    "source": "clear",
+                    "session_id": "019f-new",
+                    "prompt": "not logged",
+                },
+            )
+
+            events = load_hook_events(path)
+            states = summarize_hook_events(events)
+
+        self.assertEqual(events[0].hook_source, "clear")
+        self.assertEqual(events[0].session_id, "019f-new")
+        payload = events[0].to_dict()
+        self.assertNotIn("prompt", payload)
+        state = states[str(Path("/work/a").resolve())][0]
+        self.assertEqual(state.session_start_source, "clear")
+        self.assertEqual(state.session_id, "019f-new")
+
 
 if __name__ == "__main__":
     unittest.main()

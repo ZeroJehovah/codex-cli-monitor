@@ -1805,7 +1805,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIsNone(sessions[0].state_activity)
         self.assertEqual(sessions[0].display_status, "未运行")
 
-    def test_idle_stale_success_without_new_marker_becomes_not_running(self) -> None:
+    def test_idle_stale_success_remains_success_without_new_session_signal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = time.time() - 600
             root = Path(tmp)
@@ -1831,7 +1831,7 @@ class MonitorTests(unittest.TestCase):
             )
 
         self.assertEqual(len(sessions), 1)
-        self.assertEqual(sessions[0].display_status, "未运行")
+        self.assertEqual(sessions[0].display_status, "成功")
         self.assertIsNotNone(sessions[0].state_activity)
         self.assertTrue(sessions[0].state_activity.terminal_event)
 

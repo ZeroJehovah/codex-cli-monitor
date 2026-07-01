@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .hook_state import append_hook_event
+from .hook_state import append_hook_event, read_hook_payload_stdin
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -14,7 +14,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("event")
     parser.add_argument("--tool", default=None)
     args = parser.parse_args(argv)
-    append_hook_event(args.event, tool=args.tool)
+    append_hook_event(
+        args.event,
+        tool=args.tool,
+        hook_payload=read_hook_payload_stdin(),
+    )
     return 0
 
 
