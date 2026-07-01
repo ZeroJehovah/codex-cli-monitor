@@ -10,6 +10,8 @@
 #include <string.h>
 #include <wchar.h>
 
+#include "resource.h"
+
 #define APP_CLASS_NAME L"CodexMonitorWidget"
 #define DEFAULT_API_URL L"http://localhost:8765/api/sessions"
 #define SINGLE_INSTANCE_MUTEX_NAME L"Local\\ZeroJehovah.CodexMonitorWidget.SingleInstance"
@@ -2495,7 +2497,7 @@ static void resolve_api_url(void) {
 }
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR command_line, int show_command) {
-    WNDCLASSW wc;
+    WNDCLASSEXW wc;
     HWND hwnd;
     HANDLE single_instance_mutex;
     DWORD mutex_error;
@@ -2528,12 +2530,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
     load_widget_placement();
     update_display_font();
     ZeroMemory(&wc, sizeof(wc));
+    wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = window_proc;
     wc.hInstance = instance;
     wc.lpszClassName = APP_CLASS_NAME;
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    wc.hIcon = (HICON)LoadImageW(instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR | LR_SHARED);
+    wc.hIconSm = (HICON)LoadImageW(instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR | LR_SHARED);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    if (!RegisterClassW(&wc)) {
+    if (wc.hIcon == NULL) {
+        wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    }
+    if (wc.hIconSm == NULL) {
+        wc.hIconSm = wc.hIcon;
+    }
+    if (!RegisterClassExW(&wc)) {
         if (g_app.font != NULL) {
             DeleteObject(g_app.font);
             g_app.font = NULL;
@@ -2555,6 +2568,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
         CloseHandle(single_instance_mutex);
         return 1;
     }
+    SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)wc.hIcon);
+    SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)wc.hIconSm);
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     UpdateWindow(hwnd);
     while (GetMessageW(&message, NULL, 0, 0) > 0) {
