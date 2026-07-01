@@ -13,8 +13,13 @@ PYTHONPATH=src python3 -m codex_cli_monitor --daemon
 Build from Linux/WSL with MinGW-w64:
 
 ```bash
+mkdir -p dist/CodexMonitorWidget-win-x64
+x86_64-w64-mingw32-windres -I windows/CodexMonitorWidget/src \
+  windows/CodexMonitorWidget/src/resources.rc \
+  -O coff -o dist/CodexMonitorWidget-win-x64/resources.o
 x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
   windows/CodexMonitorWidget/src/main.c \
+  dist/CodexMonitorWidget-win-x64/resources.o \
   -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
   -mwindows -municode -Wl,--subsystem,windows \
   -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32
