@@ -819,7 +819,7 @@ class MonitorTests(unittest.TestCase):
             )
 
         sessions_by_pid = {session.root.pid: session for session in sessions}
-        self.assertEqual(sessions_by_pid[100].display_status, "成功")
+        self.assertEqual(sessions_by_pid[100].display_status, "未运行")
         self.assertEqual(sessions_by_pid[200].display_status, "未运行")
         self.assertEqual(
             sessions_by_pid[200].state_activity.relative_path,
@@ -854,8 +854,8 @@ class MonitorTests(unittest.TestCase):
             )
 
         sessions_by_pid = {session.root.pid: session for session in sessions}
-        self.assertEqual(sessions_by_pid[100].display_status, "成功")
-        self.assertEqual(sessions_by_pid[200].display_status, "成功")
+        self.assertEqual(sessions_by_pid[100].display_status, "未运行")
+        self.assertEqual(sessions_by_pid[200].display_status, "未运行")
 
     def test_session_start_hook_consumes_unknown_cwd_new_session_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -892,7 +892,7 @@ class MonitorTests(unittest.TestCase):
             )
 
         sessions_by_pid = {session.root.pid: session for session in sessions}
-        self.assertEqual(sessions_by_pid[100].display_status, "成功")
+        self.assertEqual(sessions_by_pid[100].display_status, "未运行")
         self.assertEqual(sessions_by_pid[200].display_status, "未运行")
         self.assertEqual(
             sessions_by_pid[200].state_activity.relative_path,
@@ -1932,7 +1932,7 @@ class MonitorTests(unittest.TestCase):
             )
 
         sessions_by_pid = {session.root.pid: session for session in sessions}
-        self.assertEqual(sessions_by_pid[100].display_status, "成功")
+        self.assertEqual(sessions_by_pid[100].display_status, "未运行")
         self.assertEqual(sessions_by_pid[200].display_status, "运行中")
         self.assertEqual(
             sessions_by_pid[100].state_activity.relative_path,
@@ -1970,7 +1970,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIsNone(sessions[0].state_activity)
         self.assertEqual(sessions[0].display_status, "未运行")
 
-    def test_idle_stale_success_remains_success_without_new_session_signal(self) -> None:
+    def test_idle_stale_success_without_hooks_is_not_user_facing_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = time.time() - 600
             root = Path(tmp)
@@ -1996,8 +1996,65 @@ class MonitorTests(unittest.TestCase):
             )
 
         self.assertEqual(len(sessions), 1)
-        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertEqual(sessions[0].display_status, "未运行")
         self.assertIsNotNone(sessions[0].state_activity)
+        self.assertTrue(sessions[0].state_activity.terminal_event)
+
+    def test_no_hook_terminal_success_changed_during_sample_marks_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 60
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            records = [
+                {
+                    "type": "session_meta",
+                    "timestamp": _iso(base + 1),
+                    "payload": {"session_id": "fresh", "cwd": "/work/a"},
+                },
+                {
+                    "type": "turn_context",
+                    "timestamp": _iso(base + 2),
+                    "payload": {"turn_id": "fresh-turn"},
+                },
+                {
+                    "type": "response_item",
+                    "timestamp": _iso(base + 3),
+                    "payload": {"type": "message", "role": "user"},
+                },
+            ]
+            session = _write_session_records(home, "fresh-success.jsonl", records)
+            os.utime(session, (base + 3, base + 3))
+
+            def complete_session(_: float) -> None:
+                _write_session_records(
+                    home,
+                    "fresh-success.jsonl",
+                    [
+                        *records,
+                        {
+                            "type": "event_msg",
+                            "timestamp": _iso(base + 4),
+                            "payload": {"type": "task_complete"},
+                        },
+                    ],
+                )
+                os.utime(session, (base + 4, base + 4))
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=1,
+                codex_home=home,
+                sleep=complete_session,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertTrue(sessions[0].state_activity.changed_during_sample)
         self.assertTrue(sessions[0].state_activity.terminal_event)
 
     def test_inspect_runtime_returns_sessions_and_state_summary(self) -> None:

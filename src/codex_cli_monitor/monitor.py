@@ -707,10 +707,14 @@ def _display_status(
             return "未运行"
         if _activity_is_unprompted_session_context(state_activity):
             return "未运行"
+        if state_activity.terminal_event:
+            if not state_activity.changed_during_sample:
+                return "未运行"
+            if state_activity.failed_event:
+                return "失败"
+            return "成功"
         if state_activity.failed_event:
             return "失败"
-        if state_activity.terminal_event:
-            return "成功"
         if state_activity.changed_during_sample:
             return "运行中"
 
