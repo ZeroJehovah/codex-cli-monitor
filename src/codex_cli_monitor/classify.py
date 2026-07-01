@@ -202,13 +202,20 @@ def infer_status(
                     f"{state_activity.modified_age_seconds:.1f}s ago.",
                 )
             )
+        limitations = [
+            "Readiness for user input is inferred without scraping the terminal.",
+        ]
+        if state_activity is not None and state_activity.terminal_event:
+            limitations.append(
+                "A later /new transition without a bindable hook event, shell "
+                "snapshot marker, or unprompted session file cannot be identified "
+                "reliably; the completed terminal status is preserved."
+            )
         return Inference(
             status="waiting_user_likely",
             confidence=0.58 if total_cpu_delta is not None else 0.46,
             evidence=tuple(evidence),
-            limitations=(
-                "Readiness for user input is inferred without scraping the terminal.",
-            ),
+            limitations=tuple(limitations),
         )
 
     return Inference(
