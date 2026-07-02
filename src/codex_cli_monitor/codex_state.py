@@ -248,7 +248,6 @@ def scan_new_session_markers(
         return ()
 
     observed_at = time.time()
-    session_ids = _session_ids_for_home(home)
     try:
         paths = sorted(
             home.glob("shell_snapshots/*.sh"),
@@ -260,7 +259,7 @@ def scan_new_session_markers(
 
     markers = []
     for path in paths:
-        marker = _new_session_marker(home, path, observed_at, session_ids)
+        marker = _new_session_marker(home, path, observed_at)
         if marker is not None:
             markers.append(marker)
     return tuple(markers)
@@ -387,7 +386,6 @@ def _new_session_marker(
     home: Path,
     path: Path,
     observed_at: float,
-    session_ids: set[str],
 ) -> SessionActivity | None:
     try:
         stat = path.stat()
@@ -397,7 +395,7 @@ def _new_session_marker(
         return None
 
     session_id = _session_id_from_shell_snapshot_name(path.name)
-    if session_id is None or session_id in session_ids:
+    if session_id is None:
         return None
 
     try:
@@ -809,19 +807,6 @@ def _session_id_from_shell_snapshot_name(name: str) -> str | None:
         return None
     prefix = name.removesuffix(".sh").split(".", 1)[0]
     return prefix if re.fullmatch(UUID_RE, prefix) else None
-
-
-def _session_ids_for_home(home: Path) -> set[str]:
-    session_ids: set[str] = set()
-    try:
-        paths = tuple(home.glob("sessions/**/*.jsonl"))
-    except OSError:
-        return session_ids
-    for path in paths:
-        session_id = _session_id_from_name(path.name)
-        if session_id is not None:
-            session_ids.add(session_id)
-    return session_ids
 
 
 def _cwd_from_record(record: dict | None) -> str | None:
