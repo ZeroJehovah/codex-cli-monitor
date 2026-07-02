@@ -1137,7 +1137,35 @@ class MonitorTests(unittest.TestCase):
                 start_ticks=19020,
             )
             session_a = _write_completed_session(home, "a-success.jsonl", "/work/a", base + 6)
-            session_b = _write_completed_session(home, "b-success.jsonl", "/work/a", base + 36)
+            session_b = _write_session_records(
+                home,
+                "b-failure.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": _iso(base + 36),
+                        "payload": {"session_id": "b-failure", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base + 37),
+                        "payload": {"turn_id": "b-failure-turn"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": _iso(base + 38),
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base + 40),
+                        "payload": {
+                            "type": "turn_aborted",
+                            "reason": "interrupted",
+                        },
+                    },
+                ],
+            )
             os.utime(session_a, (base + 11, base + 11))
             os.utime(session_b, (base + 41, base + 41))
             append_hook_event(
@@ -1162,7 +1190,7 @@ class MonitorTests(unittest.TestCase):
                 ppid=200,
                 timestamp=base + 37,
                 path=hook_log,
-                hook_payload={"session_id": "b-success"},
+                hook_payload={"session_id": "b-failure"},
             )
             append_hook_event(
                 "stop",
@@ -1170,7 +1198,7 @@ class MonitorTests(unittest.TestCase):
                 ppid=200,
                 timestamp=base + 40,
                 path=hook_log,
-                hook_payload={"session_id": "b-success"},
+                hook_payload={"session_id": "b-failure"},
             )
 
             sessions = discover_sessions(
@@ -1642,6 +1670,92 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].display_status, "未运行")
         self.assertTrue(sessions[0].state_activity.failed_event)
+
+    def test_support_process_after_success_terminal_keeps_resumed_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 60
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _write_process(
+                proc,
+                101,
+                "npm exec chrome",
+                "S",
+                100,
+                ["npm exec chrome-devtools-mcp@latest"],
+                "/work/a",
+                start_ticks=18500,
+            )
+            session_id = "019f9999-4444-7444-8444-444444444444"
+            session = _write_session_records(
+                home,
+                "old-success.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": _iso(base),
+                        "payload": {"session_id": session_id, "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base + 1),
+                        "payload": {"turn_id": "old-turn"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": _iso(base + 2),
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": _iso(base + 3),
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": "done",
+                        },
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base + 4),
+                        "payload": {"type": "task_complete"},
+                    },
+                ],
+            )
+            os.utime(session, (base + 4, base + 4))
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 1,
+                path=hook_log,
+                hook_payload={"session_id": session_id},
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 4,
+                path=hook_log,
+                hook_payload={"session_id": session_id},
+            )
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertFalse(sessions[0].state_activity.failed_event)
 
     def test_new_empty_session_after_stop_marks_same_process_not_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
