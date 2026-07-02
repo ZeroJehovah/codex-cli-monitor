@@ -447,6 +447,24 @@ def _display_status(
     state_activity: SessionActivity | None,
 ) -> str:
     if hook_state is not None:
+        if hook_state.in_turn or hook_state.active_tool_count > 0:
+            if (
+                _activity_is_current_for_hook(state_activity, hook_state)
+                and _activity_terminal_event_is_for_open_hook_turn(
+                    state_activity,
+                    hook_state,
+                )
+            ):
+                if state_activity is not None and (
+                    state_activity.failed_event
+                    or _activity_is_missing_response_failure(
+                        state_activity,
+                        hook_state,
+                    )
+                ):
+                    return "失败"
+                return "成功"
+            return "运行中"
         if _activity_is_current_for_hook(state_activity, hook_state):
             if state_activity is not None and state_activity.terminal_event:
                 if state_activity.failed_event or _activity_is_missing_response_failure(
@@ -455,8 +473,6 @@ def _display_status(
                 ):
                     return "失败"
                 return "成功"
-        if hook_state.in_turn or hook_state.active_tool_count > 0:
-            return "运行中"
         if state_activity is not None and state_activity.failed_event:
             return "失败"
         if state_activity is not None and state_activity.terminal_event:
@@ -492,6 +508,16 @@ def _activity_is_current_for_hook(
         state_activity.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS
         >= hook_state.updated_at
     )
+
+
+def _activity_terminal_event_is_for_open_hook_turn(
+    state_activity: SessionActivity | None,
+    hook_state: HookSessionState,
+) -> bool:
+    if state_activity is None or not state_activity.terminal_event:
+        return False
+    started_at = hook_state.turn_started_at or hook_state.updated_at
+    return _activity_event_time(state_activity) >= started_at
 
 
 def _activity_matches_hook(
