@@ -30,14 +30,14 @@ class ApiTests(unittest.TestCase):
                 confidence=0.9,
                 evidence=(),
             ),
-            display_status="未运行",
+            display_status="成功",
         )
 
         payload = build_sessions_payload((session,), observed_at=1_782_454_000.0)
 
         self.assertEqual(payload["session_count"], 1)
         item = payload["sessions"][0]
-        self.assertEqual(item["status"], "未运行")
+        self.assertEqual(item["status"], "成功")
         self.assertEqual(item["directory"], "/work/a")
         self.assertEqual(item["started_at"], 1_782_453_600.0)
         self.assertEqual(item["started_at_iso"], "2026-06-26T06:00:00Z")

@@ -129,7 +129,7 @@ class ClassifyTests(unittest.TestCase):
 
         self.assertEqual(inference.status, "waiting_user_likely")
 
-    def test_idle_terminal_state_reports_unbindable_new_session_limitation(
+    def test_idle_terminal_state_reports_waiting_limitation(
         self,
     ) -> None:
         root = _process(100, "codex", state="S", tty="/dev/pts/1")
@@ -144,11 +144,9 @@ class ClassifyTests(unittest.TestCase):
         )
 
         self.assertEqual(inference.status, "waiting_user_likely")
-        self.assertTrue(
-            any(
-                "/new" in limitation and "cannot be identified" in limitation
-                for limitation in inference.limitations
-            )
+        self.assertEqual(
+            inference.limitations,
+            ("Readiness for user input is inferred without scraping the terminal.",),
         )
 
     def test_recent_function_call_state_can_indicate_api_inflight(self) -> None:

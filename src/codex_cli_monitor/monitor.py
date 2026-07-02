@@ -5,10 +5,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from .classify import infer_status, is_native_codex_process, is_support_process
+from .classify import infer_status, is_native_codex_process
 from .codex_state import (
     scan_codex_state,
-    scan_new_session_markers,
     scan_session_activities,
 )
 from .models import (
@@ -25,11 +24,8 @@ from .shim import default_log_path, load_launch_records
 
 
 ACTIVITY_TIMESTAMP_GRACE_SECONDS = 5.0
-MISSING_STOP_IDLE_RESET_SECONDS = 10.0
 INACTIVE_ROOT_STATES = {"T", "t", "Z", "X", "x"}
 SESSION_BINDING_UNKNOWN_DELTA_SECONDS = 365 * 24 * 3600.0
-NEW_SESSION_MARKER_HOOK_WINDOW_SECONDS = 5 * 60.0
-NEW_SESSION_MARKER_STOP_WINDOW_SECONDS = 5 * 60.0
 CODEX_MAINTENANCE_ARGS = {
     "--self-update",
     "--self_update",
@@ -98,8 +94,6 @@ def discover_sessions(
     else:
         second_snapshot = first_snapshot
         session_activities = scan_session_activities(codex_home)
-    new_session_markers = scan_new_session_markers(codex_home)
-
     processes = _with_cpu_deltas(first_snapshot, second_snapshot, sample_window)
     codex_roots = _find_codex_roots(processes)
     if not codex_roots:
@@ -122,12 +116,6 @@ def discover_sessions(
     state_activities_by_pid = _state_activities_for_roots(
         codex_roots,
         session_activities,
-        hook_states_by_pid,
-    )
-    state_activities_by_pid = _apply_new_session_markers(
-        codex_roots,
-        state_activities_by_pid,
-        new_session_markers,
         hook_states_by_pid,
     )
 
@@ -288,79 +276,11 @@ def _state_activities_for_roots(
     return result
 
 
-def _apply_new_session_markers(
-    roots: tuple[ProcessInfo, ...],
-    state_activities_by_pid: dict[int, SessionActivity],
-    markers: tuple[SessionActivity, ...],
-    hook_states_by_pid: dict[int, HookSessionState | None],
-) -> dict[int, SessionActivity]:
-    if not markers:
-        return state_activities_by_pid
-
-    candidate_pairs: list[
-        tuple[tuple[float, float, float], int, str, SessionActivity, bool]
-    ] = []
-    candidates_by_marker: dict[str, int] = {}
-    precise_markers: set[str] = set()
-    assigned_markers: set[str] = set()
-    result = dict(state_activities_by_pid)
-    for root in roots:
-        state_activity = state_activities_by_pid.get(root.pid)
-        hook_state = hook_states_by_pid.get(root.pid)
-        for marker in markers:
-            if not _marker_can_reset_activity(marker, state_activity, hook_state, root):
-                continue
-            precise = _marker_candidate_is_precise(
-                marker,
-                root,
-                state_activity,
-                hook_state,
-            )
-            candidates_by_marker[marker.relative_path] = (
-                candidates_by_marker.get(marker.relative_path, 0) + 1
-            )
-            if precise:
-                precise_markers.add(marker.relative_path)
-            candidate_pairs.append(
-                (
-                    _marker_sort_key_for_root(root, marker, state_activity, hook_state),
-                    root.pid,
-                    marker.relative_path,
-                    marker,
-                    precise,
-                )
-            )
-
-    assigned_roots: set[int] = set()
-    for _, pid, relative_path, marker, precise in sorted(candidate_pairs):
-        if pid in assigned_roots or relative_path in assigned_markers:
-            continue
-        if relative_path in precise_markers and not precise:
-            continue
-        if (
-            marker.cwd is None
-            and relative_path not in precise_markers
-            and candidates_by_marker.get(relative_path, 0) > 1
-        ):
-            continue
-        result[pid] = marker
-        assigned_roots.add(pid)
-        assigned_markers.add(relative_path)
-    return result
-
-
 def _activity_candidates_for_root(
     root: ProcessInfo,
     activities: tuple[SessionActivity, ...],
     hook_state: HookSessionState | None = None,
 ) -> tuple[SessionActivity, ...]:
-    if (
-        hook_state is not None
-        and hook_state.last_event == "session_start"
-        and not _hook_session_start_is_resume(hook_state)
-    ):
-        return ()
-
     root_cwd = _normalize_path(root.cwd)
     candidates = []
     for activity in activities:
@@ -392,12 +312,6 @@ def _activity_sort_key_for_root(
         and _activity_is_idle_reset_after_stop(activity, hook_state)
         else 1.0
     )
-    unprompted_session_rank = (
-        0.0
-        if _activity_is_unprompted_session_context(activity)
-        and _activity_can_reset_hook(activity, hook_state)
-        else 1.0
-    )
     delta = _activity_hook_delta(activity, hook_state)
     if delta is None:
         delta = _activity_process_start_delta(activity, root)
@@ -409,154 +323,9 @@ def _activity_sort_key_for_root(
         hook_rank,
         hook_lifecycle_rank,
         idle_reset_rank,
-        unprompted_session_rank,
         delta,
         recency,
     )
-
-
-def _marker_can_reset_activity(
-    marker: SessionActivity,
-    state_activity: SessionActivity | None,
-    hook_state: HookSessionState | None,
-    root: ProcessInfo,
-) -> bool:
-    if not _activity_is_new_session_marker(marker):
-        return False
-    if _hook_session_start_is_resume(hook_state):
-        return False
-    marker_cwd = _normalize_path(marker.cwd)
-    if marker_cwd is not None and marker_cwd != _normalize_path(root.cwd):
-        return False
-    matches_session_start = _marker_matches_session_start_hook(
-        marker,
-        hook_state,
-        root,
-    )
-    if marker_cwd is None and not matches_session_start:
-        return False
-    if root.started_at is not None and marker.modified_at < root.started_at:
-        return False
-    if state_activity is None:
-        return marker_cwd is not None or matches_session_start
-    if (
-        state_activity.cwd is not None
-        and _normalize_path(state_activity.cwd) != _normalize_path(root.cwd)
-    ):
-        return False
-    previous_event_at = _activity_event_time(state_activity)
-    if marker.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < previous_event_at:
-        return False
-    if not state_activity.terminal_event:
-        return False
-    if hook_state is not None and hook_state.codex_pid not in {None, root.pid}:
-        return False
-    if hook_state is not None:
-        started_at = hook_state.turn_started_at or hook_state.updated_at
-        if marker.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < started_at:
-            return False
-    return True
-
-
-def _marker_candidate_is_precise(
-    marker: SessionActivity,
-    root: ProcessInfo,
-    state_activity: SessionActivity | None,
-    hook_state: HookSessionState | None,
-) -> bool:
-    return (
-        marker.cwd is not None
-        or _marker_matches_session_start_hook(
-            marker,
-            hook_state,
-            root,
-        )
-        or _marker_matches_recent_stop(
-            marker,
-            state_activity,
-            hook_state,
-            root,
-        )
-    )
-
-
-def _marker_matches_session_start_hook(
-    marker: SessionActivity,
-    hook_state: HookSessionState | None,
-    root: ProcessInfo,
-) -> bool:
-    if hook_state is None or hook_state.last_event != "session_start":
-        return False
-    if hook_state.codex_pid not in {None, root.pid}:
-        return False
-    event_at = hook_state.session_started_at or hook_state.updated_at
-    return abs(marker.modified_at - event_at) <= NEW_SESSION_MARKER_HOOK_WINDOW_SECONDS
-
-
-def _marker_matches_recent_stop(
-    marker: SessionActivity,
-    state_activity: SessionActivity | None,
-    hook_state: HookSessionState | None,
-    root: ProcessInfo,
-) -> bool:
-    if state_activity is None or hook_state is None:
-        return False
-    if not state_activity.terminal_event:
-        return False
-    if hook_state.codex_pid not in {None, root.pid}:
-        return False
-    stop_at = _hook_stop_time(hook_state)
-    if stop_at is None:
-        return False
-    if marker.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < stop_at:
-        return False
-    if marker.modified_at - stop_at > NEW_SESSION_MARKER_STOP_WINDOW_SECONDS:
-        return False
-    terminal_at = state_activity.terminal_event_at or _activity_event_time(state_activity)
-    return terminal_at <= stop_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS
-
-
-def _marker_sort_key_for_root(
-    root: ProcessInfo,
-    marker: SessionActivity,
-    state_activity: SessionActivity | None,
-    hook_state: HookSessionState | None,
-) -> tuple[float, float, float, float]:
-    recent_stop = _marker_matches_recent_stop(
-        marker,
-        state_activity,
-        hook_state,
-        root,
-    )
-    reference = _hook_stop_time(hook_state) if recent_stop else None
-    if reference is None:
-        reference = (
-            hook_state.updated_at
-            if hook_state is not None
-            else (
-                _activity_event_time(state_activity)
-                if state_activity is not None
-                else root.started_at
-            )
-        )
-    delta = abs(marker.modified_at - reference) if reference is not None else 0.0
-    start_delta = (
-        abs(marker.modified_at - root.started_at)
-        if root.started_at is not None
-        else SESSION_BINDING_UNKNOWN_DELTA_SECONDS
-    )
-    recent_stop_rank = 0.0 if recent_stop else 1.0
-    return (recent_stop_rank, delta, start_delta, -marker.modified_at)
-
-
-def _hook_stop_time(hook_state: HookSessionState | None) -> float | None:
-    if hook_state is None:
-        return None
-    if hook_state.last_stopped_at is not None:
-        return hook_state.last_stopped_at
-    if hook_state.last_event == "stop":
-        return hook_state.updated_at
-    return None
 
 
 def _hook_lifecycle_sort_rank(hook_state: HookSessionState | None) -> float:
@@ -678,35 +447,14 @@ def _display_status(
     state_activity: SessionActivity | None,
 ) -> str:
     if hook_state is not None:
-        if _activity_is_new_session_marker(state_activity):
-            return "未运行"
-        if _has_new_support_process_after_stop(root, descendants, hook_state, state_activity):
-            return "未运行"
-        if _has_new_support_process_after_terminal(
-            root,
-            descendants,
-            hook_state,
-            state_activity,
-        ):
-            return "未运行"
-        if hook_state.last_event == "session_start" and not _hook_session_start_is_resume(
-            hook_state
-        ):
-            return "未运行"
         if _activity_is_current_for_hook(state_activity, hook_state):
-            if _activity_is_unprompted_session_context(state_activity):
-                return "未运行"
             if state_activity is not None and state_activity.terminal_event:
                 if state_activity.failed_event or _activity_is_missing_response_failure(
                     state_activity,
                     hook_state,
                 ):
                     return "失败"
-                if _activity_is_idle_after_missing_stop(state_activity, hook_state):
-                    return "未运行"
                 return "成功"
-            if _activity_is_idle_reset_after_stop(state_activity, hook_state):
-                return "未运行"
         if hook_state.in_turn or hook_state.active_tool_count > 0:
             return "运行中"
         if state_activity is not None and state_activity.failed_event:
@@ -715,13 +463,9 @@ def _display_status(
             return "成功"
         if hook_state.last_event == "stop":
             return "成功"
-        return "未运行"
+        return "成功"
 
     if state_activity is not None:
-        if _activity_is_new_session_marker(state_activity):
-            return "未运行"
-        if _activity_is_unprompted_session_context(state_activity):
-            return "未运行"
         if state_activity.failed_event:
             return "失败"
         if state_activity.terminal_event:
@@ -735,63 +479,7 @@ def _display_status(
         "active_likely",
     }:
         return "运行中"
-    return "未运行"
-
-
-def _has_new_support_process_after_stop(
-    root: ProcessInfo,
-    descendants: tuple[ProcessInfo, ...],
-    hook_state: HookSessionState,
-    state_activity: SessionActivity | None,
-) -> bool:
-    if state_activity is None or not state_activity.terminal_event:
-        return False
-    if not state_activity.failed_event:
-        return False
-    if hook_state.in_turn or hook_state.active_tool_count > 0:
-        return False
-    if hook_state.codex_pid not in {None, root.pid}:
-        return False
-    stop_at = _hook_stop_time(hook_state)
-    if stop_at is None:
-        return False
-    terminal_at = state_activity.terminal_event_at or _activity_event_time(state_activity)
-    if terminal_at > stop_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS:
-        return False
-    post_stop_descendants = tuple(
-        process
-        for process in descendants
-        if process.started_at is not None and process.started_at > stop_at
-    )
-    return bool(post_stop_descendants) and all(
-        is_support_process(process) for process in post_stop_descendants
-    )
-
-
-def _has_new_support_process_after_terminal(
-    root: ProcessInfo,
-    descendants: tuple[ProcessInfo, ...],
-    hook_state: HookSessionState,
-    state_activity: SessionActivity | None,
-) -> bool:
-    if state_activity is None or not state_activity.terminal_event:
-        return False
-    if not state_activity.failed_event:
-        return False
-    if hook_state.codex_pid not in {None, root.pid}:
-        return False
-    terminal_at = state_activity.terminal_event_at or _activity_event_time(state_activity)
-    if hook_state.updated_at > terminal_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS:
-        return False
-    post_terminal_descendants = tuple(
-        process
-        for process in descendants
-        if process.started_at is not None
-        and process.started_at > terminal_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS
-    )
-    return bool(post_terminal_descendants) and all(
-        is_support_process(process) for process in post_terminal_descendants
-    )
+    return "成功"
 
 
 def _activity_is_current_for_hook(
@@ -810,16 +498,6 @@ def _activity_matches_hook(
     activity: SessionActivity,
     hook_state: HookSessionState,
 ) -> bool:
-    if hook_state.last_event == "session_start":
-        if not _hook_session_start_is_resume(hook_state):
-            return False
-        if (
-            hook_state.session_id is not None
-            and activity.session_id is not None
-            and activity.session_id != hook_state.session_id
-        ):
-            return False
-
     event_at = _activity_event_time(activity)
     turn_started_at = hook_state.turn_started_at
     if (
@@ -832,7 +510,7 @@ def _activity_matches_hook(
     if stop_at is None and hook_state.last_event == "stop":
         stop_at = hook_state.updated_at
     if stop_at is not None and event_at > stop_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS:
-        return _activity_is_idle_reset_after_stop(activity, hook_state)
+        return False
 
     if hook_state.in_turn or hook_state.active_tool_count > 0:
         started_at = hook_state.turn_started_at or hook_state.updated_at
@@ -861,44 +539,6 @@ def _activity_is_idle_reset_after_stop(
     )
 
 
-def _activity_is_idle_after_missing_stop(
-    activity: SessionActivity | None,
-    hook_state: HookSessionState,
-) -> bool:
-    if activity is None:
-        return False
-    if not activity.terminal_event:
-        return False
-    if not hook_state.in_turn:
-        return False
-    if hook_state.active_tool_count > 0:
-        return False
-    if hook_state.last_stopped_at is not None or hook_state.last_event == "stop":
-        return False
-    if activity.changed_during_sample:
-        return False
-    if activity.failed_event:
-        return False
-
-    started_at = hook_state.turn_started_at or hook_state.updated_at
-    event_at = activity.terminal_event_at or _activity_event_time(activity)
-    if event_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < started_at:
-        return False
-
-    stable_since = max(
-        timestamp
-        for timestamp in (
-            activity.terminal_event_at,
-            activity.last_record_at,
-            activity.modified_at,
-        )
-        if timestamp is not None
-    )
-    if activity.observed_at - stable_since < MISSING_STOP_IDLE_RESET_SECONDS:
-        return False
-    return not activity.latest_turn_has_user
-
-
 def _activity_is_missing_response_failure(
     activity: SessionActivity | None,
     hook_state: HookSessionState,
@@ -918,43 +558,6 @@ def _activity_is_missing_response_failure(
     if not (hook_state.in_turn or hook_state.active_tool_count > 0):
         return False
     return _activity_is_current_for_hook(activity, hook_state)
-
-
-def _activity_is_unprompted_session_context(activity: SessionActivity | None) -> bool:
-    if activity is None:
-        return False
-    if activity.latest_turn_has_user or activity.terminal_event or activity.failed_event:
-        return False
-    return activity.last_record_type in {"session_meta", "turn_context"}
-
-
-def _activity_is_new_session_marker(activity: SessionActivity | None) -> bool:
-    if activity is None:
-        return False
-    return (
-        activity.last_record_type == "shell_snapshot"
-        and activity.last_payload_type == "new_session"
-        and not activity.latest_turn_has_user
-        and not activity.terminal_event
-        and not activity.failed_event
-    )
-
-
-def _activity_can_reset_hook(
-    activity: SessionActivity,
-    hook_state: HookSessionState | None,
-) -> bool:
-    if hook_state is None:
-        return True
-    return _activity_event_time(activity) + ACTIVITY_TIMESTAMP_GRACE_SECONDS >= hook_state.updated_at
-
-
-def _hook_session_start_is_resume(hook_state: HookSessionState | None) -> bool:
-    return (
-        hook_state is not None
-        and hook_state.last_event == "session_start"
-        and hook_state.session_start_source == "resume"
-    )
 
 
 def _activity_event_time(activity: SessionActivity) -> float:
