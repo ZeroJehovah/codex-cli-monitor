@@ -529,6 +529,69 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].display_status, "成功")
         self.assertTrue(sessions[0].state_activity.terminal_agent_message_missing)
         self.assertFalse(sessions[0].state_activity.failed_event)
+        self.assertTrue(sessions[0].state_activity.latest_turn_has_visible_response)
+
+    def test_missing_stop_hook_missing_final_response_marks_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 60
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            session = _write_session_records(
+                home,
+                "missing-response.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": _iso(base),
+                        "payload": {"session_id": "missing-response", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base + 1),
+                        "payload": {"turn_id": "missing-response-turn"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": _iso(base + 2),
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base + 3),
+                        "payload": {
+                            "type": "task_complete",
+                            "last_agent_message": None,
+                        },
+                    },
+                ],
+            )
+            os.utime(session, (base + 3, base + 3))
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 1,
+                path=hook_log,
+            )
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "失败")
+        self.assertTrue(sessions[0].state_activity.terminal_agent_message_missing)
+        self.assertFalse(sessions[0].state_activity.failed_event)
+        self.assertFalse(sessions[0].state_activity.latest_turn_has_visible_response)
 
     def test_commentary_error_discussion_does_not_mark_session_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

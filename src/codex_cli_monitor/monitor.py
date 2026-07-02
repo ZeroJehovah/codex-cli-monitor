@@ -692,7 +692,10 @@ def _display_status(
             if _activity_is_unprompted_session_context(state_activity):
                 return "未运行"
             if state_activity is not None and state_activity.terminal_event:
-                if state_activity.failed_event:
+                if state_activity.failed_event or _activity_is_missing_response_failure(
+                    state_activity,
+                    hook_state,
+                ):
                     return "失败"
                 if _activity_is_idle_after_missing_stop(state_activity, hook_state):
                     return "未运行"
@@ -854,6 +857,27 @@ def _activity_is_idle_after_missing_stop(
     if activity.observed_at - stable_since < MISSING_STOP_IDLE_RESET_SECONDS:
         return False
     return not activity.latest_turn_has_user
+
+
+def _activity_is_missing_response_failure(
+    activity: SessionActivity | None,
+    hook_state: HookSessionState,
+) -> bool:
+    if activity is None:
+        return False
+    if not activity.terminal_event or not activity.terminal_agent_message_missing:
+        return False
+    if not activity.latest_turn_has_user:
+        return False
+    if activity.latest_turn_has_visible_response:
+        return False
+    if activity.changed_during_sample:
+        return False
+    if hook_state.last_stopped_at is not None or hook_state.last_event == "stop":
+        return False
+    if not (hook_state.in_turn or hook_state.active_tool_count > 0):
+        return False
+    return _activity_is_current_for_hook(activity, hook_state)
 
 
 def _activity_is_unprompted_session_context(activity: SessionActivity | None) -> bool:

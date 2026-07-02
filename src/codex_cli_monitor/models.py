@@ -106,6 +106,7 @@ class SessionActivity:
     terminal_agent_message_missing: bool = False
     failed_event: bool = False
     latest_turn_has_user: bool = False
+    latest_turn_has_visible_response: bool = False
 
     @property
     def modified_age_seconds(self) -> float:
@@ -138,6 +139,7 @@ class SessionActivity:
             "terminal_agent_message_missing": self.terminal_agent_message_missing,
             "failed_event": self.failed_event,
             "latest_turn_has_user": self.latest_turn_has_user,
+            "latest_turn_has_visible_response": self.latest_turn_has_visible_response,
         }
 
 
