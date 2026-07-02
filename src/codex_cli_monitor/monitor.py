@@ -746,6 +746,8 @@ def _has_new_support_process_after_stop(
 ) -> bool:
     if state_activity is None or not state_activity.terminal_event:
         return False
+    if not state_activity.failed_event:
+        return False
     if hook_state.in_turn or hook_state.active_tool_count > 0:
         return False
     if hook_state.codex_pid not in {None, root.pid}:
@@ -773,6 +775,8 @@ def _has_new_support_process_after_terminal(
     state_activity: SessionActivity | None,
 ) -> bool:
     if state_activity is None or not state_activity.terminal_event:
+        return False
+    if not state_activity.failed_event:
         return False
     if hook_state.codex_pid not in {None, root.pid}:
         return False
