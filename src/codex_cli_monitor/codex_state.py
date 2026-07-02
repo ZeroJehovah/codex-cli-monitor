@@ -351,6 +351,7 @@ def _session_activity(
         terminal_agent_message_missing=terminal_agent_message_missing,
         failed_event=failed_event,
         latest_turn_has_user=latest_turn.saw_user,
+        latest_turn_has_visible_response=latest_turn.saw_visible_assistant_or_tool,
     )
 
 
