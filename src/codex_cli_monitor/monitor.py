@@ -354,7 +354,11 @@ def _activity_candidates_for_root(
     activities: tuple[SessionActivity, ...],
     hook_state: HookSessionState | None = None,
 ) -> tuple[SessionActivity, ...]:
-    if hook_state is not None and hook_state.last_event == "session_start":
+    if (
+        hook_state is not None
+        and hook_state.last_event == "session_start"
+        and not _hook_session_start_is_resume(hook_state)
+    ):
         return ()
 
     root_cwd = _normalize_path(root.cwd)
@@ -419,6 +423,8 @@ def _marker_can_reset_activity(
 ) -> bool:
     if not _activity_is_new_session_marker(marker):
         return False
+    if _hook_session_start_is_resume(hook_state):
+        return False
     marker_cwd = _normalize_path(marker.cwd)
     if marker_cwd is not None and marker_cwd != _normalize_path(root.cwd):
         return False
@@ -437,11 +443,6 @@ def _marker_can_reset_activity(
         state_activity.cwd is not None
         and _normalize_path(state_activity.cwd) != _normalize_path(root.cwd)
     ):
-        return False
-    if marker.session_id is not None and marker.session_id in {
-        state_activity.session_id,
-        hook_state.session_id if hook_state is not None else None,
-    }:
         return False
     previous_event_at = _activity_event_time(state_activity)
     if marker.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < previous_event_at:
@@ -510,11 +511,6 @@ def _marker_matches_recent_stop(
     if marker.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS < stop_at:
         return False
     if marker.modified_at - stop_at > NEW_SESSION_MARKER_STOP_WINDOW_SECONDS:
-        return False
-    if marker.session_id is not None and marker.session_id in {
-        state_activity.session_id,
-        hook_state.session_id,
-    }:
         return False
     terminal_at = state_activity.terminal_event_at or _activity_event_time(state_activity)
     return terminal_at <= stop_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS
@@ -686,7 +682,16 @@ def _display_status(
             return "未运行"
         if _has_new_support_process_after_stop(root, descendants, hook_state, state_activity):
             return "未运行"
-        if hook_state.last_event == "session_start":
+        if _has_new_support_process_after_terminal(
+            root,
+            descendants,
+            hook_state,
+            state_activity,
+        ):
+            return "未运行"
+        if hook_state.last_event == "session_start" and not _hook_session_start_is_resume(
+            hook_state
+        ):
             return "未运行"
         if _activity_is_current_for_hook(state_activity, hook_state):
             if _activity_is_unprompted_session_context(state_activity):
@@ -761,6 +766,30 @@ def _has_new_support_process_after_stop(
     )
 
 
+def _has_new_support_process_after_terminal(
+    root: ProcessInfo,
+    descendants: tuple[ProcessInfo, ...],
+    hook_state: HookSessionState,
+    state_activity: SessionActivity | None,
+) -> bool:
+    if state_activity is None or not state_activity.terminal_event:
+        return False
+    if hook_state.codex_pid not in {None, root.pid}:
+        return False
+    terminal_at = state_activity.terminal_event_at or _activity_event_time(state_activity)
+    if hook_state.updated_at > terminal_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS:
+        return False
+    post_terminal_descendants = tuple(
+        process
+        for process in descendants
+        if process.started_at is not None
+        and process.started_at > terminal_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS
+    )
+    return bool(post_terminal_descendants) and all(
+        is_support_process(process) for process in post_terminal_descendants
+    )
+
+
 def _activity_is_current_for_hook(
     state_activity: SessionActivity | None,
     hook_state: HookSessionState,
@@ -778,7 +807,14 @@ def _activity_matches_hook(
     hook_state: HookSessionState,
 ) -> bool:
     if hook_state.last_event == "session_start":
-        return False
+        if not _hook_session_start_is_resume(hook_state):
+            return False
+        if (
+            hook_state.session_id is not None
+            and activity.session_id is not None
+            and activity.session_id != hook_state.session_id
+        ):
+            return False
 
     event_at = _activity_event_time(activity)
     turn_started_at = hook_state.turn_started_at
@@ -907,6 +943,14 @@ def _activity_can_reset_hook(
     if hook_state is None:
         return True
     return _activity_event_time(activity) + ACTIVITY_TIMESTAMP_GRACE_SECONDS >= hook_state.updated_at
+
+
+def _hook_session_start_is_resume(hook_state: HookSessionState | None) -> bool:
+    return (
+        hook_state is not None
+        and hook_state.last_event == "session_start"
+        and hook_state.session_start_source == "resume"
+    )
 
 
 def _activity_event_time(activity: SessionActivity) -> float:
