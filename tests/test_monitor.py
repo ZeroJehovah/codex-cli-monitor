@@ -316,6 +316,57 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].display_status, "成功")
         self.assertFalse(sessions[0].state_activity.failed_event)
 
+    def test_new_prompt_after_recent_success_terminal_event_marks_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 60
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            session = _write_completed_session(
+                home,
+                "old-success.jsonl",
+                "/work/a",
+                base + 1,
+            )
+            os.utime(session, (base + 5, base + 5))
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 2,
+                path=hook_log,
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 5,
+                path=hook_log,
+            )
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 7,
+                path=hook_log,
+            )
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertFalse(sessions[0].state_activity.failed_event)
+
     def test_hook_stop_with_interrupted_terminal_event_marks_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -343,6 +394,80 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].display_status, "失败")
+        self.assertTrue(sessions[0].state_activity.failed_event)
+
+    def test_new_prompt_after_recent_failure_terminal_event_marks_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time() - 60
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            hook_log = root / "hooks.jsonl"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            session = _write_session_records(
+                home,
+                "old-failure.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": _iso(base + 1),
+                        "payload": {"session_id": "old-failure", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base + 2),
+                        "payload": {"turn_id": "old-failure-turn"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": _iso(base + 3),
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base + 5),
+                        "payload": {
+                            "type": "turn_aborted",
+                            "reason": "interrupted",
+                        },
+                    },
+                ],
+            )
+            os.utime(session, (base + 5, base + 5))
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 2,
+                path=hook_log,
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 5,
+                path=hook_log,
+            )
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=base + 7,
+                path=hook_log,
+            )
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+                hook_log=hook_log,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "运行中")
         self.assertTrue(sessions[0].state_activity.failed_event)
 
     def test_hook_stop_with_retry_limit_message_marks_failure(self) -> None:
