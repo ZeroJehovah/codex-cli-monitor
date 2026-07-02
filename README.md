@@ -24,14 +24,13 @@
 
 为了减少误判，远程 API 进行中的判断不会只依赖长连接；它需要近期 Codex session 文件活动和网络连接共同支撑。监控不会输出 session JSONL 的消息正文。
 
-主状态只有四种：
+主状态只有三种：
 
-- `未运行`：新会话，或 `/new`、清空、恢复等产生的新 turn 上下文，尚未提交提示词。
 - `运行中`：已提交提示词，AI 正在思考、等待 API、执行 MCP、本地工具或其他操作。
-- `成功`：从运行中结束，且最近一轮结果完成成功。
+- `成功`：新打开、空闲等待输入，或最近一轮结果完成成功。
 - `失败`：从运行中结束，且最近一轮出现 API/模型错误，或被手动 Ctrl+C 中断。
 
-JSON 里仍保留 `inferred_status` 诊断字段，里面可能出现 `waiting_user_likely`、`api_inflight_likely`、`tool_running_likely` 等内部推断值，用来解释证据和置信度；表格和顶层 `status` 只显示上面的四种主状态。
+JSON 里仍保留 `inferred_status` 诊断字段，里面可能出现 `waiting_user_likely`、`api_inflight_likely`、`tool_running_likely` 等内部推断值，用来解释证据和置信度；表格和顶层 `status` 只显示上面的三种主状态。
 
 ## 使用方法
 
@@ -43,7 +42,7 @@ JSON 里仍保留 `inferred_status` 诊断字段，里面可能出现 `waiting_u
 
 安装后，在每个正在运行或新打开的 Codex CLI 里执行 `/hooks`，按提示 review/trust 新 hook。这个步骤是 Codex 的安全机制。
 
-信任后，监控会优先使用 hook 事件判断状态：`SessionStart` 视为 `未运行`，用户提交后到 `Stop` 前视为 `运行中`，`Stop` 后结合 session JSONL 末尾事件判断 `成功` 或 `失败`。同一工作目录下的多个 Codex 进程会按 Codex PID 和进程启动时间隔离，避免新会话继承旧会话的完成状态。没有 hook 事件的旧会话会继续使用 sidecar 信号降级推断。
+信任后，监控会优先使用 hook 事件判断状态：用户提交后到 `Stop` 前视为 `运行中`，`Stop` 后结合 session JSONL 末尾事件判断 `成功` 或 `失败`；新打开或等待输入的 Codex 进程显示为 `成功`。同一工作目录下的多个 Codex 进程会按 Codex PID 和进程启动时间隔离，避免一个进程的会话文件覆盖另一个进程的状态。没有 hook 事件的旧会话会继续使用 sidecar 信号降级推断。
 
 直接在项目目录运行：
 
@@ -133,7 +132,6 @@ exe 会直接退出，不会打开第二个悬浮窗。它会轮询 `/api/sessio
 
 圆点颜色：
 
-- 灰色：`未运行`
 - 带呼吸光晕的蓝色：`运行中`
 - 绿色：`成功`
 - 红色：`失败`

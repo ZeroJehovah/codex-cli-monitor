@@ -72,7 +72,7 @@ class CliTests(unittest.TestCase):
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(result, 0)
-        self.assertEqual(payload["sessions"][0]["status"], "未运行")
+        self.assertEqual(payload["sessions"][0]["status"], "成功")
         self.assertEqual(
             payload["sessions"][0]["inferred_status"]["status"],
             "waiting_user_likely",
@@ -129,7 +129,7 @@ class CliTests(unittest.TestCase):
 
         text = stdout.getvalue()
         self.assertEqual(result, 0)
-        self.assertIn("未运行", text)
+        self.assertIn("成功", text)
         self.assertNotIn("waiting_user_likely", text)
 
 

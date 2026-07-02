@@ -235,7 +235,7 @@ class CodexSession:
     hook_state: HookSessionState | None = None
     launch_record: LaunchRecord | None = None
     confirmed_status: str = "open"
-    display_status: str = "未运行"
+    display_status: str = "成功"
 
     def to_dict(self) -> dict[str, Any]:
         return {

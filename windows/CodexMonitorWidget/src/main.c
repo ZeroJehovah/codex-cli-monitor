@@ -112,7 +112,6 @@ typedef struct AppState {
     char last_error[256];
 } AppState;
 
-static const char STATUS_IDLE[] = "\xe6\x9c\xaa\xe8\xbf\x90\xe8\xa1\x8c";
 static const char STATUS_RUNNING[] = "\xe8\xbf\x90\xe8\xa1\x8c\xe4\xb8\xad";
 static const char STATUS_SUCCESS[] = "\xe6\x88\x90\xe5\x8a\x9f";
 static const char STATUS_FAILED[] = "\xe5\xa4\xb1\xe8\xb4\xa5";
@@ -1165,10 +1164,7 @@ static COLORREF status_color(const char *status) {
     if (strcmp(status, STATUS_FAILED) == 0) {
         return RGB(235, 87, 87);
     }
-    if (strcmp(status, STATUS_IDLE) == 0) {
-        return RGB(245, 245, 245);
-    }
-    return RGB(245, 245, 245);
+    return RGB(132, 204, 22);
 }
 
 static int running_pulse_level(void) {
