@@ -9,7 +9,6 @@ from .models import Evidence, Inference, NetworkConnection, ProcessInfo, Session
 
 CPU_ACTIVE_SECONDS = 0.02
 RECENT_SESSION_ACTIVITY_SECONDS = 15.0
-RECENT_FUNCTION_CALL_SECONDS = 90.0
 SUPPORT_PROCESS_MARKERS = (
     "chrome-devtools-mcp",
     "/mcp/",
@@ -31,15 +30,6 @@ TOOL_COMMAND_NAMES = {
     "sh",
     "yarn",
 }
-STATUSES = {
-    "waiting_user_likely",
-    "api_inflight_likely",
-    "tool_running_likely",
-    "active_likely",
-    "unknown",
-}
-
-
 def infer_status(
     root: ProcessInfo,
     descendants: tuple[ProcessInfo, ...],
@@ -237,12 +227,6 @@ def is_codex_process(process: ProcessInfo) -> bool:
 
 def is_native_codex_process(process: ProcessInfo) -> bool:
     return bool(_process_names(process).intersection({"codex", "codex.exe"}))
-
-
-def is_support_process(process: ProcessInfo) -> bool:
-    return _looks_like_support_process(process) and not _looks_like_active_tool_process(
-        process
-    )
 
 
 def _process_names(process: ProcessInfo) -> set[str]:

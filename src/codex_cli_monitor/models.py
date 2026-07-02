@@ -26,13 +26,6 @@ class NetworkConnection:
     state: str
     inode: str
 
-    def is_remote_tls_like(self) -> bool:
-        if self.state != "ESTABLISHED":
-            return False
-        if self.remote_port not in {443, 8443}:
-            return False
-        return self.is_established_remote()
-
     def is_established_remote(self) -> bool:
         if self.state != "ESTABLISHED":
             return False
@@ -234,13 +227,11 @@ class CodexSession:
     state_activity: SessionActivity | None = None
     hook_state: HookSessionState | None = None
     launch_record: LaunchRecord | None = None
-    confirmed_status: str = "open"
     display_status: str = "成功"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.display_status,
-            "confirmed_status": self.confirmed_status,
             "inferred_status": self.inference.to_dict(),
             "root": self.root.to_dict(),
             "descendants": [process.to_dict() for process in self.descendants],

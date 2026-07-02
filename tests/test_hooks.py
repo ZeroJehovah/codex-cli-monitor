@@ -33,14 +33,14 @@ class HooksTests(unittest.TestCase):
             with patch.dict(os.environ, {"CODEX_MONITOR_HOOK_LOG": str(log_path)}):
                 with patch(
                     "codex_cli_monitor.hooks.read_hook_payload_stdin",
-                    return_value={"source": "resume", "session_id": "019f-test"},
+                    return_value={"source": "startup", "session_id": "019f-test"},
                 ):
                     self.assertEqual(hooks.main(["session_start"]), 0)
 
             payload = json.loads(log_path.read_text(encoding="utf-8"))
 
         self.assertEqual(payload["event"], "session_start")
-        self.assertEqual(payload["hook_source"], "resume")
+        self.assertEqual(payload["hook_source"], "startup")
         self.assertEqual(payload["session_id"], "019f-test")
 
 

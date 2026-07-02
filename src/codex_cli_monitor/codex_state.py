@@ -87,7 +87,6 @@ TERMINAL_PAYLOAD_TYPES = {
 }
 STATE_PATTERNS = (
     "sessions/**/*.jsonl",
-    "shell_snapshots/*.sh",
     "history.jsonl",
     "*.sqlite",
     "*.sqlite-wal",
@@ -959,8 +958,6 @@ def _classify_state_path(relative_path: Path) -> str:
     name = relative_path.name
     if parts and parts[0] == "sessions" and name.endswith(".jsonl"):
         return "session_jsonl"
-    if parts and parts[0] == "shell_snapshots" and name.endswith(".sh"):
-        return "shell_snapshot"
     if name == "history.jsonl":
         return "history"
     if name.endswith(".sqlite-wal"):

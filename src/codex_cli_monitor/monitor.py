@@ -303,15 +303,9 @@ def _activity_sort_key_for_root(
     root: ProcessInfo,
     activity: SessionActivity,
     hook_state: HookSessionState | None,
-) -> tuple[float, float, float, float, float, float]:
+) -> tuple[float, float, float, float]:
     hook_rank = 0.0 if hook_state is not None else 1.0
     hook_lifecycle_rank = _hook_lifecycle_sort_rank(hook_state)
-    idle_reset_rank = (
-        0.0
-        if hook_state is not None
-        and _activity_is_idle_reset_after_stop(activity, hook_state)
-        else 1.0
-    )
     delta = _activity_hook_delta(activity, hook_state)
     if delta is None:
         delta = _activity_process_start_delta(activity, root)
@@ -322,7 +316,6 @@ def _activity_sort_key_for_root(
     return (
         hook_rank,
         hook_lifecycle_rank,
-        idle_reset_rank,
         delta,
         recency,
     )
@@ -543,26 +536,6 @@ def _activity_matches_hook(
         return event_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS >= started_at
 
     return True
-
-
-def _activity_is_idle_reset_after_stop(
-    activity: SessionActivity | None,
-    hook_state: HookSessionState,
-) -> bool:
-    if activity is None:
-        return False
-    stop_at = hook_state.last_stopped_at
-    if stop_at is None and hook_state.last_event == "stop":
-        stop_at = hook_state.updated_at
-    if stop_at is None:
-        return False
-    event_at = _activity_event_time(activity)
-    return (
-        event_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS >= stop_at
-        and not activity.latest_turn_has_user
-        and not activity.terminal_event
-        and not activity.failed_event
-    )
 
 
 def _activity_is_missing_response_failure(

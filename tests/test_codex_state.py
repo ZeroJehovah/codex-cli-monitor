@@ -14,11 +14,8 @@ class CodexStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
-            shell_snapshot = home / "shell_snapshots" / "abc.sh"
             session.parent.mkdir(parents=True)
-            shell_snapshot.parent.mkdir(parents=True)
             session.write_text('{"secret":"not returned"}\n', encoding="utf-8")
-            shell_snapshot.write_text("echo hi\n", encoding="utf-8")
             (home / "state_5.sqlite-wal").write_bytes(b"sqlite")
 
             summary = scan_codex_state(home, max_files=10)
@@ -27,7 +24,6 @@ class CodexStateTests(unittest.TestCase):
         self.assertEqual(summary.codex_home, tmp)
         self.assertEqual(summary.scan_errors, ())
         self.assertIn("session_jsonl", {item.kind for item in summary.newest_files})
-        self.assertIn("shell_snapshot", {item.kind for item in summary.newest_files})
         self.assertNotIn("secret", repr(payload))
 
     def test_missing_codex_home_reports_conservative_error(self) -> None:
