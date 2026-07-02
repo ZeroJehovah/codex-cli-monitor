@@ -50,6 +50,10 @@ class InstallHooksTests(unittest.TestCase):
             sum("codex_cli_monitor.hooks" in command for command in commands),
             1,
         )
+        monitor_command = next(
+            command for command in commands if "codex_cli_monitor.hooks" in command
+        )
+        self.assertIn("python3 -S -m codex_cli_monitor.hooks", monitor_command)
 
 
 if __name__ == "__main__":

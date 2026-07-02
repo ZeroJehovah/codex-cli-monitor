@@ -123,7 +123,7 @@ def _hook_command(repo_root: Path, event: str) -> str:
     module_path = repo_root / "src"
     return (
         f"PYTHONPATH={_shell_quote(str(module_path))} "
-        f"python3 -m codex_cli_monitor.hooks {_shell_quote(event)}"
+        f"python3 -S -m codex_cli_monitor.hooks {_shell_quote(event)}"
     )
 
 
