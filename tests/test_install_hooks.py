@@ -108,6 +108,28 @@ class InstallHooksTests(unittest.TestCase):
         self.assertEqual(len(monitor_hooks), 1)
         self.assertNotIn("statusMessage", monitor_hooks[0])
 
+    def test_tool_hooks_are_installed_as_background_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hooks_path = Path(tmp) / "hooks.json"
+            repo_root = Path(tmp) / "repo"
+            (repo_root / "src").mkdir(parents=True)
+
+            install_hooks(hooks_path, repo_root)
+
+            payload = json.loads(hooks_path.read_text(encoding="utf-8"))
+
+        pre_tool_command = payload["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        post_tool_command = payload["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        stop_command = payload["hooks"]["Stop"][0]["hooks"][0]["command"]
+
+        for command in (pre_tool_command, post_tool_command):
+            self.assertIn('--ppid "$PPID"', command)
+            self.assertIn('--timestamp "$(date +%s.%N)"', command)
+            self.assertIn("</dev/null >/dev/null 2>&1 &", command)
+
+        self.assertNotIn("</dev/null", stop_command)
+        self.assertNotIn("--timestamp", stop_command)
+
 
 if __name__ == "__main__":
     unittest.main()
