@@ -54,6 +54,59 @@ class InstallHooksTests(unittest.TestCase):
             command for command in commands if "codex_cli_monitor.hooks" in command
         )
         self.assertIn("python3 -S -m codex_cli_monitor.hooks", monitor_command)
+        monitor_hooks = [
+            hook
+            for entry in payload["hooks"]["Stop"]
+            for hook in entry["hooks"]
+            if "codex_cli_monitor.hooks" in hook["command"]
+        ]
+        self.assertNotIn("statusMessage", monitor_hooks[0])
+
+    def test_install_hooks_removes_existing_monitor_status_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hooks_path = Path(tmp) / "hooks.json"
+            repo_root = Path(tmp) / "repo"
+            (repo_root / "src").mkdir(parents=True)
+            hooks_path.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "*",
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": (
+                                                "PYTHONPATH=/old python3 -S -m "
+                                                "codex_cli_monitor.hooks pre_tool_use"
+                                            ),
+                                            "timeout": 5,
+                                            "statusMessage": (
+                                                "Recording monitor event pre_tool_use"
+                                            ),
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            install_hooks(hooks_path, repo_root)
+
+            payload = json.loads(hooks_path.read_text(encoding="utf-8"))
+
+        monitor_hooks = [
+            hook
+            for entry in payload["hooks"]["PreToolUse"]
+            for hook in entry["hooks"]
+            if "codex_cli_monitor.hooks" in hook["command"]
+        ]
+        self.assertEqual(len(monitor_hooks), 1)
+        self.assertNotIn("statusMessage", monitor_hooks[0])
 
 
 if __name__ == "__main__":
