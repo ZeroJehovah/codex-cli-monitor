@@ -64,7 +64,6 @@ def install_hooks(hooks_path: Path, repo_root: Path) -> None:
                     "type": "command",
                     "command": _hook_command(repo_root, spec["command"]),
                     "timeout": 5,
-                    "statusMessage": f"Recording monitor event {spec['command']}",
                 }
             ]
         }
