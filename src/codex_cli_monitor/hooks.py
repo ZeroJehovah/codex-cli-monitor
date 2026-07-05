@@ -16,10 +16,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("event")
     parser.add_argument("--tool", default=None)
+    parser.add_argument("--ppid", type=int, default=None)
+    parser.add_argument("--timestamp", type=float, default=None)
     args = parser.parse_args(argv)
     append_hook_event(
         args.event,
         tool=args.tool,
+        ppid=args.ppid,
+        timestamp=args.timestamp,
         hook_payload=_hook_payload_for_event(args.event),
     )
     return 0

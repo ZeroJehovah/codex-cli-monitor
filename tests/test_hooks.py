@@ -43,6 +43,21 @@ class HooksTests(unittest.TestCase):
         self.assertEqual(payload["hook_source"], "startup")
         self.assertEqual(payload["session_id"], "019f-test")
 
+    def test_hook_accepts_parent_pid_and_timestamp_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "hooks.jsonl"
+            with patch.dict(os.environ, {"CODEX_MONITOR_HOOK_LOG": str(log_path)}):
+                self.assertEqual(
+                    hooks.main(["post_tool_use", "--ppid", "1234", "--timestamp", "42.5"]),
+                    0,
+                )
+
+            payload = json.loads(log_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["event"], "post_tool_use")
+        self.assertEqual(payload["ppid"], 1234)
+        self.assertEqual(payload["timestamp"], 42.5)
+
 
 if __name__ == "__main__":
     unittest.main()

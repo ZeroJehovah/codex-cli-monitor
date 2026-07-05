@@ -27,6 +27,8 @@ HOOK_EVENTS = {
     },
 }
 
+BACKGROUND_EVENTS = {"pre_tool_use", "post_tool_use"}
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
@@ -120,10 +122,16 @@ def _entry_is_monitor_hook(entry: object) -> bool:
 
 def _hook_command(repo_root: Path, event: str) -> str:
     module_path = repo_root / "src"
-    return (
+    command = (
         f"PYTHONPATH={_shell_quote(str(module_path))} "
         f"python3 -S -m codex_cli_monitor.hooks {_shell_quote(event)}"
     )
+    if event in BACKGROUND_EVENTS:
+        return (
+            f"{command} --ppid \"$PPID\" --timestamp \"$(date +%s.%N)\" "
+            "</dev/null >/dev/null 2>&1 &"
+        )
+    return command
 
 
 def _shell_quote(value: str) -> str:
