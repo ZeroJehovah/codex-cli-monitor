@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -209,6 +210,7 @@ def scan_session_activities(
     max_files: int = 80,
     previous: Mapping[str, SessionActivity] | None = None,
     metadata_only: bool = False,
+    include_relative_paths: Iterable[str] = (),
 ) -> tuple[SessionActivity, ...]:
     home = (codex_home or default_codex_home()).expanduser()
     if not home.is_dir():
@@ -225,6 +227,13 @@ def scan_session_activities(
         )[:max_files]
     except OSError:
         return ()
+    seen_paths = set(paths)
+    for relative_path in include_relative_paths:
+        include_path = _included_session_path(home, relative_path)
+        if include_path is None or include_path in seen_paths:
+            continue
+        paths.append(include_path)
+        seen_paths.add(include_path)
 
     for path in paths:
         activity = (
@@ -412,15 +421,41 @@ def _session_activity_metadata(
     except ValueError:
         relative_path = path.as_posix()
 
+    first_record = _scan_first_session_record(path)
     return SessionActivity(
         relative_path=relative_path,
-        session_id=None,
+        session_id=_session_id_from_record(first_record) or _session_id_from_name(path.name),
         turn_id=None,
-        cwd=None,
+        cwd=_cwd_from_record(first_record),
         size_bytes=stat.st_size,
         modified_at=stat.st_mtime,
         observed_at=observed_at,
+        session_started_at=_timestamp_from_record(first_record),
     )
+
+
+def _included_session_path(home: Path, relative_path: str) -> Path | None:
+    relative = Path(relative_path)
+    if relative.is_absolute() or relative.suffix != ".jsonl":
+        return None
+    if not relative.parts or relative.parts[0] != "sessions":
+        return None
+    return home / relative
+
+
+def _scan_first_session_record(path: Path) -> dict | None:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict):
+                    return record
+    except OSError:
+        return None
+    return None
 
 
 def _scan_session_records(

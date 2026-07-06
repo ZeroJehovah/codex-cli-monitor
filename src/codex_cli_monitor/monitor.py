@@ -24,6 +24,9 @@ from .shim import default_log_path, load_launch_records
 
 
 ACTIVITY_TIMESTAMP_GRACE_SECONDS = 5.0
+SESSION_ACTIVITY_MAX_FILES = 80
+SESSION_ACTIVITY_METADATA_MAX_FILES = 2000
+SESSION_ACTIVITY_CANDIDATE_LIMIT_PER_ROOT = 24
 INACTIVE_ROOT_STATES = {"T", "t", "Z", "X", "x"}
 SESSION_BINDING_UNKNOWN_DELTA_SECONDS = 365 * 24 * 3600.0
 CODEX_MAINTENANCE_ARGS = {
@@ -77,7 +80,11 @@ def discover_sessions(
 ) -> tuple[CodexSession, ...]:
     first_snapshot = read_processes(proc_root)
     first_activities = (
-        scan_session_activities(codex_home, metadata_only=True)
+        scan_session_activities(
+            codex_home,
+            max_files=SESSION_ACTIVITY_METADATA_MAX_FILES,
+            metadata_only=True,
+        )
         if sample_window > 0
         else ()
     )
@@ -87,13 +94,8 @@ def discover_sessions(
     if sample_window > 0:
         sleep(sample_window)
         second_snapshot = read_processes(proc_root)
-        session_activities = scan_session_activities(
-            codex_home,
-            previous=first_activities_by_path,
-        )
     else:
         second_snapshot = first_snapshot
-        session_activities = scan_session_activities(codex_home)
     processes = _with_cpu_deltas(first_snapshot, second_snapshot, sample_window)
     codex_roots = _find_codex_roots(processes)
     if not codex_roots:
@@ -113,6 +115,23 @@ def discover_sessions(
     hook_states_by_pid = {
         root.pid: _hook_state_for_root(root, hook_states) for root in codex_roots
     }
+    metadata_activities = scan_session_activities(
+        codex_home,
+        max_files=SESSION_ACTIVITY_METADATA_MAX_FILES,
+        previous=first_activities_by_path,
+        metadata_only=True,
+    )
+    candidate_paths = _activity_candidate_paths_for_roots(
+        codex_roots,
+        metadata_activities,
+        hook_states_by_pid,
+    )
+    session_activities = scan_session_activities(
+        codex_home,
+        max_files=SESSION_ACTIVITY_MAX_FILES,
+        previous=first_activities_by_path,
+        include_relative_paths=candidate_paths,
+    )
     state_activities_by_pid = _state_activities_for_roots(
         codex_roots,
         session_activities,
@@ -160,6 +179,31 @@ def discover_sessions(
         )
 
     return tuple(sorted(sessions, key=lambda session: session.root.pid))
+
+
+def _activity_candidate_paths_for_roots(
+    roots: tuple[ProcessInfo, ...],
+    activities: tuple[SessionActivity, ...],
+    hook_states_by_pid: dict[int, HookSessionState | None],
+) -> tuple[str, ...]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        hook_state = hook_states_by_pid.get(root.pid)
+        candidates = sorted(
+            _activity_candidates_for_root(root, activities, hook_state),
+            key=lambda activity: _activity_sort_key_for_root(
+                root,
+                activity,
+                hook_state,
+            ),
+        )[:SESSION_ACTIVITY_CANDIDATE_LIMIT_PER_ROOT]
+        for activity in candidates:
+            if activity.relative_path in seen:
+                continue
+            seen.add(activity.relative_path)
+            paths.append(activity.relative_path)
+    return tuple(paths)
 
 
 def _with_cpu_deltas(

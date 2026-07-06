@@ -1422,6 +1422,76 @@ class MonitorTests(unittest.TestCase):
         self.assertIsNone(sessions[0].state_activity)
         self.assertEqual(sessions[0].display_status, "成功")
 
+    def test_open_session_binds_failure_outside_recent_activity_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = time.time()
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            target = _write_session_records(
+                home,
+                "old-open-failure.jsonl",
+                [
+                    {
+                        "type": "session_meta",
+                        "timestamp": _iso(base - 120),
+                        "payload": {"session_id": "old-open", "cwd": "/work/a"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": _iso(base - 119),
+                        "payload": {"turn_id": "old-open-turn"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": _iso(base - 118),
+                        "payload": {"type": "message", "role": "user"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base - 117),
+                        "payload": {
+                            "type": "agent_message",
+                            "message": (
+                                "■ exceeded retry limit, last status: "
+                                "429 Too Many Requests"
+                            ),
+                        },
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": _iso(base - 116),
+                        "payload": {"type": "task_complete"},
+                    },
+                ],
+            )
+            os.utime(target, (base - 120, base - 120))
+            for index in range(100):
+                newer = _write_completed_session(
+                    home,
+                    f"newer-{index:03d}.jsonl",
+                    "/other",
+                    base - index,
+                )
+                os.utime(newer, (base + index, base + index))
+
+            sessions = discover_sessions(
+                proc_root=proc,
+                sample_window=0,
+                codex_home=home,
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "失败")
+        self.assertEqual(
+            sessions[0].state_activity.relative_path,
+            "sessions/2026/06/26/old-open-failure.jsonl",
+        )
+
     def test_idle_stale_success_remains_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = time.time() - 600
