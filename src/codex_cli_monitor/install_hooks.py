@@ -128,7 +128,9 @@ def _hook_command(repo_root: Path, event: str) -> str:
     )
     if event in BACKGROUND_EVENTS:
         return (
-            f"{command} --ppid \"$PPID\" --timestamp \"$(date +%s.%N)\" "
+            "__codex_monitor_ts=\"$(date +%s.%N)\"; "
+            "if [ -t 0 ]; then :; else cat >/dev/null 2>/dev/null || true; fi; "
+            f"{command} --ppid \"$PPID\" --timestamp \"$__codex_monitor_ts\" "
             "</dev/null >/dev/null 2>&1 &"
         )
     return command

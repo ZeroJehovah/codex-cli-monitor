@@ -11,18 +11,18 @@ from codex_cli_monitor import hooks
 
 
 class HooksTests(unittest.TestCase):
-    def test_post_tool_use_does_not_read_stdin_payload(self) -> None:
+    def test_post_tool_use_discards_stdin_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "hooks.jsonl"
             with patch.dict(os.environ, {"CODEX_MONITOR_HOOK_LOG": str(log_path)}):
                 with patch(
-                    "codex_cli_monitor.hooks.read_hook_payload_stdin",
-                    side_effect=AssertionError("stdin should not be read"),
-                ):
+                    "codex_cli_monitor.hooks.discard_hook_payload_stdin",
+                ) as discard:
                     self.assertEqual(hooks.main(["post_tool_use"]), 0)
 
             payload = json.loads(log_path.read_text(encoding="utf-8"))
 
+        discard.assert_called_once_with()
         self.assertEqual(payload["event"], "post_tool_use")
         self.assertIsNone(payload["session_id"])
         self.assertIsNone(payload["hook_source"])

@@ -3,10 +3,10 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .hook_state import append_hook_event, read_hook_payload_stdin
+from .hook_state import append_hook_event, discard_hook_payload_stdin, read_hook_payload_stdin
 
 
-SKIP_STDIN_PAYLOAD_EVENTS = {"pre_tool_use", "post_tool_use"}
+DISCARD_STDIN_PAYLOAD_EVENTS = {"pre_tool_use", "post_tool_use"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,7 +30,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _hook_payload_for_event(event: str) -> dict | None:
-    if event in SKIP_STDIN_PAYLOAD_EVENTS:
+    if event in DISCARD_STDIN_PAYLOAD_EVENTS:
+        discard_hook_payload_stdin()
         return None
     return read_hook_payload_stdin()
 
