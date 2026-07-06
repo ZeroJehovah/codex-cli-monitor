@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_cli_monitor.codex_state import scan_codex_state, scan_session_activities
 
@@ -61,6 +62,29 @@ class CodexStateTests(unittest.TestCase):
         self.assertEqual(activities[0].cwd, "/work/a")
         self.assertEqual(activities[0].last_payload_type, "function_call")
         self.assertNotIn("secret", repr(activities[0].to_dict()))
+
+    def test_scan_session_activities_reuses_unchanged_cached_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                '{"type":"session_meta","payload":{"session_id":"s","cwd":"/work/a"}}\n'
+                '{"type":"response_item","payload":{"type":"task_complete"}}\n',
+                encoding="utf-8",
+            )
+
+            first = scan_session_activities(home)
+            with patch(
+                "codex_cli_monitor.codex_state._scan_session_records",
+                side_effect=AssertionError("unchanged file should use cache"),
+            ):
+                second = scan_session_activities(home)
+
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(second[0].session_id, "s")
+        self.assertTrue(second[0].terminal_event)
 
     def test_scan_session_activities_marks_successful_terminal_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from dataclasses import replace
@@ -15,6 +16,7 @@ from .models import CodexStateSummary, SessionActivity, StateFile
 
 
 DEFAULT_MAX_FILES = 12
+SESSION_ACTIVITY_CACHE_MAX_ENTRIES = 256
 RUNTIME_LOG_DATABASE = "logs_2.sqlite"
 RUNTIME_LOG_WAL = f"{RUNTIME_LOG_DATABASE}-wal"
 RUNTIME_FAILURE_MATCH_GRACE_SECONDS = 30.0
@@ -101,6 +103,17 @@ class _RuntimeFailure:
     cwd: str | None
     timestamp: float | None
     source: str
+
+
+@dataclass(frozen=True)
+class _SessionActivityCacheEntry:
+    size_bytes: int
+    modified_at: float
+    activity: SessionActivity
+
+
+_SESSION_ACTIVITY_CACHE: dict[tuple[str, str], _SessionActivityCacheEntry] = {}
+_SESSION_ACTIVITY_CACHE_LOCK = threading.Lock()
 
 
 class _TurnRecordSummary:
@@ -217,7 +230,7 @@ def scan_session_activities(
         activity = (
             _session_activity_metadata(home, path, observed_at)
             if metadata_only
-            else _session_activity(home, path, observed_at)
+            else _cached_session_activity(home, path, observed_at)
         )
         if activity is None:
             continue
@@ -235,6 +248,62 @@ def scan_session_activities(
     if activities and not metadata_only:
         activities = _merge_runtime_failures(home, activities)
     return tuple(activities)
+
+
+def _cached_session_activity(
+    home: Path,
+    path: Path,
+    observed_at: float,
+) -> SessionActivity | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+
+    try:
+        relative_path = path.relative_to(home).as_posix()
+    except ValueError:
+        relative_path = path.as_posix()
+    cache_key = (str(home), relative_path)
+
+    with _SESSION_ACTIVITY_CACHE_LOCK:
+        cached = _SESSION_ACTIVITY_CACHE.get(cache_key)
+        if (
+            cached is not None
+            and cached.size_bytes == stat.st_size
+            and cached.modified_at == stat.st_mtime
+        ):
+            return replace(
+                cached.activity,
+                observed_at=observed_at,
+                changed_during_sample=False,
+            )
+
+        activity = _session_activity(home, path, observed_at)
+        if activity is None:
+            _SESSION_ACTIVITY_CACHE.pop(cache_key, None)
+            return None
+        _SESSION_ACTIVITY_CACHE[cache_key] = _SessionActivityCacheEntry(
+            size_bytes=activity.size_bytes,
+            modified_at=activity.modified_at,
+            activity=replace(activity, changed_during_sample=False),
+        )
+        _prune_session_activity_cache_locked()
+        return activity
+
+
+def _prune_session_activity_cache_locked() -> None:
+    overflow = len(_SESSION_ACTIVITY_CACHE) - SESSION_ACTIVITY_CACHE_MAX_ENTRIES
+    if overflow <= 0:
+        return
+    stale_keys = sorted(
+        _SESSION_ACTIVITY_CACHE,
+        key=lambda key: _SESSION_ACTIVITY_CACHE[key].modified_at,
+    )[:overflow]
+    for key in stale_keys:
+        _SESSION_ACTIVITY_CACHE.pop(key, None)
 
 
 def _state_file(home: Path, path: Path) -> StateFile | None:
