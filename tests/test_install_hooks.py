@@ -123,8 +123,13 @@ class InstallHooksTests(unittest.TestCase):
         stop_command = payload["hooks"]["Stop"][0]["hooks"][0]["command"]
 
         for command in (pre_tool_command, post_tool_command):
+            self.assertIn('__codex_monitor_ts="$(date +%s.%N)"', command)
+            self.assertIn(
+                "if [ -t 0 ]; then :; else cat >/dev/null 2>/dev/null || true; fi",
+                command,
+            )
             self.assertIn('--ppid "$PPID"', command)
-            self.assertIn('--timestamp "$(date +%s.%N)"', command)
+            self.assertIn('--timestamp "$__codex_monitor_ts"', command)
             self.assertIn("</dev/null >/dev/null 2>&1 &", command)
 
         self.assertNotIn("</dev/null", stop_command)

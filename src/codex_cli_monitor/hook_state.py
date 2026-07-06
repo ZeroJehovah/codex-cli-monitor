@@ -129,6 +129,17 @@ def read_hook_payload_stdin() -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def discard_hook_payload_stdin() -> None:
+    if sys.stdin.isatty():
+        return
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    try:
+        while stream.read(64 * 1024):
+            pass
+    except OSError:
+        return
+
+
 def load_hook_events(
     path: Path | None = None,
     max_age_seconds: float = 24 * 3600,
