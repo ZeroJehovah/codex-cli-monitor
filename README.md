@@ -131,35 +131,39 @@ PYTHONPATH=src python3 -m codex_cli_monitor --codex-home ~/.codex
 
 Hook 始终只写本地文件，不直接访问 VPS，因此 VPS 离线或网络抖动不会阻塞 Codex。建议让所有设备通过 Tailscale 或 WireGuard 互通，不要直接把未受防火墙保护的端口暴露到公网。
 
-在 VPS 上启动聚合服务：
+后端是纯 Python，不需要编译；VPS 和采集服务器只需要 Python 3.10 或更高版本以及 systemd。clone 仓库后，在 VPS 安装聚合系统服务：
 
 ```bash
-export CODEX_MONITOR_SERVER_ID="vps"
-export CODEX_MONITOR_SERVER_NAME="My VPS"
-export CODEX_MONITOR_INGEST_TOKEN="replace-with-a-long-random-write-token"
-export CODEX_MONITOR_API_TOKEN="replace-with-a-long-random-read-token"
-
-PYTHONPATH=src python3 -m codex_cli_monitor \
-  --daemon \
-  --aggregate \
-  --host 100.64.0.10 \
-  --port 8765
+install -m 700 start-server.sh.example start-server.sh
+vim start-server.sh
+./start-server.sh
 ```
 
-`--host` 最好填写 VPS 的 Tailscale/WireGuard 地址。如果必须通过公网访问，应在 Caddy、Nginx 等反向代理后提供 HTTPS，并配置防火墙和限流。
+`start-server.sh` 中需要填写服务器标识、监听地址、前端读取 Token 和采集器写入 Token。脚本会安装本机 Hook、生成 `codex-monitor-aggregator.service`，将 Token 写入权限为 `0600` 的 `/etc/codex-cli-monitor/aggregator.env`，然后通过 systemd 启动并设置开机自启。服务会使用脚本中的 `SERVICE_USER` 运行；该用户必须与实际运行 Codex 的 Linux 用户一致。安装后仍需在已打开的 Codex 会话中执行 `/hooks` 完成信任确认。
 
-在其他服务器上启动采集器：
+查看聚合服务：
 
 ```bash
-export CODEX_MONITOR_SERVER_ID="server-a"
-export CODEX_MONITOR_SERVER_NAME="Server A"
-export CODEX_MONITOR_AGGREGATOR_URL="http://100.64.0.10:8765"
-export CODEX_MONITOR_COLLECTOR_TOKEN="replace-with-a-long-random-write-token"
-
-PYTHONPATH=src python3 -m codex_cli_monitor --daemon
+sudo systemctl status codex-monitor-aggregator.service
+sudo journalctl -u codex-monitor-aggregator.service -f
 ```
 
-采集器默认每 0.5 秒发送一次当前快照。聚合服务按本地接收时间保存快照，默认 5 秒没有收到更新就从活动结果中移除该服务器的旧会话。也可以用 `--collector-interval` 和 `--remote-ttl` 调整。
+监听地址最好填写 VPS 的 Tailscale/WireGuard 地址。如果必须通过公网访问，应在 Caddy、Nginx 等反向代理后提供 HTTPS，并配置防火墙和限流。
+
+在其他 Linux 服务器安装采集系统服务：
+
+```bash
+install -m 700 start-collector.sh.example start-collector.sh
+vim start-collector.sh
+./start-collector.sh
+```
+
+脚本会安装本机 Hook，并生成、启用 `codex-monitor-collector.service`。采集器默认每 0.5 秒发送一次当前快照；聚合服务默认 5 秒没有收到更新就从活动结果中移除该服务器的旧会话。安装后仍需在已打开的 Codex 会话中执行 `/hooks` 完成信任确认。
+
+```bash
+sudo systemctl status codex-monitor-collector.service
+sudo journalctl -u codex-monitor-collector.service -f
+```
 
 查询带读取鉴权的聚合 API：
 
@@ -173,26 +177,7 @@ curl \
 
 各服务器应启用 NTP 时间同步；跨服务器的进程开始时间和界面排序仍以各机器报告的系统时间为准。
 
-支持的部署环境变量包括：
-
-- `CODEX_MONITOR_SERVER_ID`、`CODEX_MONITOR_SERVER_NAME`
-- `CODEX_MONITOR_AGGREGATOR_URL`
-- `CODEX_MONITOR_COLLECTOR_TOKEN`
-- `CODEX_MONITOR_INGEST_TOKEN`
-- `CODEX_MONITOR_API_TOKEN`
-
-Token 建议通过环境变量提供。后台模式会把 Token 放进子进程环境，而不会把它们加入常驻进程的命令行。
-
-如果希望每台服务器使用不同的写入 Token，可以在 VPS 创建仅服务账号可读的 JSON 文件：
-
-```json
-{
-  "server-a": "write-token-for-server-a",
-  "server-b": "write-token-for-server-b"
-}
-```
-
-然后用 `--ingest-token-file /path/to/collector-tokens.json` 启动聚合服务；此时各采集器的 `CODEX_MONITOR_COLLECTOR_TOKEN` 使用各自服务器对应的值。也可以设置 `CODEX_MONITOR_INGEST_TOKEN_FILE`。
+仓库提交 `.example` 模板，但忽略没有 `.example` 后缀的本地脚本。因此 `start-server.sh`、`start-collector.sh` 和 `start-widget.ps1` 可以保存真实 Token，不会被 Git 提交。
 
 ## Windows 悬浮窗
 
@@ -217,13 +202,15 @@ exe 会直接退出，不会打开第二个悬浮窗。它会轮询 `/api/sessio
 显示 PID、状态、目录和启动时间。右键点击悬浮窗会打开菜单，可以调整显示大小、打开
 关于页面或退出程序。
 
-连接多服务器聚合服务时，悬浮窗按服务器和目录共同分组；存在多个服务器时，目录名前会显示服务器名，悬停详情也会显示服务器。读取 API 配置了 Bearer Token 时，可以设置：
+连接多服务器聚合服务时，悬浮窗按服务器和目录共同分组；存在多个服务器时，目录名前会显示服务器名，悬停详情也会显示服务器。Windows GUI 不能通过 Windows Service 显示在用户桌面，因此使用登录计划任务：
 
 ```powershell
-$env:CODEX_MONITOR_API_URL = "https://monitor.example.com/api/sessions"
-$env:CODEX_MONITOR_API_TOKEN = "replace-with-the-read-token"
-.\CodexMonitorWidget.exe
+Copy-Item .\start-widget.ps1.example .\start-widget.ps1
+notepad .\start-widget.ps1
+powershell -ExecutionPolicy Bypass -File .\start-widget.ps1
 ```
+
+脚本会保存聚合 API 地址和读取 Token，并注册当前 Windows 用户登录时启动的 `CodexMonitorWidget` 计划任务。实际配置脚本已被 Git 忽略。
 
 构建 Windows x64 exe：
 

@@ -34,6 +34,12 @@ When the API requires a Bearer token, set `CODEX_MONITOR_API_TOKEN`; the token i
 sent in the `Authorization` header and is not accepted as a command-line
 argument.
 
+For persistent desktop startup, copy `start-widget.ps1.example` to
+`start-widget.ps1`, fill in the aggregator URL and read token, and run it once.
+It registers a scheduled task for the current user's logon. A Windows service
+is intentionally not used because interactive GUI applications cannot display
+from the service session.
+
 The floating panel is a headerless table grouped by directory. Each row shows
 the directory name in the first column and one or more softened-edge process
 status dots in the second column. The table width is calculated from the
