@@ -9,6 +9,7 @@
 - 区分“确定事实”和“推断状态”，不会把推断结果当成 Codex 内部真实状态。
 - 支持 JSON 输出，方便接入脚本或面板。
 - 支持常驻后台 HTTP API，供桌面前端轮询当前 Codex 会话状态。
+- 支持多服务器采集与聚合：每台服务器本地采集，VPS 聚合服务同时监控自身 Codex 并合并远端状态。
 - 提供轻量原生 Win32 小型悬浮窗前端，用状态圆点展示每个 Codex 进程。
 - 提供可选的同名 `codex` shim，用来记录启动元数据后再透明执行真正的 Codex CLI。
 
@@ -121,6 +122,78 @@ API 会返回每个 Codex 进程的主状态、目录和启动时间，示例字
 PYTHONPATH=src python3 -m codex_cli_monitor --codex-home ~/.codex
 ```
 
+## 多服务器部署
+
+多服务器模式使用同一个程序承担两个角色：
+
+- 采集器运行在每台 Codex 服务器上，继续读取本机 `/proc`、Hook 日志和 Codex session 文件，并异步推送最小状态快照。
+- 聚合服务通常运行在 VPS 上，接收远端快照，同时照常采集 VPS 本机的 Codex 状态，最终向前端返回合并结果。
+
+Hook 始终只写本地文件，不直接访问 VPS，因此 VPS 离线或网络抖动不会阻塞 Codex。建议让所有设备通过 Tailscale 或 WireGuard 互通，不要直接把未受防火墙保护的端口暴露到公网。
+
+在 VPS 上启动聚合服务：
+
+```bash
+export CODEX_MONITOR_SERVER_ID="vps"
+export CODEX_MONITOR_SERVER_NAME="My VPS"
+export CODEX_MONITOR_INGEST_TOKEN="replace-with-a-long-random-write-token"
+export CODEX_MONITOR_API_TOKEN="replace-with-a-long-random-read-token"
+
+PYTHONPATH=src python3 -m codex_cli_monitor \
+  --daemon \
+  --aggregate \
+  --host 100.64.0.10 \
+  --port 8765
+```
+
+`--host` 最好填写 VPS 的 Tailscale/WireGuard 地址。如果必须通过公网访问，应在 Caddy、Nginx 等反向代理后提供 HTTPS，并配置防火墙和限流。
+
+在其他服务器上启动采集器：
+
+```bash
+export CODEX_MONITOR_SERVER_ID="server-a"
+export CODEX_MONITOR_SERVER_NAME="Server A"
+export CODEX_MONITOR_AGGREGATOR_URL="http://100.64.0.10:8765"
+export CODEX_MONITOR_COLLECTOR_TOKEN="replace-with-a-long-random-write-token"
+
+PYTHONPATH=src python3 -m codex_cli_monitor --daemon
+```
+
+采集器默认每 0.5 秒发送一次当前快照。聚合服务按本地接收时间保存快照，默认 5 秒没有收到更新就从活动结果中移除该服务器的旧会话。也可以用 `--collector-interval` 和 `--remote-ttl` 调整。
+
+查询带读取鉴权的聚合 API：
+
+```bash
+curl \
+  -H "Authorization: Bearer $CODEX_MONITOR_API_TOKEN" \
+  http://100.64.0.10:8765/api/sessions
+```
+
+聚合结果中的每个 session 会增加 `server_id`、`server_name`、`server_boot_id`、跨服务器唯一的 `session_key` 和 `server_observed_at`。顶层还会返回 `server_count` 和 `servers`。不同服务器上相同的 PID 或相同目录不会被合并为同一会话。
+
+各服务器应启用 NTP 时间同步；跨服务器的进程开始时间和界面排序仍以各机器报告的系统时间为准。
+
+支持的部署环境变量包括：
+
+- `CODEX_MONITOR_SERVER_ID`、`CODEX_MONITOR_SERVER_NAME`
+- `CODEX_MONITOR_AGGREGATOR_URL`
+- `CODEX_MONITOR_COLLECTOR_TOKEN`
+- `CODEX_MONITOR_INGEST_TOKEN`
+- `CODEX_MONITOR_API_TOKEN`
+
+Token 建议通过环境变量提供。后台模式会把 Token 放进子进程环境，而不会把它们加入常驻进程的命令行。
+
+如果希望每台服务器使用不同的写入 Token，可以在 VPS 创建仅服务账号可读的 JSON 文件：
+
+```json
+{
+  "server-a": "write-token-for-server-a",
+  "server-b": "write-token-for-server-b"
+}
+```
+
+然后用 `--ingest-token-file /path/to/collector-tokens.json` 启动聚合服务；此时各采集器的 `CODEX_MONITOR_COLLECTOR_TOKEN` 使用各自服务器对应的值。也可以设置 `CODEX_MONITOR_INGEST_TOKEN_FILE`。
+
 ## Windows 悬浮窗
 
 Windows 前端在 `windows/CodexMonitorWidget`。它是一个轻量原生 Win32 小型矩形
@@ -143,6 +216,14 @@ exe 会直接退出，不会打开第二个悬浮窗。它会轮询 `/api/sessio
 会动态展开并可打断正在进行的收纳动画；取消勾选后不会自动收纳。鼠标移到圆点上会
 显示 PID、状态、目录和启动时间。右键点击悬浮窗会打开菜单，可以调整显示大小、打开
 关于页面或退出程序。
+
+连接多服务器聚合服务时，悬浮窗按服务器和目录共同分组；存在多个服务器时，目录名前会显示服务器名，悬停详情也会显示服务器。读取 API 配置了 Bearer Token 时，可以设置：
+
+```powershell
+$env:CODEX_MONITOR_API_URL = "https://monitor.example.com/api/sessions"
+$env:CODEX_MONITOR_API_TOKEN = "replace-with-the-read-token"
+.\CodexMonitorWidget.exe
+```
 
 构建 Windows x64 exe：
 

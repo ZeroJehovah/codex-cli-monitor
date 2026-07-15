@@ -1,4 +1,4 @@
-"""Runtime monitoring helpers for local Codex CLI sessions."""
+"""Runtime monitoring and multi-server aggregation for Codex CLI sessions."""
 
 from .monitor import discover_sessions
 
