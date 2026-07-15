@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# VPS 聚合服务 systemd 安装脚本示例。
+# 使用方法：
+#   install -m 700 start-server.sh.example start-server.sh
+#   编辑下面的配置和 Token
+#   ./start-server.sh
+
+umask 077
+
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+chmod 700 "${BASH_SOURCE[0]}" 2>/dev/null || true
+DRY_RUN="${DRY_RUN:-0}"
+SERVICE_NAME="codex-monitor-aggregator.service"
+ENV_DIR="/etc/codex-cli-monitor"
+ENV_FILE="$ENV_DIR/aggregator.env"
+UNIT_FILE="/etc/systemd/system/$SERVICE_NAME"
+
+# 服务必须使用实际运行 Codex 的 Linux 用户，否则无法读取该用户的 Hook 和 session 状态。
+SERVICE_USER="${SUDO_USER:-$(id -un)}"
+
+SERVER_ID="vps"
+SERVER_NAME="My VPS"
+LISTEN_HOST="127.0.0.1" # 推荐改成 VPS 的 Tailscale/WireGuard IP。
+LISTEN_PORT="8765"
+REMOTE_TTL="5"
+LOCAL_CACHE_SECONDS="0.25"
+INSTALL_HOOKS="1"
+
+# 使用 `openssl rand -hex 32` 分别生成两个 Token。
+API_READ_TOKEN="REPLACE_WITH_FRONTEND_READ_TOKEN"
+COLLECTOR_WRITE_TOKEN="REPLACE_WITH_COLLECTOR_WRITE_TOKEN"
+
+fail() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+systemd_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
+[[ "$API_READ_TOKEN" != REPLACE_WITH_* ]] || fail "replace API_READ_TOKEN"
+[[ "$COLLECTOR_WRITE_TOKEN" != REPLACE_WITH_* ]] || fail "replace COLLECTOR_WRITE_TOKEN"
+[[ "$API_READ_TOKEN" =~ ^[A-Za-z0-9._~-]{16,}$ ]] || fail "API_READ_TOKEN contains unsupported characters or is too short"
+[[ "$COLLECTOR_WRITE_TOKEN" =~ ^[A-Za-z0-9._~-]{16,}$ ]] || fail "COLLECTOR_WRITE_TOKEN contains unsupported characters or is too short"
+[[ "$SERVER_ID" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] || fail "SERVER_ID is invalid"
+[[ "$SERVER_NAME" != *$'\n'* && "$SERVER_NAME" != *$'\r'* ]] || fail "SERVER_NAME contains a newline"
+[[ "$REPO_ROOT" != *[[:space:]]* ]] || fail "repository path must not contain whitespace"
+[[ "$LISTEN_HOST" != *[[:space:]]* ]] || fail "LISTEN_HOST must not contain whitespace"
+[[ "$LISTEN_PORT" =~ ^[0-9]+$ ]] || fail "LISTEN_PORT must be numeric"
+
+command -v systemctl >/dev/null || fail "systemd is required"
+command -v getent >/dev/null || fail "getent is required"
+PYTHON_BIN="$(command -v python3)" || fail "python3 is required"
+"$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' || fail "Python 3.10 or newer is required"
+id "$SERVICE_USER" >/dev/null 2>&1 || fail "service user does not exist: $SERVICE_USER"
+
+SERVICE_HOME="$(getent passwd "$SERVICE_USER" | cut -d: -f6)"
+SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
+[[ -n "$SERVICE_HOME" ]] || fail "could not resolve home for $SERVICE_USER"
+
+if ((EUID == 0)) || [[ "$DRY_RUN" == "1" ]]; then
+  SUDO=()
+else
+  command -v sudo >/dev/null || fail "sudo is required"
+  SUDO=(sudo)
+fi
+
+"${SUDO[@]}" systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+
+TMP_ENV="$(mktemp)"
+TMP_UNIT="$(mktemp)"
+trap 'rm -f "$TMP_ENV" "$TMP_UNIT"' EXIT
+
+{
+  printf 'CODEX_MONITOR_SERVER_ID=%s\n' "$(systemd_quote "$SERVER_ID")"
+  printf 'CODEX_MONITOR_SERVER_NAME=%s\n' "$(systemd_quote "$SERVER_NAME")"
+  printf 'CODEX_MONITOR_API_TOKEN=%s\n' "$(systemd_quote "$API_READ_TOKEN")"
+  printf 'CODEX_MONITOR_INGEST_TOKEN=%s\n' "$(systemd_quote "$COLLECTOR_WRITE_TOKEN")"
+} >"$TMP_ENV"
+
+cat >"$TMP_UNIT" <<EOF
+[Unit]
+Description=Codex CLI Monitor Aggregator
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_GROUP
+WorkingDirectory=$REPO_ROOT
+Environment=$(systemd_quote "HOME=$SERVICE_HOME")
+Environment=$(systemd_quote "PYTHONPATH=$REPO_ROOT/src")
+EnvironmentFile=$ENV_FILE
+ExecStart=$(systemd_quote "$PYTHON_BIN") -m codex_cli_monitor --serve --aggregate --host $LISTEN_HOST --port $LISTEN_PORT --remote-ttl $REMOTE_TTL --cache-seconds $LOCAL_CACHE_SECONDS
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  echo "dry run: environment file validated; token contents hidden" >&2
+  cat "$TMP_UNIT"
+  exit 0
+fi
+
+if [[ "$INSTALL_HOOKS" == "1" ]]; then
+  if [[ "$SERVICE_USER" == "$(id -un)" ]]; then
+    HOME="$SERVICE_HOME" PYTHONPATH="$REPO_ROOT/src" "$PYTHON_BIN" -m codex_cli_monitor.install_hooks --codex-home "$SERVICE_HOME/.codex" --repo-root "$REPO_ROOT"
+  else
+    "${SUDO[@]}" -u "$SERVICE_USER" env HOME="$SERVICE_HOME" PYTHONPATH="$REPO_ROOT/src" "$PYTHON_BIN" -m codex_cli_monitor.install_hooks --codex-home "$SERVICE_HOME/.codex" --repo-root "$REPO_ROOT"
+  fi
+fi
+
+# 停止旧的自管 daemon，避免它占用同一个端口或 PID 文件。
+if [[ "$SERVICE_USER" == "$(id -un)" ]]; then
+  HOME="$SERVICE_HOME" PYTHONPATH="$REPO_ROOT/src" "$PYTHON_BIN" -m codex_cli_monitor --stop || true
+else
+  "${SUDO[@]}" -u "$SERVICE_USER" env HOME="$SERVICE_HOME" PYTHONPATH="$REPO_ROOT/src" "$PYTHON_BIN" -m codex_cli_monitor --stop || true
+fi
+
+"${SUDO[@]}" systemctl disable --now codex-monitor-collector.service 2>/dev/null || true
+"${SUDO[@]}" install -d -m 0755 "$ENV_DIR"
+"${SUDO[@]}" install -m 0600 "$TMP_ENV" "$ENV_FILE"
+"${SUDO[@]}" install -m 0644 "$TMP_UNIT" "$UNIT_FILE"
+"${SUDO[@]}" systemctl daemon-reload
+"${SUDO[@]}" systemctl enable --now "$SERVICE_NAME"
+"${SUDO[@]}" systemctl is-active --quiet "$SERVICE_NAME" || fail "$SERVICE_NAME failed to start"
+
+echo "installed system service: $SERVICE_NAME"
+echo "aggregator API: http://$LISTEN_HOST:$LISTEN_PORT/api/sessions"
+echo "status: sudo systemctl status $SERVICE_NAME"
+echo "logs:   sudo journalctl -u $SERVICE_NAME -f"
+echo "open /hooks in running Codex sessions to review and trust the installed hooks"

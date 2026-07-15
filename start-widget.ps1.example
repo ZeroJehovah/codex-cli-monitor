@@ -1,0 +1,65 @@
+param(
+    [switch]$Launch
+)
+
+$ErrorActionPreference = "Stop"
+
+# Windows 悬浮窗登录启动任务示例。
+# 使用方法：
+#   Copy-Item .\start-widget.ps1.example .\start-widget.ps1
+#   编辑下面的地址和 Token
+#   powershell -ExecutionPolicy Bypass -File .\start-widget.ps1
+#
+# GUI 程序不能作为 Windows Service 显示在用户桌面，因此这里注册当前用户的登录计划任务。
+
+$ApiUrl = "https://REPLACE_WITH_AGGREGATOR_ADDRESS/api/sessions"
+$ApiToken = "REPLACE_WITH_FRONTEND_READ_TOKEN"
+$TaskName = "CodexMonitorWidget"
+$ExePath = Join-Path $PSScriptRoot "dist\CodexMonitorWidget-win-x64\CodexMonitorWidget.exe"
+$CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+
+if ($ApiUrl.Contains("REPLACE_WITH_")) {
+    throw "Replace ApiUrl in this script."
+}
+if ($ApiToken.StartsWith("REPLACE_WITH_")) {
+    throw "Replace ApiToken in this script."
+}
+if (-not (Test-Path -LiteralPath $ExePath)) {
+    throw "Widget executable not found: $ExePath"
+}
+
+if ($Launch) {
+    $env:CODEX_MONITOR_API_URL = $ApiUrl
+    $env:CODEX_MONITOR_API_TOKEN = $ApiToken
+    $Process = Start-Process -FilePath $ExePath -PassThru -Wait
+    exit $Process.ExitCode
+}
+
+# 限制实际配置脚本只允许当前用户读取，其中包含明文 Token。
+& icacls.exe $PSCommandPath /inheritance:r /grant:r "${CurrentUser}:(F)" | Out-Null
+
+$PowerShellExe = (Get-Command powershell.exe).Source
+$ActionArguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Launch"
+$Action = New-ScheduledTaskAction -Execute $PowerShellExe -Argument $ActionArguments
+$Trigger = New-ScheduledTaskTrigger -AtLogOn -User $CurrentUser
+$Principal = New-ScheduledTaskPrincipal -UserId $CurrentUser -LogonType Interactive -RunLevel Limited
+$Settings = New-ScheduledTaskSettingsSet `
+    -MultipleInstances IgnoreNew `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit (New-TimeSpan -Days 3650)
+
+Register-ScheduledTask `
+    -TaskName $TaskName `
+    -Action $Action `
+    -Trigger $Trigger `
+    -Principal $Principal `
+    -Settings $Settings `
+    -Description "Start Codex Monitor Widget at user logon" `
+    -Force | Out-Null
+
+Start-ScheduledTask -TaskName $TaskName
+
+Write-Host "Installed scheduled task: $TaskName"
+Write-Host "Status: Get-ScheduledTask -TaskName $TaskName"
+Write-Host "Remove: Unregister-ScheduledTask -TaskName $TaskName"
