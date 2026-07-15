@@ -124,60 +124,486 @@ PYTHONPATH=src python3 -m codex_cli_monitor --codex-home ~/.codex
 
 ## 多服务器部署
 
-多服务器模式使用同一个程序承担两个角色：
+多服务器部署包含三个端：
 
-- 采集器运行在每台 Codex 服务器上，继续读取本机 `/proc`、Hook 日志和 Codex session 文件，并异步推送最小状态快照。
-- 聚合服务通常运行在 VPS 上，接收远端快照，同时照常采集 VPS 本机的 Codex 状态，最终向前端返回合并结果。
+```text
+Linux 采集服务器 ─┐
+Linux 采集服务器 ─┼─ HTTP(S)/Tailscale ─ VPS 聚合服务 ─ Windows 悬浮窗
+VPS 本机 Codex  ──┘                     （同时采集 VPS 本机）
+```
 
-Hook 始终只写本地文件，不直接访问 VPS，因此 VPS 离线或网络抖动不会阻塞 Codex。建议让所有设备通过 Tailscale 或 WireGuard 互通，不要直接把未受防火墙保护的端口暴露到公网。
+- VPS 聚合服务接收远端快照，并使用相同的本地采集逻辑显示 VPS 自己的 Codex。
+- 每台 Linux 采集服务器只读取本机 `/proc`、Hook 日志和 Codex session 文件，然后异步推送最小状态快照。
+- Hook 始终只写本地文件，不直接访问 VPS；VPS 离线不会阻塞 Codex。
+- Windows 悬浮窗只访问聚合服务，不直接连接每台采集服务器。
 
-后端是纯 Python，不需要编译；VPS 和采集服务器只需要 Python 3.10 或更高版本以及 systemd。clone 仓库后，在 VPS 安装聚合系统服务：
+### 1. 部署前准备
+
+Linux 服务端和采集器是纯 Python，不需要编译，也不需要安装 Python 依赖包。每台 Linux 机器需要：
+
+- Python 3.10 或更高版本
+- systemd
+- `sudo`，或者直接使用 root 安装 systemd unit
+- `git`
+- 实际运行 Codex 的普通 Linux 用户
+- 推荐启用 NTP、systemd-timesyncd 或 chrony 时间同步
+
+检查环境：
+
+```bash
+python3 --version
+systemctl --version
+git --version
+timedatectl status
+```
+
+在 VPS 和每台采集服务器 clone 仓库：
+
+```bash
+git clone https://github.com/ZeroJehovah/codex-cli-monitor.git
+cd codex-cli-monitor
+```
+
+仓库跟踪三个模板：
+
+- `start-server.sh.example`：VPS 聚合服务安装脚本
+- `start-collector.sh.example`：Linux 采集器安装脚本
+- `start-widget.ps1.example`：Windows 登录计划任务安装脚本
+
+实际配置文件 `start-server.sh`、`start-collector.sh` 和 `start-widget.ps1` 已加入 `.gitignore`，可以写入真实 Token，不会被 Git 提交。
+
+### 2. 生成和分配 Token
+
+生成两个不同的随机 Token：
+
+```bash
+openssl rand -hex 32
+openssl rand -hex 32
+```
+
+Token 对应关系：
+
+```text
+VPS API_READ_TOKEN
+    └── Windows start-widget.ps1 中的 ApiToken
+
+VPS COLLECTOR_WRITE_TOKEN
+    └── 每台 Linux start-collector.sh 中的 COLLECTOR_WRITE_TOKEN
+```
+
+- 读取 Token 只给 Windows 前端或其他只读 API 客户端。
+- 写入 Token 只给采集器。
+- 不要把读取 Token 和写入 Token 设置成相同值。
+- 示例脚本只允许长度至少 16 的字母、数字、点、下划线、波浪号或短横线 Token；`openssl rand -hex 32` 的输出符合要求。
+
+### 3. 配置 VPS 聚合服务
+
+在 VPS 仓库根目录创建实际配置脚本：
 
 ```bash
 install -m 700 start-server.sh.example start-server.sh
 vim start-server.sh
+```
+
+需要修改的配置：
+
+| 配置 | 是否必须修改 | 说明 |
+|---|---:|---|
+| `SERVICE_USER` | 必须确认 | systemd 服务运行用户，必须是 VPS 上实际运行 Codex 的用户 |
+| `SERVER_ID` | 建议修改 | 全局唯一机器 ID，例如 `vps-main`，只能使用字母、数字、`.`、`_`、`:`、`-` |
+| `SERVER_NAME` | 建议修改 | Windows 前端显示名称，例如 `Tokyo VPS` |
+| `LISTEN_HOST` | 必须确认 | 推荐填写 VPS 的 Tailscale/WireGuard IP；`127.0.0.1` 只能供本机或反向代理访问 |
+| `LISTEN_PORT` | 可选 | 默认 `8765` |
+| `REMOTE_TTL` | 可选 | 远端采集器多久无更新后移除旧会话，默认 5 秒 |
+| `LOCAL_CACHE_SECONDS` | 可选 | VPS 本机扫描缓存，默认 0.25 秒 |
+| `INSTALL_HOOKS` | 可选 | `1` 表示自动安装本机 Hook，建议保持 `1` |
+| `API_READ_TOKEN` | 必须修改 | Windows 和只读 API 使用的 Token |
+| `COLLECTOR_WRITE_TOKEN` | 必须修改 | 所有采集器上报使用的 Token |
+
+`SERVICE_USER` 最重要。假设 Codex 是用户 `alice` 运行的，应配置：
+
+```bash
+SERVICE_USER="alice"
+```
+
+如果错误地使用 root，而 Codex 实际由普通用户运行，聚合服务会读取 root 的 `~/.codex` 和 Hook 日志，状态准确性会明显下降。
+
+监听示例：
+
+```bash
+# Tailscale 地址，推荐
+LISTEN_HOST="100.64.0.10"
+
+# 仅供同机 Caddy/Nginx 反向代理访问
+LISTEN_HOST="127.0.0.1"
+
+# 所有网卡；必须配合防火墙，通常不推荐直接暴露
+LISTEN_HOST="0.0.0.0"
+```
+
+可以先生成并验证 systemd unit，不修改系统：
+
+```bash
+DRY_RUN=1 ./start-server.sh >/tmp/codex-monitor-aggregator.service
+systemd-analyze verify /tmp/codex-monitor-aggregator.service
+```
+
+正式安装：
+
+```bash
 ./start-server.sh
 ```
 
-`start-server.sh` 中需要填写服务器标识、监听地址、前端读取 Token 和采集器写入 Token。脚本会安装本机 Hook、生成 `codex-monitor-aggregator.service`，将 Token 写入权限为 `0600` 的 `/etc/codex-cli-monitor/aggregator.env`，然后通过 systemd 启动并设置开机自启。服务会使用脚本中的 `SERVICE_USER` 运行；该用户必须与实际运行 Codex 的 Linux 用户一致。安装后仍需在已打开的 Codex 会话中执行 `/hooks` 完成信任确认。
+脚本会自动执行：
 
-查看聚合服务：
+1. 检查 Python 版本、systemd、用户和配置。
+2. 为 `SERVICE_USER` 安装 Codex Monitor Hook。
+3. 停止旧的自管 `--daemon` 进程。
+4. 停止同机的采集器 systemd 服务，避免端口和 PID 文件冲突。
+5. 写入 `/etc/codex-cli-monitor/aggregator.env`，权限为 `0600`。
+6. 写入 `/etc/systemd/system/codex-monitor-aggregator.service`。
+7. 执行 `systemctl enable --now`，设置开机启动并立即运行。
+
+检查服务：
 
 ```bash
 sudo systemctl status codex-monitor-aggregator.service
+sudo systemctl is-enabled codex-monitor-aggregator.service
+sudo systemctl is-active codex-monitor-aggregator.service
 sudo journalctl -u codex-monitor-aggregator.service -f
 ```
 
-监听地址最好填写 VPS 的 Tailscale/WireGuard 地址。如果必须通过公网访问，应在 Caddy、Nginx 等反向代理后提供 HTTPS，并配置防火墙和限流。
+健康检查不需要 Token：
 
-在其他 Linux 服务器安装采集系统服务：
+```bash
+curl http://100.64.0.10:8765/healthz
+```
+
+查询聚合会话需要读取 Token：
+
+```bash
+READ_TOKEN="填写 start-server.sh 中的 API_READ_TOKEN"
+
+curl \
+  -H "Authorization: Bearer $READ_TOKEN" \
+  http://100.64.0.10:8765/api/sessions
+```
+
+查询当前已连接服务器：
+
+```bash
+curl \
+  -H "Authorization: Bearer $READ_TOKEN" \
+  http://100.64.0.10:8765/api/servers
+```
+
+如果通过公网访问，应由 Caddy/Nginx 提供 HTTPS、证书、访问日志和限流。不要直接把无 TLS 的 Python HTTP 端口暴露到公网。
+
+### 4. 配置 Linux 采集器
+
+在每台非 VPS Codex 服务器的仓库根目录执行：
 
 ```bash
 install -m 700 start-collector.sh.example start-collector.sh
 vim start-collector.sh
+```
+
+需要修改的配置：
+
+| 配置 | 是否必须修改 | 说明 |
+|---|---:|---|
+| `SERVICE_USER` | 必须确认 | 必须是该服务器实际运行 Codex 的用户 |
+| `SERVER_ID` | 必须保证唯一 | 例如 `dev-01`、`gpu-server`，不能与 VPS 或其他采集器重复 |
+| `SERVER_NAME` | 建议修改 | Windows 前端显示名称 |
+| `AGGREGATOR_URL` | 必须修改 | 聚合服务根地址，例如 `http://100.64.0.10:8765` 或 `https://monitor.example.com` |
+| `COLLECTOR_WRITE_TOKEN` | 必须修改 | 必须与 VPS 的 `COLLECTOR_WRITE_TOKEN` 完全相同 |
+| `LISTEN_HOST` | 通常不改 | 本机诊断 API，建议保持 `127.0.0.1` |
+| `LISTEN_PORT` | 可选 | 本机诊断 API 端口，默认 `8765` |
+| `COLLECTOR_INTERVAL` | 可选 | 上报间隔，默认 0.5 秒 |
+| `LOCAL_CACHE_SECONDS` | 可选 | 本机扫描缓存，默认 0.25 秒 |
+| `INSTALL_HOOKS` | 可选 | `1` 表示自动安装本机 Hook，建议保持 `1` |
+
+Tailscale 直连示例：
+
+```bash
+AGGREGATOR_URL="http://100.64.0.10:8765"
+```
+
+公网反向代理示例：
+
+```bash
+AGGREGATOR_URL="https://monitor.example.com"
+```
+
+程序在根地址后自动追加 `/api/collector/snapshot`。也可以直接填写完整上报端点。
+
+先进行 dry-run：
+
+```bash
+DRY_RUN=1 ./start-collector.sh >/tmp/codex-monitor-collector.service
+systemd-analyze verify /tmp/codex-monitor-collector.service
+```
+
+正式安装：
+
+```bash
 ./start-collector.sh
 ```
 
-脚本会安装本机 Hook，并生成、启用 `codex-monitor-collector.service`。采集器默认每 0.5 秒发送一次当前快照；聚合服务默认 5 秒没有收到更新就从活动结果中移除该服务器的旧会话。安装后仍需在已打开的 Codex 会话中执行 `/hooks` 完成信任确认。
+脚本会安装 Hook、将 Token 写入 `/etc/codex-cli-monitor/collector.env`，并创建、启用：
+
+```text
+/etc/systemd/system/codex-monitor-collector.service
+```
+
+检查采集器：
 
 ```bash
 sudo systemctl status codex-monitor-collector.service
+sudo systemctl is-enabled codex-monitor-collector.service
+sudo systemctl is-active codex-monitor-collector.service
 sudo journalctl -u codex-monitor-collector.service -f
 ```
 
-查询带读取鉴权的聚合 API：
+本机诊断 API：
 
 ```bash
-curl \
-  -H "Authorization: Bearer $CODEX_MONITOR_API_TOKEN" \
-  http://100.64.0.10:8765/api/sessions
+curl http://127.0.0.1:8765/healthz
+curl http://127.0.0.1:8765/api/sessions
 ```
 
-聚合结果中的每个 session 会增加 `server_id`、`server_name`、`server_boot_id`、跨服务器唯一的 `session_key` 和 `server_observed_at`。顶层还会返回 `server_count` 和 `servers`。不同服务器上相同的 PID 或相同目录不会被合并为同一会话。
+在 VPS 查询 `/api/servers`，应当能看到该采集器的 `SERVER_ID`。如果采集器断联超过 `REMOTE_TTL`，聚合端会移除它的旧会话。
 
-各服务器应启用 NTP 时间同步；跨服务器的进程开始时间和界面排序仍以各机器报告的系统时间为准。
+### 5. 配置和信任 Codex Hook
 
-仓库提交 `.example` 模板，但忽略没有 `.example` 后缀的本地脚本。因此 `start-server.sh`、`start-collector.sh` 和 `start-widget.ps1` 可以保存真实 Token，不会被 Git 提交。
+聚合服务和采集器安装脚本默认都会为 `SERVICE_USER` 执行 Hook 安装。也可以手动安装：
+
+```bash
+./bin/codex-monitor-install-hooks
+```
+
+指定其他 Codex 用户目录：
+
+```bash
+./bin/codex-monitor-install-hooks \
+  --codex-home /home/alice/.codex \
+  --repo-root "$PWD"
+```
+
+Hook 配置文件默认位置：
+
+```text
+~/.codex/hooks.json
+```
+
+Hook 生命周期日志默认位置：
+
+```text
+~/.local/state/codex-cli-monitor/hooks.jsonl
+```
+
+安装配置后，在每个已经打开或新打开的 Codex CLI 中执行：
+
+```text
+/hooks
+```
+
+按 Codex 提示 review/trust 新 Hook。这个信任步骤不能由 systemd 安装脚本绕过。
+
+检查 Hook 是否产生事件：
+
+```bash
+tail -f ~/.local/state/codex-cli-monitor/hooks.jsonl
+```
+
+如果移动了仓库目录，必须重新运行对应安装脚本或 `codex-monitor-install-hooks`，因为 Hook 命令中记录了仓库的绝对路径。
+
+同一台机器如果有多个 Linux 用户分别运行 Codex，需要为每个用户分别安装 Hook 和采集服务，并使用不同的 systemd unit 名称、PID 文件和本机 API 端口；默认模板针对一个 Codex 用户设计。
+
+### 6. 配置 Windows 悬浮窗
+
+Windows 前端需要先存在以下文件：
+
+```text
+dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe
+```
+
+`dist` 被 Git 忽略，因此全新 clone 不会自带 exe。可以从已经构建的机器复制该目录，或者按照后文“构建 Windows x64 exe”步骤在 Linux/WSL 构建。
+
+创建实际配置脚本：
+
+```powershell
+Copy-Item .\start-widget.ps1.example .\start-widget.ps1
+notepad .\start-widget.ps1
+```
+
+修改：
+
+| 配置 | 说明 |
+|---|---|
+| `$ApiUrl` | 聚合读取地址，必须包含 `/api/sessions` |
+| `$ApiToken` | 必须等于 VPS 的 `API_READ_TOKEN` |
+| `$TaskName` | 计划任务名称，默认 `CodexMonitorWidget` |
+| `$ExePath` | 前端 exe 路径，默认使用仓库 `dist` 目录 |
+
+示例：
+
+```powershell
+$ApiUrl = "https://monitor.example.com/api/sessions"
+$ApiToken = "填写 VPS 的 API_READ_TOKEN"
+```
+
+注册当前用户登录计划任务并立即启动：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start-widget.ps1
+```
+
+Windows GUI 不能作为 Windows Service 显示在用户桌面，因此脚本使用当前用户登录计划任务。脚本会限制自身 ACL，因为其中保存了明文读取 Token。
+
+管理计划任务：
+
+```powershell
+Get-ScheduledTask -TaskName CodexMonitorWidget
+Start-ScheduledTask -TaskName CodexMonitorWidget
+Stop-ScheduledTask -TaskName CodexMonitorWidget
+Unregister-ScheduledTask -TaskName CodexMonitorWidget
+```
+
+前端本身具有单实例保护；重复启动不会出现多个悬浮窗。
+
+### 7. 服务管理
+
+聚合服务：
+
+```bash
+sudo systemctl start codex-monitor-aggregator.service
+sudo systemctl stop codex-monitor-aggregator.service
+sudo systemctl restart codex-monitor-aggregator.service
+sudo systemctl enable codex-monitor-aggregator.service
+sudo systemctl disable codex-monitor-aggregator.service
+```
+
+采集器：
+
+```bash
+sudo systemctl start codex-monitor-collector.service
+sudo systemctl stop codex-monitor-collector.service
+sudo systemctl restart codex-monitor-collector.service
+sudo systemctl enable codex-monitor-collector.service
+sudo systemctl disable codex-monitor-collector.service
+```
+
+### 8. 更新代码
+
+systemd 服务直接使用 clone 仓库中的 `src`。更新代码后必须重启对应服务：
+
+VPS：
+
+```bash
+cd /path/to/codex-cli-monitor
+git pull --ff-only
+sudo systemctl restart codex-monitor-aggregator.service
+sudo systemctl status codex-monitor-aggregator.service
+```
+
+采集服务器：
+
+```bash
+cd /path/to/codex-cli-monitor
+git pull --ff-only
+sudo systemctl restart codex-monitor-collector.service
+sudo systemctl status codex-monitor-collector.service
+```
+
+如果模板、服务参数、仓库位置或 Hook 配置发生变化，应重新检查实际脚本并再次运行：
+
+```bash
+./start-server.sh
+# 或
+./start-collector.sh
+```
+
+不要直接删除或移动正在被 systemd 和 Hook 使用的仓库目录。
+
+### 9. 卸载
+
+卸载 VPS 聚合服务：
+
+```bash
+sudo systemctl disable --now codex-monitor-aggregator.service
+sudo rm -f /etc/systemd/system/codex-monitor-aggregator.service
+sudo rm -f /etc/codex-cli-monitor/aggregator.env
+sudo systemctl daemon-reload
+```
+
+卸载采集器：
+
+```bash
+sudo systemctl disable --now codex-monitor-collector.service
+sudo rm -f /etc/systemd/system/codex-monitor-collector.service
+sudo rm -f /etc/codex-cli-monitor/collector.env
+sudo systemctl daemon-reload
+```
+
+删除 systemd 服务不会自动删除 `~/.codex/hooks.json` 中的 Monitor Hook。需要移除时，应编辑该文件并删除包含 `codex_cli_monitor.hooks` 的 Monitor 项，保留其他项目自己的 Hook。
+
+### 10. 常见问题
+
+#### 聚合 API 返回 401
+
+- Windows 或 curl 使用的 Token 必须等于 VPS 的 `API_READ_TOKEN`。
+- 采集器上报使用的是另一个 `COLLECTOR_WRITE_TOKEN`，不能用来读取 API。
+- 修改 Token 后重新运行安装脚本，或更新 `/etc/codex-cli-monitor/*.env` 后重启服务。
+
+#### VPS 看不到采集服务器
+
+依次检查：
+
+```bash
+sudo systemctl status codex-monitor-collector.service
+sudo journalctl -u codex-monitor-collector.service -n 100 --no-pager
+curl http://127.0.0.1:8765/healthz
+```
+
+然后检查采集器是否能访问 VPS：
+
+```bash
+curl http://VPS地址:8765/healthz
+```
+
+常见原因包括写入 Token 不一致、URL 错误、VPS 只监听 `127.0.0.1`、防火墙阻止端口、HTTPS 证书无效或服务器 ID 重复。
+
+#### 状态一直不准确或一直显示成功
+
+- 确认 systemd 服务的 `SERVICE_USER` 与运行 Codex 的用户一致。
+- 在 Codex 中执行 `/hooks` 并确认 Hook 已受信任。
+- 检查 Hook 日志是否更新。
+- 检查 `~/.codex` 是否属于正确用户。
+- 如果移动过仓库，重新安装 Hook。
+
+#### 服务无法启动
+
+```bash
+sudo systemctl status codex-monitor-aggregator.service
+sudo journalctl -u codex-monitor-aggregator.service -n 100 --no-pager
+
+# 采集器则替换服务名
+sudo systemctl status codex-monitor-collector.service
+```
+
+常见原因包括端口已被占用、Python 版本过低、仓库路径被移动、`SERVICE_USER` 不存在、Token 仍是占位符或 Tailscale IP 尚未就绪。
+
+#### 安全建议
+
+- 保持实际脚本权限为 `0700`。
+- 保持 `/etc/codex-cli-monitor/*.env` 权限为 `0600`。
+- 优先使用 Tailscale/WireGuard 私网。
+- 公网访问必须使用 HTTPS、反向代理、防火墙和限流。
+- 不要把真实 Token 写入 `.example` 文件或 README。
+- 定期轮换 Token；轮换后更新两端配置并重启服务。
+
+聚合结果中的每个 session 包含 `server_id`、`server_name`、`server_boot_id`、跨服务器唯一的 `session_key` 和 `server_observed_at`。不同服务器上相同的 PID 或相同目录不会被当作同一会话。
 
 ## Windows 悬浮窗
 
