@@ -6,6 +6,7 @@
 #include <winhttp.h>
 #include <ctype.h>
 #include <float.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -56,6 +57,8 @@ typedef struct Session {
     char status[32];
     char directory[512];
     char started_at_iso[64];
+    char server_id[128];
+    char server_name[128];
 } Session;
 
 typedef struct FetchResult {
@@ -67,6 +70,8 @@ typedef struct FetchResult {
 
 typedef struct DirectoryRow {
     char directory[512];
+    char server_id[128];
+    char server_name[128];
     int session_indexes[MAX_SESSIONS];
     int session_count;
     int original_order;
@@ -82,6 +87,7 @@ typedef struct AppState {
     HWND tooltip;
     HFONT font;
     wchar_t api_url[1024];
+    wchar_t api_token[512];
     wchar_t tooltip_text[1024];
     TOOLINFOW tooltip_info;
     Session sessions[MAX_SESSIONS];
@@ -203,6 +209,43 @@ static void directory_display_name(const char *directory, char *target, int targ
     }
     memcpy(target, directory + start, end - start);
     target[end - start] = '\0';
+}
+
+static int has_multiple_servers(void) {
+    int left;
+    for (left = 0; left < g_app.session_count; left++) {
+        int right;
+        const char *left_id = g_app.sessions[left].server_id;
+        const char *left_name = g_app.sessions[left].server_name;
+        for (right = left + 1; right < g_app.session_count; right++) {
+            const char *right_id = g_app.sessions[right].server_id;
+            const char *right_name = g_app.sessions[right].server_name;
+            if (left_id[0] != '\0' || right_id[0] != '\0') {
+                if (strcmp(left_id, right_id) != 0) {
+                    return 1;
+                }
+            } else if (strcmp(left_name, right_name) != 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void row_display_name(const DirectoryRow *row, char *target, int target_count) {
+    char directory_name[512];
+    const char *server_name;
+    directory_display_name(row->directory, directory_name, sizeof(directory_name));
+    if (!has_multiple_servers()) {
+        copy_ascii(target, target_count, directory_name);
+        return;
+    }
+    server_name = row->server_name[0] ? row->server_name : row->server_id;
+    if (server_name[0] == '\0') {
+        server_name = "server";
+    }
+    snprintf(target, target_count - 1, "%s: %s", server_name, directory_name);
+    target[target_count - 1] = '\0';
 }
 
 static int display_size_count(void) {
@@ -968,10 +1011,10 @@ static void update_directory_column_width(void) {
     }
     old_font = SelectObject(hdc, widget_font());
     for (row = 0; row < g_app.row_count; row++) {
-        char display_name[512];
-        wchar_t display_name_wide[512];
+        char display_name[768];
+        wchar_t display_name_wide[768];
         SIZE size;
-        directory_display_name(g_app.rows[row].directory, display_name, sizeof(display_name));
+        row_display_name(&g_app.rows[row], display_name, sizeof(display_name));
         utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
         if (GetTextExtentPoint32W(hdc, display_name_wide, (int)wcslen(display_name_wide), &size) &&
             size.cx > max_width) {
@@ -1115,7 +1158,8 @@ static void rebuild_directory_rows(void) {
         int row;
         int target_row = -1;
         for (row = 0; row < g_app.row_count; row++) {
-            if (strcmp(g_app.rows[row].directory, directory) == 0) {
+            if (strcmp(g_app.rows[row].directory, directory) == 0 &&
+                strcmp(g_app.rows[row].server_id, session->server_id) == 0) {
                 target_row = row;
                 break;
             }
@@ -1127,6 +1171,8 @@ static void rebuild_directory_rows(void) {
             target_row = g_app.row_count++;
             ZeroMemory(&g_app.rows[target_row], sizeof(g_app.rows[target_row]));
             copy_ascii(g_app.rows[target_row].directory, sizeof(g_app.rows[target_row].directory), directory);
+            copy_ascii(g_app.rows[target_row].server_id, sizeof(g_app.rows[target_row].server_id), session->server_id);
+            copy_ascii(g_app.rows[target_row].server_name, sizeof(g_app.rows[target_row].server_name), session->server_name);
             g_app.rows[target_row].original_order = target_row;
         }
         if (g_app.rows[target_row].session_count < MAX_SESSIONS) {
@@ -1329,6 +1375,8 @@ static void parse_session_object(const char *start, const char *end, Session *se
     parse_json_string(find_top_level_key(start, end, "status"), end, session->status, sizeof(session->status));
     parse_json_string(find_top_level_key(start, end, "directory"), end, session->directory, sizeof(session->directory));
     parse_json_string(find_top_level_key(start, end, "started_at_iso"), end, session->started_at_iso, sizeof(session->started_at_iso));
+    parse_json_string(find_top_level_key(start, end, "server_id"), end, session->server_id, sizeof(session->server_id));
+    parse_json_string(find_top_level_key(start, end, "server_name"), end, session->server_name, sizeof(session->server_name));
 }
 
 static void parse_sessions_json(const char *json, FetchResult *result) {
@@ -1422,6 +1470,9 @@ static int fetch_json(char **json, char *error, int error_count) {
     DWORD status_size = sizeof(status_code);
     DWORD total = 0;
     int ok = 0;
+    wchar_t authorization[640];
+    LPCWSTR additional_headers = WINHTTP_NO_ADDITIONAL_HEADERS;
+    DWORD additional_headers_length = 0;
     *json = NULL;
 
     ZeroMemory(&parts, sizeof(parts));
@@ -1455,7 +1506,14 @@ static int fetch_json(char **json, char *error, int error_count) {
         copy_ascii(error, error_count, "WinHttpOpenRequest failed");
         goto cleanup;
     }
-    if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+    if (g_app.api_token[0] != L'\0') {
+        _snwprintf(authorization, sizeof(authorization) / sizeof(authorization[0]) - 1,
+            L"Authorization: Bearer %ls\r\n", g_app.api_token);
+        authorization[sizeof(authorization) / sizeof(authorization[0]) - 1] = L'\0';
+        additional_headers = authorization;
+        additional_headers_length = (DWORD)-1L;
+    }
+    if (!WinHttpSendRequest(request, additional_headers, additional_headers_length, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(request, NULL)) {
         copy_ascii(error, error_count, "API request failed");
         goto cleanup;
@@ -1742,14 +1800,17 @@ static void set_tooltip_for_hover(int index) {
     wchar_t status[64];
     wchar_t directory[512];
     wchar_t started[128];
+    wchar_t server[256];
     if (index >= 0 && index < g_app.session_count) {
         Session *session = &g_app.sessions[index];
         utf8_to_wide(session->status, status, (int)(sizeof(status) / sizeof(status[0])));
         utf8_to_wide(session->directory[0] ? session->directory : "-", directory, (int)(sizeof(directory) / sizeof(directory[0])));
         utf8_to_wide(session->started_at_iso[0] ? session->started_at_iso : "-", started, (int)(sizeof(started) / sizeof(started[0])));
+        utf8_to_wide(session->server_name[0] ? session->server_name : (session->server_id[0] ? session->server_id : "-"),
+            server, (int)(sizeof(server) / sizeof(server[0])));
         _snwprintf(g_app.tooltip_text, sizeof(g_app.tooltip_text) / sizeof(g_app.tooltip_text[0]) - 1,
-            L"PID: %d\nStatus: %ls\nDirectory: %ls\nStarted: %ls",
-            session->pid, status, directory, started);
+            L"Server: %ls\nPID: %d\nStatus: %ls\nDirectory: %ls\nStarted: %ls",
+            server, session->pid, status, directory, started);
     } else if (g_app.last_error[0] != '\0') {
         wchar_t error_text[512];
         utf8_to_wide(g_app.last_error, error_text, (int)(sizeof(error_text) / sizeof(error_text[0])));
@@ -2219,8 +2280,8 @@ static void paint_widget(HWND hwnd, HDC hdc) {
     for (row = 0; row < g_app.row_count; row++) {
         RECT row_rect;
         RECT text_rect;
-        char display_name[512];
-        wchar_t display_name_wide[512];
+        char display_name[768];
+        wchar_t display_name_wide[768];
         int dot;
         COLORREF row_color = RGB(34, 34, 34);
         row_rect.left = 0;
@@ -2233,7 +2294,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
             FillRect(hdc, &row_rect, row_background);
             DeleteObject(row_background);
         }
-        directory_display_name(g_app.rows[row].directory, display_name, sizeof(display_name));
+        row_display_name(&g_app.rows[row], display_name, sizeof(display_name));
         utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
         text_rect.left = directory_column_left();
         text_rect.top = row_rect.top;
@@ -2471,6 +2532,7 @@ static void resolve_api_url(void) {
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     DWORD env_len;
     wchar_t env_url[1024];
+    wchar_t env_token[512];
     if (argc > 1 && argv != NULL) {
         copy_wide(g_app.api_url, (int)(sizeof(g_app.api_url) / sizeof(g_app.api_url[0])), argv[1]);
     } else {
@@ -2489,6 +2551,10 @@ static void resolve_api_url(void) {
         _snwprintf(with_scheme, sizeof(with_scheme) / sizeof(with_scheme[0]) - 1, L"http://%ls", g_app.api_url);
         with_scheme[sizeof(with_scheme) / sizeof(with_scheme[0]) - 1] = L'\0';
         copy_wide(g_app.api_url, (int)(sizeof(g_app.api_url) / sizeof(g_app.api_url[0])), with_scheme);
+    }
+    env_len = GetEnvironmentVariableW(L"CODEX_MONITOR_API_TOKEN", env_token, (DWORD)(sizeof(env_token) / sizeof(env_token[0])));
+    if (env_len > 0 && env_len < sizeof(env_token) / sizeof(env_token[0])) {
+        copy_wide(g_app.api_token, (int)(sizeof(g_app.api_token) / sizeof(g_app.api_token[0])), env_token);
     }
 }
 

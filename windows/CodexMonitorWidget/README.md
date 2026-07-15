@@ -30,6 +30,9 @@ x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
 
 The widget polls `http://localhost:8765/api/sessions` by default. To use another
 endpoint, pass it as the first argument or set `CODEX_MONITOR_API_URL`.
+When the API requires a Bearer token, set `CODEX_MONITOR_API_TOKEN`; the token is
+sent in the `Authorization` header and is not accepted as a command-line
+argument.
 
 The floating panel is a headerless table grouped by directory. Each row shows
 the directory name in the first column and one or more softened-edge process
@@ -44,6 +47,10 @@ the widget can animate into a compact dot-only view immediately after the
 pointer leaves. Moving the pointer back over the widget interrupts the tuck
 animation and expands the directory names again. The right-click menu has a
 checked edge-tuck option; clearing it disables automatic tucking.
+
+For an aggregated multi-server response, rows are grouped by both server id and
+directory. When more than one server is present, the visible row label is
+prefixed with the server name and the hover details include the server name.
 
 Right-click the floating widget to change display size, open the About page, or
 choose Exit to close it.

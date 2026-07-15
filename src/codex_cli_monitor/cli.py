@@ -10,13 +10,22 @@ import sys
 import time
 from pathlib import Path
 
-from .api import DEFAULT_API_HOST, DEFAULT_API_PORT, ApiConfig, serve_api
+from .api import (
+    DEFAULT_API_HOST,
+    DEFAULT_API_PORT,
+    DEFAULT_COLLECTOR_INTERVAL_SECONDS,
+    DEFAULT_LOCAL_CACHE_SECONDS,
+    DEFAULT_REMOTE_TTL_SECONDS,
+    ApiConfig,
+    serve_api,
+)
 from .monitor import inspect_runtime
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    _validate_args(parser, args)
 
     if args.stop:
         return _stop_daemon(args.pid_file)
@@ -135,7 +144,92 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="daemon stdout/stderr log file path",
     )
+    parser.add_argument(
+        "--aggregate",
+        action="store_true",
+        help="receive remote collector snapshots and merge them with local sessions",
+    )
+    parser.add_argument(
+        "--server-id",
+        default=os.environ.get("CODEX_MONITOR_SERVER_ID"),
+        help="stable unique server id; defaults to CODEX_MONITOR_SERVER_ID or hostname",
+    )
+    parser.add_argument(
+        "--server-name",
+        default=os.environ.get("CODEX_MONITOR_SERVER_NAME"),
+        help="display name; defaults to CODEX_MONITOR_SERVER_NAME or hostname",
+    )
+    parser.add_argument(
+        "--api-token",
+        default=os.environ.get("CODEX_MONITOR_API_TOKEN"),
+        help="Bearer token for read APIs; prefer CODEX_MONITOR_API_TOKEN",
+    )
+    parser.add_argument(
+        "--ingest-token",
+        default=os.environ.get("CODEX_MONITOR_INGEST_TOKEN"),
+        help="Bearer token accepted from collectors; prefer CODEX_MONITOR_INGEST_TOKEN",
+    )
+    parser.add_argument(
+        "--ingest-token-file",
+        type=Path,
+        default=Path(os.environ["CODEX_MONITOR_INGEST_TOKEN_FILE"])
+        if os.environ.get("CODEX_MONITOR_INGEST_TOKEN_FILE")
+        else None,
+        help="JSON object mapping server ids to collector tokens",
+    )
+    parser.add_argument(
+        "--collector-url",
+        default=os.environ.get("CODEX_MONITOR_AGGREGATOR_URL"),
+        help="aggregator base URL or /api/collector/snapshot endpoint",
+    )
+    parser.add_argument(
+        "--collector-token",
+        default=os.environ.get("CODEX_MONITOR_COLLECTOR_TOKEN"),
+        help="collector Bearer token; prefer CODEX_MONITOR_COLLECTOR_TOKEN",
+    )
+    parser.add_argument(
+        "--collector-interval",
+        type=_positive_float,
+        default=DEFAULT_COLLECTOR_INTERVAL_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "seconds between collector snapshots; defaults to "
+            f"{DEFAULT_COLLECTOR_INTERVAL_SECONDS}"
+        ),
+    )
+    parser.add_argument(
+        "--remote-ttl",
+        type=_positive_float,
+        default=DEFAULT_REMOTE_TTL_SECONDS,
+        metavar="SECONDS",
+        help=f"remote snapshot TTL; defaults to {DEFAULT_REMOTE_TTL_SECONDS}",
+    )
+    parser.add_argument(
+        "--cache-seconds",
+        type=_non_negative_float,
+        default=DEFAULT_LOCAL_CACHE_SECONDS,
+        metavar="SECONDS",
+        help=f"local scan cache lifetime; defaults to {DEFAULT_LOCAL_CACHE_SECONDS}",
+    )
     return parser
+
+
+def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if not (args.serve or args.daemon):
+        return
+    args.ingest_tokens = {}
+    if args.ingest_token_file is not None:
+        try:
+            args.ingest_tokens = _load_ingest_tokens(args.ingest_token_file)
+        except ValueError as error:
+            parser.error(str(error))
+    if args.aggregate and not args.ingest_token and not args.ingest_tokens:
+        parser.error("--aggregate requires an ingest token or ingest token file")
+    if args.collector_url and not args.collector_token:
+        parser.error(
+            "--collector-url requires --collector-token or "
+            "CODEX_MONITOR_COLLECTOR_TOKEN"
+        )
 
 
 def _non_negative_float(value: str) -> float:
@@ -181,6 +275,17 @@ def _serve(args: argparse.Namespace) -> int:
                 shim_log=args.shim_log,
                 codex_home=args.codex_home,
                 hook_log=args.hook_log,
+                aggregate=args.aggregate,
+                server_id=args.server_id,
+                server_name=args.server_name,
+                api_token=args.api_token,
+                ingest_token=args.ingest_token,
+                ingest_tokens=args.ingest_tokens,
+                remote_ttl_seconds=args.remote_ttl,
+                local_cache_seconds=args.cache_seconds,
+                collector_url=args.collector_url,
+                collector_token=args.collector_token,
+                collector_interval_seconds=args.collector_interval,
             ),
         )
     finally:
@@ -215,13 +320,34 @@ def _start_daemon(args: argparse.Namespace) -> int:
         str(args.proc_root),
         "--pid-file",
         str(pid_file),
+        "--remote-ttl",
+        str(args.remote_ttl),
+        "--cache-seconds",
+        str(args.cache_seconds),
+        "--collector-interval",
+        str(args.collector_interval),
     ]
+    if args.aggregate:
+        command.append("--aggregate")
+    if args.server_id is not None:
+        command.extend(["--server-id", args.server_id])
+    if args.server_name is not None:
+        command.extend(["--server-name", args.server_name])
+    if args.collector_url is not None:
+        command.extend(["--collector-url", args.collector_url])
+    if args.ingest_token_file is not None:
+        command.extend(["--ingest-token-file", str(args.ingest_token_file)])
     if args.shim_log is not None:
         command.extend(["--shim-log", str(args.shim_log)])
     if args.codex_home is not None:
         command.extend(["--codex-home", str(args.codex_home)])
     if args.hook_log is not None:
         command.extend(["--hook-log", str(args.hook_log)])
+
+    child_env = os.environ.copy()
+    _set_secret_env(child_env, "CODEX_MONITOR_API_TOKEN", args.api_token)
+    _set_secret_env(child_env, "CODEX_MONITOR_INGEST_TOKEN", args.ingest_token)
+    _set_secret_env(child_env, "CODEX_MONITOR_COLLECTOR_TOKEN", args.collector_token)
 
     with log_file.open("ab") as log_handle:
         process = subprocess.Popen(
@@ -230,6 +356,7 @@ def _start_daemon(args: argparse.Namespace) -> int:
             stdout=log_handle,
             stderr=log_handle,
             start_new_session=True,
+            env=child_env,
         )
     time.sleep(0.2)
     if process.poll() is not None:
@@ -243,9 +370,34 @@ def _start_daemon(args: argparse.Namespace) -> int:
         f"codex-monitor API started with PID {process.pid} at "
         f"http://{args.host}:{args.port}"
     )
+    print(f"mode: {'aggregator' if args.aggregate else 'collector'}")
     print(f"pid file: {pid_file}")
     print(f"log file: {log_file}")
     return 0
+
+
+def _set_secret_env(env: dict[str, str], name: str, value: str | None) -> None:
+    if value:
+        env[name] = value
+    else:
+        env.pop(name, None)
+
+
+def _load_ingest_tokens(path: Path) -> dict[str, str]:
+    try:
+        payload = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ValueError(f"could not read ingest token file: {error}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"ingest token file is not valid JSON: {error}") from error
+    if not isinstance(payload, dict) or not payload:
+        raise ValueError("ingest token file must be a non-empty JSON object")
+    tokens = {}
+    for server_id, token in payload.items():
+        if not isinstance(server_id, str) or not isinstance(token, str) or not token:
+            raise ValueError("ingest token file entries must map server ids to tokens")
+        tokens[server_id] = token
+    return tokens
 
 
 def _stop_daemon(path: Path | None) -> int:
