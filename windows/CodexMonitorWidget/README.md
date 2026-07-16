@@ -44,9 +44,11 @@ The floating panel is a headerless table grouped by directory. Each row shows
 the directory name in the first column and one or more softened-edge process
 status dots in the second column. A colored vertical bar at the far left of
 each row identifies the server without prefixing the directory label. Colors
-are randomly selected from a high-contrast preset palette, remain stable while
-the server has any visible sessions, and are released after all sessions from
-that server disappear. The table width is calculated from the
+are randomly selected from a high-contrast gold, purple, magenta, and neutral
+preset palette that avoids the blue, green, and red process-status colors and
+nearby hues. They remain stable while the server has any visible sessions and
+are released after all sessions from that server disappear. The table width is
+calculated from the
 visible directory names and status dots instead of reserving a large fixed
 directory column. Running sessions are shown with a blue breathing glow,
 successful or idle sessions are green, and failed sessions are red; non-running
@@ -54,9 +56,12 @@ status dots remain static. The widget saves its last position and display size,
 restores them on launch, and keeps dynamic size changes inside the visible work
 area by anchoring to the touched edge. When attached to the left or right edge,
 the widget can animate into a compact view immediately after the pointer
-leaves. This hides only the directory names; the server color bars and status
-dots remain visible. Moving the pointer back over the widget interrupts the
-tuck animation and expands the directory names again. The right-click menu has a
+leaves. This hides only the directory names; the server color bars remain, and
+the process status dots smoothly morph into narrow vertical capsule bars to
+reduce width. A running blue bar keeps the same breathing glow as the expanded
+running dot. Moving the pointer back over the widget interrupts the tuck
+animation and expands the directory names and circular dots again. The
+right-click menu has a
 checked edge-tuck option; clearing it disables automatic tucking.
 
 For an aggregated multi-server response, rows are grouped by both server id and

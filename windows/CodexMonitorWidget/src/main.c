@@ -37,8 +37,13 @@
 #define RUNNING_DOT_SOFT_EDGE 1
 #define STATIC_DOT_SOFT_EDGE 2
 #define RUNNING_SHADOW_SPREAD 6
+#define STATUS_BAR_WIDTH 5
+#define STATUS_BAR_HEIGHT 22
+#define STATUS_BAR_GAP 6
+#define STATUS_BAR_SOFT_EDGE 1
+#define STATUS_BAR_SHADOW_SPREAD 2
 #define SERVER_COLOR_BAR_WIDTH 3
-#define SERVER_COLOR_COUNT 10
+#define SERVER_COLOR_COUNT 7
 #define ROW_HEIGHT 26
 #define PANEL_PADDING_Y 1
 #define MIN_PANEL_WIDTH 48
@@ -133,16 +138,13 @@ static const char STATUS_SUCCESS[] = "\xe6\x88\x90\xe5\x8a\x9f";
 static const char STATUS_FAILED[] = "\xe5\xa4\xb1\xe8\xb4\xa5";
 static const int DISPLAY_FONT_SIZES[] = {8, 9, 10, 11, 12, 14, 16};
 static const COLORREF SERVER_COLORS[SERVER_COLOR_COUNT] = {
-    RGB(78, 121, 167),
-    RGB(242, 142, 43),
-    RGB(225, 87, 89),
-    RGB(118, 183, 178),
-    RGB(89, 161, 79),
-    RGB(237, 201, 72),
-    RGB(176, 122, 161),
-    RGB(255, 157, 167),
-    RGB(156, 117, 95),
-    RGB(105, 190, 220),
+    RGB(217, 217, 217),
+    RGB(238, 43, 189),
+    RGB(238, 176, 43),
+    RGB(226, 156, 226),
+    RGB(157, 43, 238),
+    RGB(236, 225, 147),
+    RGB(140, 140, 140),
 };
 
 static AppState g_app;
@@ -298,6 +300,26 @@ static int ui_running_shadow_spread(void) {
     return scale_px(RUNNING_SHADOW_SPREAD);
 }
 
+static int ui_status_bar_width(void) {
+    return scale_px(STATUS_BAR_WIDTH);
+}
+
+static int ui_status_bar_height(void) {
+    return scale_px(STATUS_BAR_HEIGHT);
+}
+
+static int ui_status_bar_gap(void) {
+    return scale_px(STATUS_BAR_GAP);
+}
+
+static int ui_status_bar_soft_edge(void) {
+    return scale_px(STATUS_BAR_SOFT_EDGE);
+}
+
+static int ui_status_bar_shadow_spread(void) {
+    return scale_px(STATUS_BAR_SHADOW_SPREAD);
+}
+
 static int ui_server_color_bar_width(void) {
     return scale_px(SERVER_COLOR_BAR_WIDTH);
 }
@@ -405,9 +427,14 @@ static int ui_row_height(void) {
     int height = scale_px(ROW_HEIGHT);
     int content_margin = ui_dot_effect_padding();
     int min_dot_height = ui_dot_size() + content_margin * 2;
+    int min_status_bar_height = ui_status_bar_height() +
+        ui_status_bar_shadow_spread() * 2;
     int min_text_height = ui_font_height() + content_margin * 2;
     if (height < min_dot_height) {
         height = min_dot_height;
+    }
+    if (height < min_status_bar_height) {
+        height = min_status_bar_height;
     }
     if (height < min_text_height) {
         height = min_text_height;
@@ -480,11 +507,53 @@ static int directory_text_alpha(void) {
     return 255 * (EDGE_TUCK_PROGRESS_MAX - progress) / EDGE_TUCK_PROGRESS_MAX;
 }
 
-static int row_dot_width(int count) {
+static int current_status_indicator_width(void) {
+    return interpolate_by_edge_tuck(ui_dot_size(), ui_status_bar_width());
+}
+
+static int current_status_indicator_height(void) {
+    return interpolate_by_edge_tuck(ui_dot_size(), ui_status_bar_height());
+}
+
+static int current_status_indicator_gap(void) {
+    return interpolate_by_edge_tuck(ui_dot_gap(), ui_status_bar_gap());
+}
+
+static int current_running_shadow_spread(void) {
+    return interpolate_by_edge_tuck(
+        ui_running_shadow_spread(),
+        ui_status_bar_shadow_spread()
+    );
+}
+
+static int current_status_soft_edge(void) {
+    return interpolate_by_edge_tuck(
+        ui_static_dot_soft_edge(),
+        ui_status_bar_soft_edge()
+    );
+}
+
+static int row_status_width(int count, int indicator_width, int indicator_gap) {
     if (count <= 0) {
         return 0;
     }
-    return count * ui_dot_size() + (count - 1) * ui_dot_gap();
+    return count * indicator_width + (count - 1) * indicator_gap;
+}
+
+static int current_row_status_width(int count) {
+    return row_status_width(
+        count,
+        current_status_indicator_width(),
+        current_status_indicator_gap()
+    );
+}
+
+static int expanded_row_status_width(int count) {
+    return row_status_width(count, ui_dot_size(), ui_dot_gap());
+}
+
+static int collapsed_row_status_width(int count) {
+    return row_status_width(count, ui_status_bar_width(), ui_status_bar_gap());
 }
 
 static int max_row_session_count(void) {
@@ -498,7 +567,7 @@ static int max_row_session_count(void) {
     return max_count;
 }
 
-static int dot_column_left(void) {
+static int status_column_left(void) {
     return directory_column_left() + current_directory_column_width() + current_text_dot_gap();
 }
 
@@ -507,7 +576,7 @@ static int current_content_width(int max_sessions_in_row) {
         return 0;
     }
     return ui_directory_left_margin() + current_directory_column_width() + current_text_dot_gap() +
-        row_dot_width(max_sessions_in_row) + ui_dot_right_margin();
+        current_row_status_width(max_sessions_in_row) + ui_dot_right_margin();
 }
 
 static int expanded_panel_width(void) {
@@ -518,7 +587,7 @@ static int expanded_panel_width(void) {
     }
     max_sessions_in_row = max_row_session_count();
     width = ui_directory_left_margin() + g_app.directory_column_width + ui_text_dot_gap() +
-        row_dot_width(max_sessions_in_row) + ui_dot_right_margin();
+        expanded_row_status_width(max_sessions_in_row) + ui_dot_right_margin();
     if (width < ui_min_panel_width()) {
         return ui_min_panel_width();
     }
@@ -554,7 +623,7 @@ static int current_min_panel_width(int max_sessions_in_row) {
         return ui_min_panel_width();
     }
     collapsed_width = ui_directory_left_margin() +
-        row_dot_width(max_sessions_in_row) + ui_dot_right_margin();
+        collapsed_row_status_width(max_sessions_in_row) + ui_dot_right_margin();
     if (collapsed_width < 1) {
         collapsed_width = 1;
     }
@@ -964,24 +1033,28 @@ static void track_mouse_leave(HWND hwnd) {
     }
 }
 
-static RECT dot_rect(int row_index, int dot_index) {
+static RECT status_indicator_rect(int row_index, int indicator_index) {
     RECT rect;
-    int dot_size = ui_dot_size();
-    rect.left = dot_column_left() + dot_index * (dot_size + ui_dot_gap());
-    rect.top = ui_row_top(row_index) + (ui_row_height() - dot_size) / 2;
-    rect.right = rect.left + dot_size;
-    rect.bottom = rect.top + dot_size;
+    int indicator_width = current_status_indicator_width();
+    int indicator_height = current_status_indicator_height();
+    int indicator_gap = current_status_indicator_gap();
+    rect.left = status_column_left() +
+        indicator_index * (indicator_width + indicator_gap);
+    rect.top = ui_row_top(row_index) +
+        (ui_row_height() - indicator_height) / 2;
+    rect.right = rect.left + indicator_width;
+    rect.bottom = rect.top + indicator_height;
     return rect;
 }
 
-static int dot_at_point(POINT point) {
+static int status_indicator_at_point(POINT point) {
     int row;
     for (row = 0; row < g_app.row_count; row++) {
-        int dot;
-        for (dot = 0; dot < g_app.rows[row].session_count; dot++) {
-            RECT rect = dot_rect(row, dot);
+        int indicator;
+        for (indicator = 0; indicator < g_app.rows[row].session_count; indicator++) {
+            RECT rect = status_indicator_rect(row, indicator);
             if (PtInRect(&rect, point)) {
-                return g_app.rows[row].session_indexes[dot];
+                return g_app.rows[row].session_indexes[indicator];
             }
         }
     }
@@ -2150,21 +2223,24 @@ static int clamp_int(int value, int minimum, int maximum) {
     return value;
 }
 
-static RECT centered_square_rect(const RECT *rect, int diameter) {
+static RECT centered_rect(const RECT *rect, int width, int height) {
     RECT result;
     int center_x2 = rect->left + rect->right;
     int center_y2 = rect->top + rect->bottom;
-    if (diameter < 1) {
-        diameter = 1;
+    if (width < 1) {
+        width = 1;
     }
-    result.left = (center_x2 - diameter) / 2;
-    result.top = (center_y2 - diameter) / 2;
-    result.right = result.left + diameter;
-    result.bottom = result.top + diameter;
+    if (height < 1) {
+        height = 1;
+    }
+    result.left = (center_x2 - width) / 2;
+    result.top = (center_y2 - height) / 2;
+    result.right = result.left + width;
+    result.bottom = result.top + height;
     return result;
 }
 
-static void fill_soft_dot(
+static void fill_soft_indicator(
     HDC hdc,
     const RECT *rect,
     COLORREF color,
@@ -2178,6 +2254,8 @@ static void fill_soft_dot(
     int diameter = width < height ? width : height;
     double center_x;
     double center_y;
+    double segment_start;
+    double segment_end;
     double radius;
     double outer_radius_squared;
     double inner_radius;
@@ -2197,6 +2275,13 @@ static void fill_soft_dot(
     center_x = rect->left + width / 2.0;
     center_y = rect->top + height / 2.0;
     radius = diameter / 2.0;
+    if (height >= width) {
+        segment_start = rect->top + radius;
+        segment_end = rect->bottom - radius;
+    } else {
+        segment_start = rect->left + radius;
+        segment_end = rect->right - radius;
+    }
     inner_radius = radius - edge_blur;
     if (inner_radius < 0.0) {
         inner_radius = 0.0;
@@ -2217,8 +2302,28 @@ static void fill_soft_dot(
                 double dy = py - center_y;
                 for (sample_x = 0; sample_x < DOT_EDGE_SAMPLES; sample_x++) {
                     double px = x + (sample_x + 0.5) / DOT_EDGE_SAMPLES;
-                    double dx = px - center_x;
-                    double distance_squared = dx * dx + dy * dy;
+                    double dx;
+                    double distance_squared;
+                    if (height >= width) {
+                        double nearest_y = py;
+                        if (nearest_y < segment_start) {
+                            nearest_y = segment_start;
+                        } else if (nearest_y > segment_end) {
+                            nearest_y = segment_end;
+                        }
+                        dx = px - center_x;
+                        dy = py - nearest_y;
+                    } else {
+                        double nearest_x = px;
+                        if (nearest_x < segment_start) {
+                            nearest_x = segment_start;
+                        } else if (nearest_x > segment_end) {
+                            nearest_x = segment_end;
+                        }
+                        dx = px - nearest_x;
+                        dy = py - center_y;
+                    }
+                    distance_squared = dx * dx + dy * dy;
                     if (distance_squared <= inner_radius_squared) {
                         alpha_sum += max_alpha;
                     } else if (distance_squared <= outer_radius_squared) {
@@ -2243,7 +2348,7 @@ static void fill_soft_dot(
     }
 }
 
-static void fill_glow_dot(
+static void fill_indicator_glow(
     HDC hdc,
     const RECT *rect,
     COLORREF color,
@@ -2255,6 +2360,8 @@ static void fill_glow_dot(
     int diameter = width < height ? width : height;
     double center_x;
     double center_y;
+    double segment_start;
+    double segment_end;
     double radius;
     double radius_squared;
     int total_samples = DOT_EDGE_SAMPLES * DOT_EDGE_SAMPLES;
@@ -2270,6 +2377,13 @@ static void fill_glow_dot(
     center_x = rect->left + width / 2.0;
     center_y = rect->top + height / 2.0;
     radius = diameter / 2.0;
+    if (height >= width) {
+        segment_start = rect->top + radius;
+        segment_end = rect->bottom - radius;
+    } else {
+        segment_start = rect->left + radius;
+        segment_end = rect->right - radius;
+    }
     radius_squared = radius * radius;
     if (radius_squared <= 0.0) {
         return;
@@ -2284,8 +2398,28 @@ static void fill_glow_dot(
                 double dy = py - center_y;
                 for (sample_x = 0; sample_x < DOT_EDGE_SAMPLES; sample_x++) {
                     double px = x + (sample_x + 0.5) / DOT_EDGE_SAMPLES;
-                    double dx = px - center_x;
-                    double distance_squared = dx * dx + dy * dy;
+                    double dx;
+                    double distance_squared;
+                    if (height >= width) {
+                        double nearest_y = py;
+                        if (nearest_y < segment_start) {
+                            nearest_y = segment_start;
+                        } else if (nearest_y > segment_end) {
+                            nearest_y = segment_end;
+                        }
+                        dx = px - center_x;
+                        dy = py - nearest_y;
+                    } else {
+                        double nearest_x = px;
+                        if (nearest_x < segment_start) {
+                            nearest_x = segment_start;
+                        } else if (nearest_x > segment_end) {
+                            nearest_x = segment_end;
+                        }
+                        dx = px - nearest_x;
+                        dy = py - center_y;
+                    }
+                    distance_squared = dx * dx + dy * dy;
                     if (distance_squared <= radius_squared) {
                         double fade = (radius_squared - distance_squared) / radius_squared;
                         fade = fade * fade;
@@ -2305,25 +2439,29 @@ static void fill_glow_dot(
     }
 }
 
-static void draw_status_dot(HDC hdc, const RECT *rect, const char *status, COLORREF row_background) {
+static void draw_status_indicator(HDC hdc, const RECT *rect, const char *status, COLORREF row_background) {
     if (is_running_status(status)) {
         int pulse = running_pulse_level();
-        int dot_size = ui_dot_size();
-        int max_shadow_spread = ui_running_shadow_spread();
+        int indicator_width = rect_width(rect);
+        int indicator_height = rect->bottom - rect->top;
+        int max_shadow_spread = current_running_shadow_spread();
         int min_shadow_spread = max_shadow_spread / 2;
         int shadow_spread;
         int shadow_alpha = 56 + pulse * 120 / 100;
-        int core_margin = scale_px(3);
-        int core_growth = scale_px(3);
-        int highlight_margin = scale_px(6);
-        int highlight_growth = scale_px(4);
-        int core_diameter = dot_size - core_margin +
+        int core_margin = interpolate_by_edge_tuck(scale_px(3), scale_px(1));
+        int core_growth = interpolate_by_edge_tuck(scale_px(3), scale_px(1));
+        int highlight_margin = interpolate_by_edge_tuck(scale_px(6), scale_px(3));
+        int highlight_growth = interpolate_by_edge_tuck(scale_px(4), scale_px(1));
+        int core_width = indicator_width - core_margin +
             (pulse * core_growth + 50) / 100;
-        int highlight_diameter = dot_size - highlight_margin +
+        int core_height = indicator_height - core_margin +
+            (pulse * core_growth + 50) / 100;
+        int highlight_width = indicator_width - highlight_margin +
+            (pulse * highlight_growth + 50) / 100;
+        int highlight_height = indicator_height - highlight_margin +
             (pulse * highlight_growth + 50) / 100;
         int core_brightness = 55 + pulse * 150 / 100;
         int highlight_alpha = 72 + pulse * 112 / 100;
-        int halo_diameter;
         RECT halo;
         RECT core;
         RECT highlight;
@@ -2334,27 +2472,33 @@ static void draw_status_dot(HDC hdc, const RECT *rect, const char *status, COLOR
         if (min_shadow_spread < 1) {
             min_shadow_spread = 1;
         }
-        if (core_diameter < 1) {
-            core_diameter = 1;
+        if (core_width < 1) {
+            core_width = 1;
         }
-        if (highlight_diameter < 1) {
-            highlight_diameter = 1;
+        if (core_height < 1) {
+            core_height = 1;
+        }
+        if (highlight_width < 1) {
+            highlight_width = 1;
+        }
+        if (highlight_height < 1) {
+            highlight_height = 1;
         }
         shadow_spread = min_shadow_spread +
             (pulse * (max_shadow_spread - min_shadow_spread) + 50) / 100;
-        halo_diameter = dot_size + shadow_spread * 2;
-        halo = centered_square_rect(rect, halo_diameter);
-        core = centered_square_rect(rect, core_diameter);
-        highlight = centered_square_rect(rect, highlight_diameter);
+        halo = *rect;
+        InflateRect(&halo, shadow_spread, shadow_spread);
+        core = centered_rect(rect, core_width, core_height);
+        highlight = centered_rect(rect, highlight_width, highlight_height);
         if (shadow_spread > 0) {
-            fill_glow_dot(hdc, &halo, running_blue, row_background, shadow_alpha);
+            fill_indicator_glow(hdc, &halo, running_blue, row_background, shadow_alpha);
         }
-        fill_soft_dot(hdc, rect, dim_blue, row_background, 255, ui_running_dot_soft_edge(), 1);
-        fill_soft_dot(hdc, &core, core_blue, row_background, 255, ui_running_dot_soft_edge(), 1);
-        fill_soft_dot(hdc, &highlight, bright_blue, row_background, highlight_alpha, ui_running_dot_soft_edge(), 1);
+        fill_soft_indicator(hdc, rect, dim_blue, row_background, 255, ui_running_dot_soft_edge(), 1);
+        fill_soft_indicator(hdc, &core, core_blue, row_background, 255, ui_running_dot_soft_edge(), 1);
+        fill_soft_indicator(hdc, &highlight, bright_blue, row_background, highlight_alpha, ui_running_dot_soft_edge(), 1);
         return;
     }
-    fill_soft_dot(hdc, rect, status_color(status), row_background, 255, ui_static_dot_soft_edge(), 0);
+    fill_soft_indicator(hdc, rect, status_color(status), row_background, 255, current_status_soft_edge(), 0);
 }
 
 static void draw_directory_text(HDC hdc, const wchar_t *text, const RECT *rect, int row_top) {
@@ -2422,7 +2566,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         RECT text_rect;
         char display_name[768];
         wchar_t display_name_wide[768];
-        int dot;
+        int indicator;
         COLORREF row_color = RGB(34, 34, 34);
         row_rect.left = 0;
         row_rect.top = ui_row_top(row);
@@ -2445,10 +2589,10 @@ static void paint_widget(HWND hwnd, HDC hdc) {
             SetTextColor(hdc, blend_color(RGB(225, 225, 225), row_color, directory_text_alpha()));
             draw_directory_text(hdc, display_name_wide, &text_rect, row_rect.top);
         }
-        for (dot = 0; dot < g_app.rows[row].session_count; dot++) {
-            int session_index = g_app.rows[row].session_indexes[dot];
-            RECT rect = dot_rect(row, dot);
-            draw_status_dot(hdc, &rect, g_app.sessions[session_index].status, row_color);
+        for (indicator = 0; indicator < g_app.rows[row].session_count; indicator++) {
+            int session_index = g_app.rows[row].session_indexes[indicator];
+            RECT rect = status_indicator_rect(row, indicator);
+            draw_status_indicator(hdc, &rect, g_app.sessions[session_index].status, row_color);
         }
     }
     SelectObject(hdc, old_font);
@@ -2575,7 +2719,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         track_mouse_leave(hwnd);
         cancel_edge_tuck_delay();
         set_edge_tuck_target(0);
-        hovered = dot_at_point(point);
+        hovered = status_indicator_at_point(point);
         if (hovered != g_app.hovered_session) {
             g_app.hovered_session = hovered;
             set_tooltip_for_hover(hovered);
