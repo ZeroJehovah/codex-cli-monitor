@@ -37,6 +37,8 @@
 #define RUNNING_DOT_SOFT_EDGE 1
 #define STATIC_DOT_SOFT_EDGE 2
 #define RUNNING_SHADOW_SPREAD 6
+#define SERVER_COLOR_BAR_WIDTH 3
+#define SERVER_COLOR_COUNT 10
 #define ROW_HEIGHT 26
 #define PANEL_PADDING_Y 1
 #define MIN_PANEL_WIDTH 48
@@ -75,7 +77,13 @@ typedef struct DirectoryRow {
     int session_indexes[MAX_SESSIONS];
     int session_count;
     int original_order;
+    int server_color_index;
 } DirectoryRow;
+
+typedef struct ServerColorAssignment {
+    char server_key[256];
+    int color_index;
+} ServerColorAssignment;
 
 typedef struct GlyphVerticalMetrics {
     int black_box_y;
@@ -92,8 +100,10 @@ typedef struct AppState {
     TOOLINFOW tooltip_info;
     Session sessions[MAX_SESSIONS];
     DirectoryRow rows[MAX_SESSIONS];
+    ServerColorAssignment server_colors[MAX_SESSIONS];
     int session_count;
     int row_count;
+    int server_color_count;
     int directory_column_width;
     int empty_success_count;
     int hovered_session;
@@ -122,6 +132,18 @@ static const char STATUS_RUNNING[] = "\xe8\xbf\x90\xe8\xa1\x8c\xe4\xb8\xad";
 static const char STATUS_SUCCESS[] = "\xe6\x88\x90\xe5\x8a\x9f";
 static const char STATUS_FAILED[] = "\xe5\xa4\xb1\xe8\xb4\xa5";
 static const int DISPLAY_FONT_SIZES[] = {8, 9, 10, 11, 12, 14, 16};
+static const COLORREF SERVER_COLORS[SERVER_COLOR_COUNT] = {
+    RGB(78, 121, 167),
+    RGB(242, 142, 43),
+    RGB(225, 87, 89),
+    RGB(118, 183, 178),
+    RGB(89, 161, 79),
+    RGB(237, 201, 72),
+    RGB(176, 122, 161),
+    RGB(255, 157, 167),
+    RGB(156, 117, 95),
+    RGB(105, 190, 220),
+};
 
 static AppState g_app;
 
@@ -211,41 +233,8 @@ static void directory_display_name(const char *directory, char *target, int targ
     target[end - start] = '\0';
 }
 
-static int has_multiple_servers(void) {
-    int left;
-    for (left = 0; left < g_app.session_count; left++) {
-        int right;
-        const char *left_id = g_app.sessions[left].server_id;
-        const char *left_name = g_app.sessions[left].server_name;
-        for (right = left + 1; right < g_app.session_count; right++) {
-            const char *right_id = g_app.sessions[right].server_id;
-            const char *right_name = g_app.sessions[right].server_name;
-            if (left_id[0] != '\0' || right_id[0] != '\0') {
-                if (strcmp(left_id, right_id) != 0) {
-                    return 1;
-                }
-            } else if (strcmp(left_name, right_name) != 0) {
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
 static void row_display_name(const DirectoryRow *row, char *target, int target_count) {
-    char directory_name[512];
-    const char *server_name;
-    directory_display_name(row->directory, directory_name, sizeof(directory_name));
-    if (!has_multiple_servers()) {
-        copy_ascii(target, target_count, directory_name);
-        return;
-    }
-    server_name = row->server_name[0] ? row->server_name : row->server_id;
-    if (server_name[0] == '\0') {
-        server_name = "server";
-    }
-    snprintf(target, target_count - 1, "%s: %s", server_name, directory_name);
-    target[target_count - 1] = '\0';
+    directory_display_name(row->directory, target, target_count);
 }
 
 static int display_size_count(void) {
@@ -307,6 +296,10 @@ static int ui_static_dot_soft_edge(void) {
 
 static int ui_running_shadow_spread(void) {
     return scale_px(RUNNING_SHADOW_SPREAD);
+}
+
+static int ui_server_color_bar_width(void) {
+    return scale_px(SERVER_COLOR_BAR_WIDTH);
 }
 
 static int ui_dot_effect_padding(void) {
@@ -1097,8 +1090,18 @@ static const char *row_started_at_iso_sort_key(const DirectoryRow *row) {
 }
 
 static int compare_directory_rows(const DirectoryRow *left, const DirectoryRow *right) {
+    const char *left_server_name = left->server_name[0] ? left->server_name : left->server_id;
+    const char *right_server_name = right->server_name[0] ? right->server_name : right->server_id;
+    int server_compare = strcmp(left_server_name, right_server_name);
     double left_started_at = row_started_at_sort_key(left);
     double right_started_at = row_started_at_sort_key(right);
+    if (server_compare != 0) {
+        return server_compare;
+    }
+    server_compare = strcmp(left->server_id, right->server_id);
+    if (server_compare != 0) {
+        return server_compare;
+    }
     if (left_started_at < DBL_MAX && right_started_at < DBL_MAX) {
         if (left_started_at < right_started_at) {
             return -1;
@@ -1149,17 +1152,135 @@ static void sort_directory_rows(void) {
     }
 }
 
+static void server_identity_key(
+    const char *server_id,
+    const char *server_name,
+    char *target,
+    int target_count
+) {
+    if (server_id != NULL && server_id[0] != '\0') {
+        copy_ascii(target, target_count, server_id);
+        return;
+    }
+    if (server_name != NULL && server_name[0] != '\0') {
+        copy_ascii(target, target_count, server_name);
+        return;
+    }
+    copy_ascii(target, target_count, "local");
+}
+
+static int server_key_is_active(const char *server_key) {
+    int index;
+    for (index = 0; index < g_app.session_count; index++) {
+        char session_key[256];
+        server_identity_key(
+            g_app.sessions[index].server_id,
+            g_app.sessions[index].server_name,
+            session_key,
+            sizeof(session_key)
+        );
+        if (strcmp(server_key, session_key) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int find_server_color_index(const char *server_key) {
+    int index;
+    for (index = 0; index < g_app.server_color_count; index++) {
+        if (strcmp(g_app.server_colors[index].server_key, server_key) == 0) {
+            return g_app.server_colors[index].color_index;
+        }
+    }
+    return -1;
+}
+
+static int choose_server_color_index(void) {
+    int used[SERVER_COLOR_COUNT];
+    int available[SERVER_COLOR_COUNT];
+    int available_count = 0;
+    int assignment;
+    int color;
+    ZeroMemory(used, sizeof(used));
+    for (assignment = 0; assignment < g_app.server_color_count; assignment++) {
+        int assigned_color = g_app.server_colors[assignment].color_index;
+        if (assigned_color >= 0 && assigned_color < SERVER_COLOR_COUNT) {
+            used[assigned_color] = 1;
+        }
+    }
+    for (color = 0; color < SERVER_COLOR_COUNT; color++) {
+        if (!used[color]) {
+            available[available_count++] = color;
+        }
+    }
+    if (available_count > 0) {
+        return available[rand() % available_count];
+    }
+    return rand() % SERVER_COLOR_COUNT;
+}
+
+static void sync_server_colors(void) {
+    int read_index;
+    int write_index = 0;
+    int session_index;
+    for (read_index = 0; read_index < g_app.server_color_count; read_index++) {
+        if (server_key_is_active(g_app.server_colors[read_index].server_key)) {
+            if (write_index != read_index) {
+                g_app.server_colors[write_index] = g_app.server_colors[read_index];
+            }
+            write_index++;
+        }
+    }
+    g_app.server_color_count = write_index;
+    for (session_index = 0; session_index < g_app.session_count; session_index++) {
+        char server_key[256];
+        ServerColorAssignment *assignment;
+        int color_index;
+        server_identity_key(
+            g_app.sessions[session_index].server_id,
+            g_app.sessions[session_index].server_name,
+            server_key,
+            sizeof(server_key)
+        );
+        if (find_server_color_index(server_key) >= 0 ||
+            g_app.server_color_count >= MAX_SESSIONS) {
+            continue;
+        }
+        color_index = choose_server_color_index();
+        assignment = &g_app.server_colors[g_app.server_color_count];
+        copy_ascii(assignment->server_key, sizeof(assignment->server_key), server_key);
+        assignment->color_index = color_index;
+        g_app.server_color_count++;
+    }
+}
+
 static void rebuild_directory_rows(void) {
     int index;
+    sync_server_colors();
     g_app.row_count = 0;
     for (index = 0; index < g_app.session_count; index++) {
         Session *session = &g_app.sessions[index];
         const char *directory = session->directory[0] ? session->directory : "-";
+        char session_server_key[256];
         int row;
         int target_row = -1;
+        server_identity_key(
+            session->server_id,
+            session->server_name,
+            session_server_key,
+            sizeof(session_server_key)
+        );
         for (row = 0; row < g_app.row_count; row++) {
+            char row_server_key[256];
+            server_identity_key(
+                g_app.rows[row].server_id,
+                g_app.rows[row].server_name,
+                row_server_key,
+                sizeof(row_server_key)
+            );
             if (strcmp(g_app.rows[row].directory, directory) == 0 &&
-                strcmp(g_app.rows[row].server_id, session->server_id) == 0) {
+                strcmp(row_server_key, session_server_key) == 0) {
                 target_row = row;
                 break;
             }
@@ -1174,6 +1295,7 @@ static void rebuild_directory_rows(void) {
             copy_ascii(g_app.rows[target_row].server_id, sizeof(g_app.rows[target_row].server_id), session->server_id);
             copy_ascii(g_app.rows[target_row].server_name, sizeof(g_app.rows[target_row].server_name), session->server_name);
             g_app.rows[target_row].original_order = target_row;
+            g_app.rows[target_row].server_color_index = find_server_color_index(session_server_key);
         }
         if (g_app.rows[target_row].session_count < MAX_SESSIONS) {
             g_app.rows[target_row].session_indexes[g_app.rows[target_row].session_count++] = index;
@@ -2260,6 +2382,24 @@ static void draw_directory_text(HDC hdc, const wchar_t *text, const RECT *rect, 
     SetTextAlign(hdc, old_align);
 }
 
+static void draw_server_color_bar(HDC hdc, const RECT *row_rect, int color_index) {
+    RECT bar_rect;
+    HBRUSH brush;
+    if (color_index < 0 || color_index >= SERVER_COLOR_COUNT) {
+        return;
+    }
+    bar_rect.left = content_origin_x() + 1;
+    bar_rect.top = row_rect->top;
+    bar_rect.right = bar_rect.left + ui_server_color_bar_width();
+    bar_rect.bottom = row_rect->bottom;
+    brush = CreateSolidBrush(SERVER_COLORS[color_index]);
+    if (brush == NULL) {
+        return;
+    }
+    FillRect(hdc, &bar_rect, brush);
+    DeleteObject(brush);
+}
+
 static void paint_widget(HWND hwnd, HDC hdc) {
     RECT client;
     RECT visible_client;
@@ -2294,6 +2434,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
             FillRect(hdc, &row_rect, row_background);
             DeleteObject(row_background);
         }
+        draw_server_color_bar(hdc, &row_rect, g_app.rows[row].server_color_index);
         row_display_name(&g_app.rows[row], display_name, sizeof(display_name));
         utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
         text_rect.left = directory_column_left();
@@ -2584,6 +2725,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
     }
 
     ZeroMemory(&g_app, sizeof(g_app));
+    srand((unsigned int)(GetTickCount() ^ GetCurrentProcessId() ^ GetCurrentThreadId()));
     g_app.display_font_points = DEFAULT_DISPLAY_FONT_POINTS;
     g_app.edge_tuck_enabled = 1;
     resolve_api_url();
