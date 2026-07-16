@@ -164,13 +164,15 @@ git clone https://github.com/ZeroJehovah/codex-cli-monitor.git
 cd codex-cli-monitor
 ```
 
-仓库跟踪三个模板：
+仓库跟踪两个 Linux 部署脚本模板和一个 Windows 配置模板：
 
 - `start-server.sh.example`：VPS 聚合服务安装脚本
 - `start-collector.sh.example`：Linux 采集器安装脚本
-- `start-widget.ps1.example`：Windows 登录计划任务安装脚本
+- `windows/CodexMonitorWidget/CodexMonitorWidget.ini.example`：Windows 悬浮窗配置模板
 
-实际配置文件 `start-server.sh`、`start-collector.sh` 和 `start-widget.ps1` 已加入 `.gitignore`，可以写入真实 Token，不会被 Git 提交。
+实际配置文件 `start-server.sh`、`start-collector.sh` 和
+`windows/CodexMonitorWidget/CodexMonitorWidget.ini` 已加入 `.gitignore`，可以写入真实
+Token，不会被 Git 提交。Windows 构建目录中的配置文件也位于被忽略的 `dist` 中。
 
 ### 2. 生成和分配 Token
 
@@ -185,7 +187,7 @@ Token 对应关系：
 
 ```text
 VPS API_READ_TOKEN
-    └── Windows start-widget.ps1 中的 ApiToken
+    └── Windows CodexMonitorWidget.ini 中的 ApiToken
 
 VPS COLLECTOR_WRITE_TOKEN
     └── 每台 Linux start-collector.sh 中的 COLLECTOR_WRITE_TOKEN
@@ -422,55 +424,47 @@ tail -f ~/.local/state/codex-cli-monitor/hooks.jsonl
 
 ### 6. 配置 Windows 悬浮窗
 
-Windows 前端需要先存在以下文件：
+Windows 前端发布目录只包含两个文件：
 
 ```text
 dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe
+dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.ini
 ```
 
-`dist` 被 Git 忽略，因此全新 clone 不会自带 exe。可以从已经构建的机器复制该目录，或者按照后文“构建 Windows x64 exe”步骤在 Linux/WSL 构建。
+`dist` 被 Git 忽略，因此全新 clone 不会自带发布目录。可以从已经构建的机器复制该目
+录，或者按照后文“构建 Windows x64 exe”步骤在 Linux/WSL 构建。构建过程会从配置
+模板生成同目录的 `CodexMonitorWidget.ini`。
 
-创建实际配置脚本：
+用记事本打开配置文件：
 
 ```powershell
-Copy-Item .\start-widget.ps1.example .\start-widget.ps1
-notepad .\start-widget.ps1
+notepad .\dist\CodexMonitorWidget-win-x64\CodexMonitorWidget.ini
 ```
 
-修改：
+配置格式：
+
+```ini
+[CodexMonitorWidget]
+ApiUrl=https://monitor.example.com/api/sessions
+ApiToken=填写 VPS 的 API_READ_TOKEN
+```
+
+字段说明：
 
 | 配置 | 说明 |
 |---|---|
-| `$ApiUrl` | 聚合读取地址，必须包含 `/api/sessions` |
-| `$ApiToken` | 必须等于 VPS 的 `API_READ_TOKEN` |
-| `$TaskName` | 计划任务名称，默认 `CodexMonitorWidget` |
-| `$ExePath` | 前端 exe 路径，默认使用仓库 `dist` 目录 |
+| `ApiUrl` | 聚合读取地址，建议包含 `/api/sessions`；只填写主机地址时程序会自动补全路径 |
+| `ApiToken` | 必须等于 VPS 的 `API_READ_TOKEN`；API 未启用读取鉴权时可以留空 |
 
-示例：
+保存后，直接双击：
 
 ```powershell
-$ApiUrl = "https://monitor.example.com/api/sessions"
-$ApiToken = "填写 VPS 的 API_READ_TOKEN"
+.\dist\CodexMonitorWidget-win-x64\CodexMonitorWidget.exe
 ```
 
-注册当前用户登录计划任务并立即启动：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\start-widget.ps1
-```
-
-Windows GUI 不能作为 Windows Service 显示在用户桌面，因此脚本使用当前用户登录计划任务。脚本会限制自身 ACL，因为其中保存了明文读取 Token。
-
-管理计划任务：
-
-```powershell
-Get-ScheduledTask -TaskName CodexMonitorWidget
-Start-ScheduledTask -TaskName CodexMonitorWidget
-Stop-ScheduledTask -TaskName CodexMonitorWidget
-Unregister-ScheduledTask -TaskName CodexMonitorWidget
-```
-
-前端本身具有单实例保护；重复启动不会出现多个悬浮窗。
+程序始终从 exe 所在目录读取固定文件名 `CodexMonitorWidget.ini`。配置文件包含明文只读
+Token，应只交给需要运行悬浮窗的 Windows 用户。前端具有单实例保护；重复双击不会出
+现多个悬浮窗。
 
 ### 7. 服务管理
 
@@ -516,6 +510,10 @@ sudo systemctl restart codex-monitor-collector.service
 sudo systemctl status codex-monitor-collector.service
 ```
 
+Windows 悬浮窗：退出正在运行的旧程序，保留现有 `CodexMonitorWidget.ini`，用重新构
+建的 `CodexMonitorWidget.exe` 覆盖旧文件后再次双击。只有配置字段发生变化时才需要
+同步新的 INI 模板。
+
 如果模板、服务参数、仓库位置或 Hook 配置发生变化，应重新检查实际脚本并再次运行：
 
 ```bash
@@ -546,13 +544,18 @@ sudo rm -f /etc/codex-cli-monitor/collector.env
 sudo systemctl daemon-reload
 ```
 
+卸载 Windows 悬浮窗：从右键菜单退出程序，然后删除
+`CodexMonitorWidget.exe` 和 `CodexMonitorWidget.ini`。程序没有安装 Windows Service
+或计划任务。
+
 删除 systemd 服务不会自动删除 `~/.codex/hooks.json` 中的 Monitor Hook。需要移除时，应编辑该文件并删除包含 `codex_cli_monitor.hooks` 的 Monitor 项，保留其他项目自己的 Hook。
 
 ### 10. 常见问题
 
 #### 聚合 API 返回 401
 
-- Windows 或 curl 使用的 Token 必须等于 VPS 的 `API_READ_TOKEN`。
+- Windows `CodexMonitorWidget.ini` 中的 `ApiToken` 或 curl 使用的 Token 必须等于 VPS
+  的 `API_READ_TOKEN`。
 - 采集器上报使用的是另一个 `COLLECTOR_WRITE_TOKEN`，不能用来读取 API。
 - 修改 Token 后重新运行安装脚本，或更新 `/etc/codex-cli-monitor/*.env` 后重启服务。
 
@@ -601,7 +604,8 @@ sudo systemctl status codex-monitor-collector.service
 - 优先使用 Tailscale/WireGuard 私网。
 - 公网访问必须使用 HTTPS、反向代理、防火墙和限流。
 - 不要把真实 Token 写入 `.example` 文件或 README。
-- 定期轮换 Token；轮换后更新两端配置并重启服务。
+- 定期轮换 Token；轮换后更新 Linux 服务环境文件以及 Windows
+  `CodexMonitorWidget.ini`，并重启对应程序。
 
 聚合结果中的每个 session 包含 `server_id`、`server_name`、`server_boot_id`、跨服务器唯一的 `session_key` 和 `server_observed_at`。不同服务器上相同的 PID 或相同目录不会被当作同一会话。
 
@@ -638,16 +642,16 @@ exe 会直接退出，不会打开第二个悬浮窗。它会轮询 `/api/sessio
 连接多服务器聚合服务时，悬浮窗按服务器和目录共同分组，通过每行左侧的彩色竖条区
 分服务器，目录名不添加服务器名前缀，悬停详情仍会显示服务器。目录行先按服务器名
 称固定排序（名称相同时按服务器 ID），同一服务器内再按每行最早进程启动时间沿用现
-有排序；行内状态圆点仍按进程启动时间排序。Windows GUI 不能通过 Windows Service
-显示在用户桌面，因此使用登录计划任务：
+有排序；行内状态圆点仍按进程启动时间排序。
+
+Windows 发布目录固定使用一个 exe 和一个同目录配置文件。编辑：
 
 ```powershell
-Copy-Item .\start-widget.ps1.example .\start-widget.ps1
-notepad .\start-widget.ps1
-powershell -ExecutionPolicy Bypass -File .\start-widget.ps1
+notepad .\dist\CodexMonitorWidget-win-x64\CodexMonitorWidget.ini
 ```
 
-脚本会保存聚合 API 地址和读取 Token，并注册当前 Windows 用户登录时启动的 `CodexMonitorWidget` 计划任务。实际配置脚本已被 Git 忽略。
+写入聚合 API 地址和读取 Token 后，直接双击同目录的 `CodexMonitorWidget.exe`。程序不
+需要 PowerShell、环境变量、Windows Service 或计划任务安装脚本。
 
 构建 Windows x64 exe：
 
@@ -665,20 +669,33 @@ x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
   -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
   -mwindows -municode -Wl,--subsystem,windows \
   -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32
+cp windows/CodexMonitorWidget/CodexMonitorWidget.ini.example \
+  dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.ini
 ```
 
-运行生成的 `CodexMonitorWidget.exe` 即可。默认连接
-`http://localhost:8765/api/sessions`。如果 API 地址不同，可以传入第一个参数：
+发布目录应当恰好包含：
+
+```text
+CodexMonitorWidget.exe
+CodexMonitorWidget.ini
+```
+
+配置文件示例：
+
+```ini
+[CodexMonitorWidget]
+ApiUrl=http://localhost:8765/api/sessions
+ApiToken=
+```
+
+保存配置后双击 `CodexMonitorWidget.exe`。为了兼容旧用法，如果同目录没有 INI，程序
+仍会读取 `CODEX_MONITOR_API_URL` 和 `CODEX_MONITOR_API_TOKEN`；第一个命令行参数仍可
+覆盖 API URL。
+
+命令行兼容示例：
 
 ```powershell
 .\CodexMonitorWidget.exe http://127.0.0.1:8765
-```
-
-也可以设置环境变量：
-
-```powershell
-$env:CODEX_MONITOR_API_URL = "http://127.0.0.1:8765"
-.\CodexMonitorWidget.exe
 ```
 
 ## 可选 shim

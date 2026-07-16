@@ -15,6 +15,10 @@
 
 #define APP_CLASS_NAME L"CodexMonitorWidget"
 #define DEFAULT_API_URL L"http://localhost:8765/api/sessions"
+#define CONFIG_FILE_NAME L"CodexMonitorWidget.ini"
+#define CONFIG_SECTION L"CodexMonitorWidget"
+#define CONFIG_API_URL_KEY L"ApiUrl"
+#define CONFIG_API_TOKEN_KEY L"ApiToken"
 #define SINGLE_INSTANCE_MUTEX_NAME L"Local\\ZeroJehovah.CodexMonitorWidget.SingleInstance"
 #define REFRESH_TIMER_ID 1
 #define ANIMATION_TIMER_ID 2
@@ -2812,14 +2816,91 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     }
 }
 
-static void resolve_api_url(void) {
+static int load_file_config(
+    wchar_t *api_url,
+    int api_url_count,
+    wchar_t *api_token,
+    int api_token_count
+) {
+    wchar_t module_path[4096];
+    wchar_t config_path[4096];
+    wchar_t *separator;
+    DWORD length = GetModuleFileNameW(
+        NULL,
+        module_path,
+        (DWORD)(sizeof(module_path) / sizeof(module_path[0]))
+    );
+    if (api_url_count > 0) {
+        api_url[0] = L'\0';
+    }
+    if (api_token_count > 0) {
+        api_token[0] = L'\0';
+    }
+    if (length == 0 || length >= sizeof(module_path) / sizeof(module_path[0])) {
+        return 0;
+    }
+    separator = wcsrchr(module_path, L'\\');
+    if (separator == NULL) {
+        separator = wcsrchr(module_path, L'/');
+    }
+    if (separator != NULL) {
+        separator[1] = L'\0';
+    } else {
+        module_path[0] = L'\0';
+    }
+    _snwprintf(
+        config_path,
+        sizeof(config_path) / sizeof(config_path[0]) - 1,
+        L"%ls%ls",
+        module_path,
+        CONFIG_FILE_NAME
+    );
+    config_path[sizeof(config_path) / sizeof(config_path[0]) - 1] = L'\0';
+    if (GetFileAttributesW(config_path) == INVALID_FILE_ATTRIBUTES) {
+        return 0;
+    }
+    GetPrivateProfileStringW(
+        CONFIG_SECTION,
+        CONFIG_API_URL_KEY,
+        L"",
+        api_url,
+        (DWORD)api_url_count,
+        config_path
+    );
+    GetPrivateProfileStringW(
+        CONFIG_SECTION,
+        CONFIG_API_TOKEN_KEY,
+        L"",
+        api_token,
+        (DWORD)api_token_count,
+        config_path
+    );
+    return 1;
+}
+
+static void resolve_api_config(void) {
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     DWORD env_len;
+    int config_exists;
+    wchar_t config_url[1024];
+    wchar_t config_token[512];
     wchar_t env_url[1024];
     wchar_t env_token[512];
+    config_exists = load_file_config(
+        config_url,
+        (int)(sizeof(config_url) / sizeof(config_url[0])),
+        config_token,
+        (int)(sizeof(config_token) / sizeof(config_token[0]))
+    );
     if (argc > 1 && argv != NULL) {
         copy_wide(g_app.api_url, (int)(sizeof(g_app.api_url) / sizeof(g_app.api_url[0])), argv[1]);
+    } else if (config_exists) {
+        copy_wide(
+            g_app.api_url,
+            (int)(sizeof(g_app.api_url) / sizeof(g_app.api_url[0])),
+            config_url[0] != L'\0' ? config_url : DEFAULT_API_URL
+        );
     } else {
         env_len = GetEnvironmentVariableW(L"CODEX_MONITOR_API_URL", env_url, (DWORD)(sizeof(env_url) / sizeof(env_url[0])));
         if (env_len > 0 && env_len < sizeof(env_url) / sizeof(env_url[0])) {
@@ -2837,9 +2918,17 @@ static void resolve_api_url(void) {
         with_scheme[sizeof(with_scheme) / sizeof(with_scheme[0]) - 1] = L'\0';
         copy_wide(g_app.api_url, (int)(sizeof(g_app.api_url) / sizeof(g_app.api_url[0])), with_scheme);
     }
-    env_len = GetEnvironmentVariableW(L"CODEX_MONITOR_API_TOKEN", env_token, (DWORD)(sizeof(env_token) / sizeof(env_token[0])));
-    if (env_len > 0 && env_len < sizeof(env_token) / sizeof(env_token[0])) {
-        copy_wide(g_app.api_token, (int)(sizeof(g_app.api_token) / sizeof(g_app.api_token[0])), env_token);
+    if (config_exists) {
+        copy_wide(
+            g_app.api_token,
+            (int)(sizeof(g_app.api_token) / sizeof(g_app.api_token[0])),
+            config_token
+        );
+    } else {
+        env_len = GetEnvironmentVariableW(L"CODEX_MONITOR_API_TOKEN", env_token, (DWORD)(sizeof(env_token) / sizeof(env_token[0])));
+        if (env_len > 0 && env_len < sizeof(env_token) / sizeof(env_token[0])) {
+            copy_wide(g_app.api_token, (int)(sizeof(g_app.api_token) / sizeof(g_app.api_token[0])), env_token);
+        }
     }
 }
 
@@ -2872,7 +2961,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
     srand((unsigned int)(GetTickCount() ^ GetCurrentProcessId() ^ GetCurrentThreadId()));
     g_app.display_font_points = DEFAULT_DISPLAY_FONT_POINTS;
     g_app.edge_tuck_enabled = 1;
-    resolve_api_url();
+    resolve_api_config();
     get_primary_work_area(&work_area);
     set_default_widget_placement(&work_area);
     load_widget_placement();

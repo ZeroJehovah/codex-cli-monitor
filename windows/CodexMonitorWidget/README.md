@@ -26,19 +26,25 @@ x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
   -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
   -mwindows -municode -Wl,--subsystem,windows \
   -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32
+cp windows/CodexMonitorWidget/CodexMonitorWidget.ini.example \
+  dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.ini
 ```
 
-The widget polls `http://localhost:8765/api/sessions` by default. To use another
-endpoint, pass it as the first argument or set `CODEX_MONITOR_API_URL`.
-When the API requires a Bearer token, set `CODEX_MONITOR_API_TOKEN`; the token is
-sent in the `Authorization` header and is not accepted as a command-line
-argument.
+The output directory contains exactly `CodexMonitorWidget.exe` and
+`CodexMonitorWidget.ini`. Edit the INI beside the executable:
 
-For persistent desktop startup, copy `start-widget.ps1.example` to
-`start-widget.ps1`, fill in the aggregator URL and read token, and run it once.
-It registers a scheduled task for the current user's logon. A Windows service
-is intentionally not used because interactive GUI applications cannot display
-from the service session.
+```ini
+[CodexMonitorWidget]
+ApiUrl=https://monitor.example.com/api/sessions
+ApiToken=replace-with-the-read-token
+```
+
+Double-click `CodexMonitorWidget.exe` to launch it. No PowerShell script,
+environment setup, Windows service, or scheduled-task installer is required.
+The INI stores the read token in plaintext and should remain private to the
+Windows user. For compatibility, the first command-line argument can still
+override the API URL; when the INI is absent, `CODEX_MONITOR_API_URL` and
+`CODEX_MONITOR_API_TOKEN` remain available as fallbacks.
 
 The floating panel is a headerless table grouped by directory. Each row shows
 the directory name in the first column and one or more softened-edge process
