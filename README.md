@@ -214,7 +214,7 @@ vim start-server.sh
 | `SERVER_NAME` | 建议修改 | Windows 前端显示名称，例如 `Tokyo VPS` |
 | `LISTEN_HOST` | 必须确认 | 推荐填写 VPS 的 Tailscale/WireGuard IP；`127.0.0.1` 只能供本机或反向代理访问 |
 | `LISTEN_PORT` | 可选 | 默认 `8765` |
-| `REMOTE_TTL` | 可选 | 远端采集器多久无更新后移除旧会话，默认 5 秒 |
+| `REMOTE_TTL` | 可选 | 远端采集器多久无更新后移除旧会话，默认 30 秒，可容忍短暂网络超时 |
 | `LOCAL_CACHE_SECONDS` | 可选 | VPS 本机扫描缓存，默认 0.25 秒 |
 | `INSTALL_HOOKS` | 可选 | `1` 表示自动安装本机 Hook，建议保持 `1` |
 | `API_READ_TOKEN` | 必须修改 | Windows 和只读 API 使用的 Token |
@@ -372,7 +372,7 @@ curl http://127.0.0.1:8765/healthz
 curl http://127.0.0.1:8765/api/sessions
 ```
 
-在 VPS 查询 `/api/servers`，应当能看到该采集器的 `SERVER_ID`。如果采集器断联超过 `REMOTE_TTL`，聚合端会移除它的旧会话。
+在 VPS 查询 `/api/servers`，应当能看到该采集器的 `SERVER_ID`。如果采集器断联超过 `REMOTE_TTL`，聚合端会移除它的旧会话。默认 30 秒 TTL 可以避免单次 HTTPS 超时导致服务器在悬浮窗中短暂消失。
 
 ### 5. 配置和信任 Codex Hook
 
