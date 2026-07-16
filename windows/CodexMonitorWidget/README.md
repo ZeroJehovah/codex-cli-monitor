@@ -74,6 +74,15 @@ status bar, between status bars, and from the final status bar to the right
 border. The right-click menu has a
 checked edge-tuck option; clearing it disables automatic tucking.
 
+When there are no session rows, the widget uses a dedicated single-row empty
+state instead of a border-only rectangle. It shows `正在连接` before the first
+backend response, `暂无会话` after a successful empty response, or `连接失败`
+when no session data is available after a request error. A neutral accent bar
+fills the visible left edge and a softened neutral indicator avoids the blue,
+green, and red session-status colors. The empty state also edge-tucks: its text
+fades out and the indicator morphs into a narrow capsule while the accent bar
+remains visible.
+
 For an aggregated multi-server response, rows are grouped by both server id and
 directory. Server color bars distinguish the rows, while hover details include
 the server name. Rows are sorted by server name first, with server id as a
