@@ -134,6 +134,7 @@ typedef struct AppState {
     int placement_offset_y;
     int display_font_points;
     int display_wheel_delta;
+    int fetch_completed;
     LONG fetching;
     char last_error[256];
 } AppState;
@@ -141,6 +142,9 @@ typedef struct AppState {
 static const char STATUS_RUNNING[] = "\xe8\xbf\x90\xe8\xa1\x8c\xe4\xb8\xad";
 static const char STATUS_SUCCESS[] = "\xe6\x88\x90\xe5\x8a\x9f";
 static const char STATUS_FAILED[] = "\xe5\xa4\xb1\xe8\xb4\xa5";
+static const wchar_t EMPTY_TEXT_CONNECTING[] = L"\x6b63\x5728\x8fde\x63a5";
+static const wchar_t EMPTY_TEXT_IDLE[] = L"\x6682\x65e0\x4f1a\x8bdd";
+static const wchar_t EMPTY_TEXT_FAILED[] = L"\x8fde\x63a5\x5931\x8d25";
 static const int DISPLAY_FONT_SIZES[] = {8, 9, 10, 11, 12, 14, 16};
 static const COLORREF SERVER_COLORS[SERVER_COLOR_COUNT] = {
     RGB(217, 217, 217),
@@ -242,6 +246,20 @@ static void directory_display_name(const char *directory, char *target, int targ
 
 static void row_display_name(const DirectoryRow *row, char *target, int target_count) {
     directory_display_name(row->directory, target, target_count);
+}
+
+static int empty_state_is_connecting(void) {
+    return g_app.row_count <= 0 && !g_app.fetch_completed;
+}
+
+static const wchar_t *empty_state_text(void) {
+    if (!g_app.fetch_completed) {
+        return EMPTY_TEXT_CONNECTING;
+    }
+    if (g_app.last_error[0] != '\0') {
+        return EMPTY_TEXT_FAILED;
+    }
+    return EMPTY_TEXT_IDLE;
 }
 
 static int display_size_count(void) {
@@ -578,6 +596,9 @@ static int collapsed_row_status_width(int count) {
 static int max_row_session_count(void) {
     int row;
     int max_count = 0;
+    if (g_app.row_count <= 0) {
+        return 1;
+    }
     for (row = 0; row < g_app.row_count; row++) {
         if (g_app.rows[row].session_count > max_count) {
             max_count = g_app.rows[row].session_count;
@@ -602,9 +623,6 @@ static int current_content_width(int max_sessions_in_row) {
 static int expanded_panel_width(void) {
     int width;
     int max_sessions_in_row;
-    if (g_app.row_count <= 0) {
-        return ui_min_panel_width();
-    }
     max_sessions_in_row = max_row_session_count();
     width = ui_directory_left_margin() + g_app.directory_column_width + ui_text_dot_gap() +
         expanded_row_status_width(max_sessions_in_row) + ui_dot_right_margin();
@@ -618,9 +636,6 @@ static int content_origin_x(void) {
     int max_sessions_in_row;
     int width;
     int content_width;
-    if (g_app.row_count <= 0) {
-        return 0;
-    }
     max_sessions_in_row = max_row_session_count();
     content_width = current_content_width(max_sessions_in_row);
     width = actual_panel_width();
@@ -654,9 +669,6 @@ static int current_min_panel_width(int max_sessions_in_row) {
 static int panel_width(void) {
     int width;
     int max_sessions_in_row;
-    if (g_app.row_count <= 0) {
-        return ui_min_panel_width();
-    }
     max_sessions_in_row = max_row_session_count();
     width = current_content_width(max_sessions_in_row);
     if (width < current_min_panel_width(max_sessions_in_row)) {
@@ -691,10 +703,8 @@ static RECT visible_rect_from_rect(const RECT *rect) {
 
 static int panel_height(void) {
     int height;
-    if (g_app.row_count <= 0) {
-        return ui_min_panel_height();
-    }
-    height = ui_panel_padding_y() * 2 + g_app.row_count * ui_row_height();
+    int display_rows = g_app.row_count > 0 ? g_app.row_count : 1;
+    height = ui_panel_padding_y() * 2 + display_rows * ui_row_height();
     if (height < ui_min_panel_height()) {
         return ui_min_panel_height();
     }
@@ -924,7 +934,7 @@ static int edge_tuck_side(void) {
 }
 
 static int edge_tuck_available(void) {
-    return g_app.edge_tuck_enabled && g_app.row_count > 0 && edge_tuck_side() != 0;
+    return g_app.edge_tuck_enabled && edge_tuck_side() != 0;
 }
 
 static int attach_horizontal_edge_anchor(void) {
@@ -1085,18 +1095,22 @@ static int status_indicator_at_point(POINT point) {
 static void update_directory_column_width(void) {
     HDC hdc;
     HGDIOBJ old_font;
+    HWND dc_window = g_app.hwnd;
     int row;
     int max_width = 0;
-    if (g_app.row_count <= 0 || g_app.hwnd == NULL) {
-        g_app.directory_column_width = 0;
-        return;
-    }
-    hdc = GetDC(g_app.hwnd);
+    hdc = GetDC(dc_window);
     if (hdc == NULL) {
         g_app.directory_column_width = 0;
         return;
     }
     old_font = SelectObject(hdc, widget_font());
+    if (g_app.row_count <= 0) {
+        const wchar_t *text = empty_state_text();
+        SIZE size;
+        if (GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &size)) {
+            max_width = size.cx;
+        }
+    }
     for (row = 0; row < g_app.row_count; row++) {
         char display_name[768];
         wchar_t display_name_wide[768];
@@ -1109,7 +1123,7 @@ static void update_directory_column_width(void) {
         }
     }
     SelectObject(hdc, old_font);
-    ReleaseDC(g_app.hwnd, hdc);
+    ReleaseDC(dc_window, hdc);
     g_app.directory_column_width = max_width;
 }
 
@@ -1427,6 +1441,16 @@ static COLORREF status_color(const char *status) {
         return RGB(235, 87, 87);
     }
     return RGB(132, 204, 22);
+}
+
+static COLORREF empty_state_color(void) {
+    if (!g_app.fetch_completed) {
+        return RGB(196, 163, 96);
+    }
+    if (g_app.last_error[0] != '\0') {
+        return RGB(190, 145, 83);
+    }
+    return RGB(143, 149, 160);
 }
 
 static int running_pulse_level(void) {
@@ -1917,7 +1941,7 @@ static void update_animation_timer(void) {
         }
         return;
     }
-    if (has_running_sessions() || edge_tuck_animating()) {
+    if (has_running_sessions() || empty_state_is_connecting() || edge_tuck_animating()) {
         if (!g_app.animation_timer_active) {
             SetTimer(g_app.hwnd, ANIMATION_TIMER_ID, ANIMATION_INTERVAL_MS, NULL);
             g_app.animation_timer_active = 1;
@@ -2522,6 +2546,41 @@ static void draw_status_indicator(HDC hdc, const RECT *rect, const char *status,
     fill_soft_indicator(hdc, rect, status_color(status), row_background, 255, current_status_soft_edge(), 0);
 }
 
+static void draw_empty_state_indicator(HDC hdc, const RECT *rect, COLORREF row_background) {
+    COLORREF color = empty_state_color();
+    if (empty_state_is_connecting()) {
+        int pulse = running_pulse_level();
+        int shadow_spread = current_running_shadow_spread() / 2;
+        int shadow_alpha = 22 + pulse * 46 / 100;
+        int highlight_alpha = 54 + pulse * 58 / 100;
+        RECT halo = *rect;
+        RECT highlight;
+        COLORREF highlight_color = RGB(239, 217, 171);
+        if (shadow_spread < 1) {
+            shadow_spread = 1;
+        }
+        InflateRect(&halo, shadow_spread, shadow_spread);
+        highlight = centered_rect(
+            rect,
+            rect_width(rect) - interpolate_by_edge_tuck(scale_px(6), scale_px(2)),
+            rect_height(rect) - interpolate_by_edge_tuck(scale_px(6), scale_px(4))
+        );
+        fill_indicator_glow(hdc, &halo, color, row_background, shadow_alpha);
+        fill_soft_indicator(hdc, rect, color, row_background, 225, current_status_soft_edge(), 1);
+        fill_soft_indicator(
+            hdc,
+            &highlight,
+            highlight_color,
+            row_background,
+            highlight_alpha,
+            current_status_soft_edge(),
+            1
+        );
+        return;
+    }
+    fill_soft_indicator(hdc, rect, color, row_background, 220, current_status_soft_edge(), 0);
+}
+
 static void draw_directory_text(HDC hdc, const wchar_t *text, const RECT *rect, int row_top) {
     GlyphVerticalMetrics metrics;
     SIZE size;
@@ -2572,6 +2631,50 @@ static void draw_server_color_bar(
     DeleteObject(brush);
 }
 
+static void draw_empty_state(HDC hdc, const RECT *client, const RECT *visible_client) {
+    RECT row_rect;
+    RECT bar_rect;
+    RECT text_rect;
+    RECT indicator_rect;
+    HBRUSH brush;
+    COLORREF row_color = RGB(31, 33, 37);
+    COLORREF accent_color = empty_state_color();
+    const wchar_t *text = empty_state_text();
+    int text_alpha = directory_text_alpha();
+
+    row_rect.left = client->left;
+    row_rect.top = ui_row_top(0);
+    row_rect.right = client->right;
+    row_rect.bottom = row_rect.top + ui_row_height();
+    brush = CreateSolidBrush(row_color);
+    if (brush != NULL) {
+        FillRect(hdc, &row_rect, brush);
+        DeleteObject(brush);
+    }
+
+    bar_rect.left = visible_client->left;
+    bar_rect.top = visible_client->top;
+    bar_rect.right = bar_rect.left + ui_server_color_bar_width();
+    bar_rect.bottom = visible_client->bottom;
+    brush = CreateSolidBrush(accent_color);
+    if (brush != NULL) {
+        FillRect(hdc, &bar_rect, brush);
+        DeleteObject(brush);
+    }
+
+    text_rect.left = directory_column_left();
+    text_rect.top = row_rect.top;
+    text_rect.right = text_rect.left + current_directory_column_width();
+    text_rect.bottom = row_rect.bottom;
+    if (text_rect.right > text_rect.left && text_alpha > 0) {
+        SetTextColor(hdc, blend_color(RGB(205, 207, 211), row_color, text_alpha));
+        draw_directory_text(hdc, text, &text_rect, row_rect.top);
+    }
+
+    indicator_rect = status_indicator_rect(0, 0);
+    draw_empty_state_indicator(hdc, &indicator_rect, row_color);
+}
+
 static void draw_outer_border(HDC hdc, const RECT *visible_client) {
     RECT border_rect;
     HBRUSH brush = CreateSolidBrush(RGB(86, 86, 86));
@@ -2613,6 +2716,9 @@ static void paint_widget(HWND hwnd, HDC hdc) {
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(225, 225, 225));
     old_font = SelectObject(hdc, widget_font());
+    if (g_app.row_count <= 0) {
+        draw_empty_state(hdc, &client, &visible_client);
+    }
     for (row = 0; row < g_app.row_count; row++) {
         RECT row_rect;
         RECT text_rect;
@@ -2689,6 +2795,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         g_app.hwnd = hwnd;
         g_app.hovered_session = -1;
         init_tooltip(hwnd);
+        update_directory_column_width();
+        refresh_widget_view();
         SetTimer(hwnd, REFRESH_TIMER_ID, REFRESH_INTERVAL_MS, NULL);
         start_fetch();
         return 0;
@@ -2714,6 +2822,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     case WM_FETCH_DONE: {
         FetchResult *result = (FetchResult *)lparam;
         if (result != NULL) {
+            g_app.fetch_completed = 1;
             if (result->ok) {
                 if (result->count > 0 || g_app.session_count == 0) {
                     g_app.session_count = result->count;
@@ -2731,6 +2840,9 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
                 g_app.last_error[0] = '\0';
             } else {
                 copy_ascii(g_app.last_error, sizeof(g_app.last_error), result->error);
+            }
+            if (g_app.row_count <= 0) {
+                update_directory_column_width();
             }
             HeapFree(GetProcessHeap(), 0, result);
         }
@@ -3015,6 +3127,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
     set_default_widget_placement(&work_area);
     load_widget_placement();
     update_display_font();
+    update_directory_column_width();
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = window_proc;
