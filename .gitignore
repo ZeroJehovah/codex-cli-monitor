@@ -9,4 +9,4 @@ dist/
 *.egg-info/
 /start-server.sh
 /start-collector.sh
-/start-widget.ps1
+/windows/CodexMonitorWidget/CodexMonitorWidget.ini
