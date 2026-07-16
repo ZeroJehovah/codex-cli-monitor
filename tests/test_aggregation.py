@@ -22,6 +22,10 @@ from codex_cli_monitor.models import CodexSession, Inference, ProcessInfo
 
 
 class AggregationTests(unittest.TestCase):
+    def test_remote_snapshot_ttl_defaults_to_thirty_seconds(self) -> None:
+        self.assertEqual(ApiConfig().remote_ttl_seconds, 30.0)
+        self.assertEqual(RemoteSnapshotStore().ttl_seconds, 30.0)
+
     def test_resolve_server_identity_reads_boot_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc = Path(tmp)

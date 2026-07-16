@@ -140,7 +140,7 @@ def build_sessions_payload(
 
 
 class RemoteSnapshotStore:
-    def __init__(self, ttl_seconds: float = 5.0) -> None:
+    def __init__(self, ttl_seconds: float = 30.0) -> None:
         if ttl_seconds <= 0:
             raise ValueError("snapshot TTL must be positive")
         self.ttl_seconds = ttl_seconds
