@@ -48,6 +48,7 @@
 #define STATUS_BAR_SHADOW_SPREAD 2
 #define SERVER_COLOR_BAR_WIDTH 3
 #define SERVER_COLOR_COUNT 7
+#define PANEL_BORDER_WIDTH 1
 #define ROW_HEIGHT 26
 #define PANEL_PADDING_Y 1
 #define MIN_PANEL_WIDTH 48
@@ -506,6 +507,20 @@ static int current_text_dot_gap(void) {
     return interpolate_by_edge_tuck(ui_text_dot_gap(), 0);
 }
 
+static int current_content_left_margin(void) {
+    return interpolate_by_edge_tuck(
+        ui_directory_left_margin(),
+        ui_server_color_bar_width() + ui_status_bar_gap()
+    );
+}
+
+static int current_status_right_margin(void) {
+    return interpolate_by_edge_tuck(
+        ui_dot_right_margin(),
+        ui_status_bar_gap() + PANEL_BORDER_WIDTH
+    );
+}
+
 static int directory_text_alpha(void) {
     int progress = edge_tuck_eased_progress();
     return 255 * (EDGE_TUCK_PROGRESS_MAX - progress) / EDGE_TUCK_PROGRESS_MAX;
@@ -579,8 +594,9 @@ static int current_content_width(int max_sessions_in_row) {
     if (max_sessions_in_row <= 0) {
         return 0;
     }
-    return ui_directory_left_margin() + current_directory_column_width() + current_text_dot_gap() +
-        current_row_status_width(max_sessions_in_row) + ui_dot_right_margin();
+    return current_content_left_margin() + current_directory_column_width() +
+        current_text_dot_gap() + current_row_status_width(max_sessions_in_row) +
+        current_status_right_margin();
 }
 
 static int expanded_panel_width(void) {
@@ -618,7 +634,7 @@ static int content_origin_x(void) {
 }
 
 static int directory_column_left(void) {
-    return content_origin_x() + ui_directory_left_margin();
+    return content_origin_x() + current_content_left_margin();
 }
 
 static int current_min_panel_width(int max_sessions_in_row) {
@@ -626,8 +642,9 @@ static int current_min_panel_width(int max_sessions_in_row) {
     if (max_sessions_in_row <= 0) {
         return ui_min_panel_width();
     }
-    collapsed_width = ui_directory_left_margin() +
-        collapsed_row_status_width(max_sessions_in_row) + ui_dot_right_margin();
+    collapsed_width = ui_server_color_bar_width() + ui_status_bar_gap() +
+        collapsed_row_status_width(max_sessions_in_row) + ui_status_bar_gap() +
+        PANEL_BORDER_WIDTH;
     if (collapsed_width < 1) {
         collapsed_width = 1;
     }
@@ -2530,16 +2547,23 @@ static void draw_directory_text(HDC hdc, const wchar_t *text, const RECT *rect, 
     SetTextAlign(hdc, old_align);
 }
 
-static void draw_server_color_bar(HDC hdc, const RECT *row_rect, int color_index) {
+static void draw_server_color_bar(
+    HDC hdc,
+    const RECT *row_rect,
+    const RECT *visible_client,
+    int row_index,
+    int color_index
+) {
     RECT bar_rect;
     HBRUSH brush;
     if (color_index < 0 || color_index >= SERVER_COLOR_COUNT) {
         return;
     }
-    bar_rect.left = content_origin_x() + 1;
-    bar_rect.top = row_rect->top;
+    bar_rect.left = visible_client->left;
+    bar_rect.top = row_index == 0 ? visible_client->top : row_rect->top;
     bar_rect.right = bar_rect.left + ui_server_color_bar_width();
-    bar_rect.bottom = row_rect->bottom;
+    bar_rect.bottom = row_index == g_app.row_count - 1 ?
+        visible_client->bottom : row_rect->bottom;
     brush = CreateSolidBrush(SERVER_COLORS[color_index]);
     if (brush == NULL) {
         return;
@@ -2548,14 +2572,38 @@ static void draw_server_color_bar(HDC hdc, const RECT *row_rect, int color_index
     DeleteObject(brush);
 }
 
+static void draw_outer_border(HDC hdc, const RECT *visible_client) {
+    RECT border_rect;
+    HBRUSH brush = CreateSolidBrush(RGB(86, 86, 86));
+    if (brush == NULL) {
+        return;
+    }
+    border_rect.left = visible_client->left;
+    border_rect.top = visible_client->top;
+    border_rect.right = visible_client->right;
+    border_rect.bottom = visible_client->top + PANEL_BORDER_WIDTH;
+    FillRect(hdc, &border_rect, brush);
+
+    border_rect.left = visible_client->right - PANEL_BORDER_WIDTH;
+    border_rect.top = visible_client->top;
+    border_rect.right = visible_client->right;
+    border_rect.bottom = visible_client->bottom;
+    FillRect(hdc, &border_rect, brush);
+
+    border_rect.left = visible_client->left;
+    border_rect.top = visible_client->bottom - PANEL_BORDER_WIDTH;
+    border_rect.right = visible_client->right;
+    border_rect.bottom = visible_client->bottom;
+    FillRect(hdc, &border_rect, brush);
+    DeleteObject(brush);
+}
+
 static void paint_widget(HWND hwnd, HDC hdc) {
     RECT client;
     RECT visible_client;
     HBRUSH background;
     HBRUSH row_background;
-    HPEN border;
     HGDIOBJ old_font;
-    HGDIOBJ old_pen;
     int row;
     GetClientRect(hwnd, &client);
     visible_client = visible_rect_from_rect(&client);
@@ -2582,7 +2630,13 @@ static void paint_widget(HWND hwnd, HDC hdc) {
             FillRect(hdc, &row_rect, row_background);
             DeleteObject(row_background);
         }
-        draw_server_color_bar(hdc, &row_rect, g_app.rows[row].server_color_index);
+        draw_server_color_bar(
+            hdc,
+            &row_rect,
+            &visible_client,
+            row,
+            g_app.rows[row].server_color_index
+        );
         row_display_name(&g_app.rows[row], display_name, sizeof(display_name));
         utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
         text_rect.left = directory_column_left();
@@ -2600,12 +2654,7 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         }
     }
     SelectObject(hdc, old_font);
-    border = CreatePen(PS_SOLID, 1, RGB(86, 86, 86));
-    old_pen = SelectObject(hdc, border);
-    SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    Rectangle(hdc, visible_client.left, visible_client.top, visible_client.right, visible_client.bottom);
-    SelectObject(hdc, old_pen);
-    DeleteObject(border);
+    draw_outer_border(hdc, &visible_client);
 }
 
 static void paint_widget_buffered(HWND hwnd, HDC target_hdc) {
