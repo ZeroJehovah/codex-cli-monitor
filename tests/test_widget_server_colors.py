@@ -36,6 +36,7 @@ class WidgetServerColorTests(unittest.TestCase):
         )
         self.assertIsNotNone(threshold_match)
         threshold = int(threshold_match.group(1)) * int(threshold_match.group(2))
+        self.assertGreaterEqual(threshold, 240 * 240)
 
         def distance_squared(left: tuple[int, ...], right: tuple[int, ...]) -> int:
             return sum((left_value - right_value) ** 2 for left_value, right_value in zip(left, right))
@@ -48,10 +49,12 @@ class WidgetServerColorTests(unittest.TestCase):
             ),
             "the palette should be allowed to retain similar non-neighbor colors",
         )
+        old_light_purple = (226, 156, 226)
+        old_gold = (238, 176, 43)
         self.assertLess(
-            distance_squared(colors[0], colors[5]),
+            distance_squared(old_light_purple, old_gold),
             threshold,
-            "the light gray and pale gold shown in the reported case must not be neighbors",
+            "the previously reported light-purple and gold pair must be rejected",
         )
         for index, color in enumerate(colors):
             self.assertTrue(
@@ -60,6 +63,41 @@ class WidgetServerColorTests(unittest.TestCase):
                     for other_index, other in enumerate(colors)
                 ),
                 f"palette color {index} needs at least one valid neighboring color",
+            )
+
+    def test_palette_colors_remain_visible_on_dark_rows(self) -> None:
+        palette_match = re.search(
+            r"SERVER_COLORS\[SERVER_COLOR_COUNT\]\s*=\s*\{(?P<body>.*?)\};",
+            self.source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(palette_match)
+        colors = [
+            tuple(map(int, values))
+            for values in re.findall(
+                r"RGB\((\d+),\s*(\d+),\s*(\d+)\)",
+                palette_match.group("body"),
+            )
+        ]
+
+        def relative_luminance(color: tuple[int, ...]) -> float:
+            channels = []
+            for value in color:
+                channel = value / 255
+                channels.append(
+                    channel / 12.92
+                    if channel <= 0.04045
+                    else ((channel + 0.055) / 1.055) ** 2.4
+                )
+            return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+        row_luminance = relative_luminance((34, 34, 34))
+        for index, color in enumerate(colors):
+            contrast = (relative_luminance(color) + 0.05) / (row_luminance + 0.05)
+            self.assertGreaterEqual(
+                contrast,
+                3.0,
+                f"palette color {index} is too dim for a thin bar on the dark row",
             )
 
     def test_color_reconciliation_runs_after_server_sorting(self) -> None:

@@ -47,8 +47,8 @@
 #define STATUS_BAR_SOFT_EDGE 1
 #define STATUS_BAR_SHADOW_SPREAD 2
 #define SERVER_COLOR_BAR_WIDTH 3
-#define SERVER_COLOR_COUNT 7
-#define SERVER_COLOR_MIN_DISTANCE_SQUARED (120 * 120)
+#define SERVER_COLOR_COUNT 5
+#define SERVER_COLOR_MIN_DISTANCE_SQUARED (240 * 240)
 #define PANEL_BORDER_WIDTH 1
 #define ROW_HEIGHT 26
 #define PANEL_PADDING_Y 1
@@ -148,13 +148,11 @@ static const wchar_t EMPTY_TEXT_IDLE[] = L"\x6682\x65e0\x4f1a\x8bdd";
 static const wchar_t EMPTY_TEXT_FAILED[] = L"\x8fde\x63a5\x5931\x8d25";
 static const int DISPLAY_FONT_SIZES[] = {8, 9, 10, 11, 12, 14, 16};
 static const COLORREF SERVER_COLORS[SERVER_COLOR_COUNT] = {
-    RGB(217, 217, 217),
-    RGB(238, 43, 189),
-    RGB(238, 176, 43),
-    RGB(226, 156, 226),
-    RGB(157, 43, 238),
-    RGB(236, 225, 147),
-    RGB(140, 140, 140),
+    RGB(247, 247, 242),
+    RGB(240, 58, 200),
+    RGB(255, 196, 0),
+    RGB(157, 92, 255),
+    RGB(216, 180, 254),
 };
 
 static AppState g_app;
