@@ -25,6 +25,11 @@
 
 为了减少误判，远程 API 进行中的判断不会只依赖长连接；它需要近期 Codex session 文件活动和网络连接共同支撑。监控不会输出 session JSONL 的消息正文。
 
+监控还会读取 Linux 进程的会话 ID、进程组和终端前台进程组。若 Codex 仍残留在
+`/proc` 中，但其 TTY 已删除、终端前台进程组已失效，或者原终端会话 leader 已经不存
+在，则该进程被视为已确认脱离的终端孤儿，不计入打开的 Codex 会话。仅仅长时间没有输
+入或网络流量不是断线证据，正常闲置等待输入的 SSH Codex 仍会显示。
+
 主状态只有三种：
 
 - `运行中`：已提交提示词，AI 正在思考、等待 API、执行 MCP、本地工具或其他操作。
@@ -584,6 +589,31 @@ curl http://VPS地址:8765/healthz
 - 检查 Hook 日志是否更新。
 - 检查 `~/.codex` 是否属于正确用户。
 - 如果移动过仓库，重新安装 Hook。
+
+#### SSH 已断开但 Codex 会话仍显示
+
+监控会自动忽略 TTY 已删除、终端前台进程组失效或会话 leader 消失的已确认终端孤儿。
+但是网络突然中断时，Linux 可能仍把旧 SSH TCP 连接保留为 `ESTABLISHED`，此时
+`sshd`、shell 和 Codex 进程树都确实还存在；监控不能仅按空闲时间隐藏它，否则会误伤
+正常挂着等待输入的 Codex。
+
+对于经常通过 SSH 运行 Codex 的服务器，建议让 sshd 主动探测客户端。以下配置会在客
+户端连续约 60 秒无响应后关闭 SSH 会话，使 Codex 收到终端断开并被回收；请先保持另一
+条 SSH 连接以便配置错误时恢复：
+
+```bash
+sudo install -d -m 0755 /etc/ssh/sshd_config.d
+printf '%s\n' \
+  'ClientAliveInterval 30' \
+  'ClientAliveCountMax 2' \
+  | sudo tee /etc/ssh/sshd_config.d/90-codex-monitor-client-alive.conf >/dev/null
+sudo sshd -t
+sudo systemctl reload ssh.service
+sudo sshd -T | grep -E '^(clientaliveinterval|clientalivecountmax) '
+```
+
+部分发行版的服务名是 `sshd.service`。配置只影响之后建立的 SSH 连接；配置前已经形成
+的黑洞连接仍需等待系统 TCP keepalive 或清理一次对应 SSH 会话。
 
 #### 服务无法启动
 

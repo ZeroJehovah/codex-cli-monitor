@@ -150,6 +150,9 @@ class ProcessInfo:
     elapsed_seconds: float | None
     cpu_seconds: float | None
     started_at: float | None = None
+    process_group_id: int | None = None
+    session_id: int | None = None
+    foreground_process_group_id: int | None = None
     cpu_delta_seconds: float | None = None
     children: tuple[int, ...] = field(default_factory=tuple)
 
@@ -175,6 +178,9 @@ class ProcessInfo:
             "elapsed_seconds": self.elapsed_seconds,
             "cpu_seconds": self.cpu_seconds,
             "started_at": self.started_at,
+            "process_group_id": self.process_group_id,
+            "session_id": self.session_id,
+            "foreground_process_group_id": self.foreground_process_group_id,
             "cpu_delta_seconds": self.cpu_delta_seconds,
             "children": list(self.children),
         }

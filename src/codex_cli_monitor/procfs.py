@@ -85,7 +85,19 @@ def _read_process(
     if parsed is None:
         return None
 
-    pid, comm, state, ppid, tty_nr, utime_ticks, stime_ticks, start_ticks = parsed
+    (
+        pid,
+        comm,
+        state,
+        ppid,
+        process_group_id,
+        session_id,
+        tty_nr,
+        foreground_process_group_id,
+        utime_ticks,
+        stime_ticks,
+        start_ticks,
+    ) = parsed
     cmdline = _read_cmdline(pid_dir / "cmdline")
     cwd = _readlink(pid_dir / "cwd")
     exe = _readlink(pid_dir / "exe")
@@ -111,12 +123,15 @@ def _read_process(
         elapsed_seconds=elapsed_seconds,
         cpu_seconds=(utime_ticks + stime_ticks) / ticks_per_second,
         started_at=started_at,
+        process_group_id=process_group_id,
+        session_id=session_id,
+        foreground_process_group_id=foreground_process_group_id,
     )
 
 
 def parse_stat(
     stat_text: str,
-) -> tuple[int, str, str, int, int, int, int, int] | None:
+) -> tuple[int, str, str, int, int, int, int, int, int, int, int] | None:
     left = stat_text.find("(")
     right = stat_text.rfind(")")
     if left < 0 or right < left:
@@ -128,14 +143,29 @@ def parse_stat(
         fields = stat_text[right + 2 :].split()
         state = fields[0]
         ppid = int(fields[1])
+        process_group_id = int(fields[2])
+        session_id = int(fields[3])
         tty_nr = int(fields[4])
+        foreground_process_group_id = int(fields[5])
         utime_ticks = int(fields[11])
         stime_ticks = int(fields[12])
         start_ticks = int(fields[19])
     except (IndexError, ValueError):
         return None
 
-    return pid, comm, state, ppid, tty_nr, utime_ticks, stime_ticks, start_ticks
+    return (
+        pid,
+        comm,
+        state,
+        ppid,
+        process_group_id,
+        session_id,
+        tty_nr,
+        foreground_process_group_id,
+        utime_ticks,
+        stime_ticks,
+        start_ticks,
+    )
 
 
 def _read_uptime(proc_root: Path) -> float | None:
