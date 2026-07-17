@@ -50,14 +50,15 @@ The floating panel is a headerless table grouped by directory. Each row shows
 the directory name in the first column and one or more softened-edge process
 status dots in the second column. A colored vertical bar at the far left of
 each row identifies the server without prefixing the directory label. Colors
-are randomly selected from a high-contrast gold, purple, magenta, and neutral
-preset palette that avoids the blue, green, and red process-status colors and
-nearby hues. Visually similar colors may remain in the palette, but neighboring
-servers in the sorted display order are assigned colors above a minimum RGB
-distance. Assignments remain stable across ordinary refreshes and are changed
-only when necessary to repair a new low-contrast adjacency after servers are
-added or removed. They are released after all sessions from that server
-disappear. The table width is
+are selected from a high-separation ivory, fuchsia, amber, bright violet, and
+light lavender preset palette that avoids the blue, green, and red
+process-status colors and nearby hues. Visually similar colors may remain in
+the palette, but neighboring servers in the sorted display order must have an
+RGB distance of at least 240 so the 3-pixel bars remain distinct on the dark
+panel. Assignments remain stable across ordinary refreshes and are changed only
+when necessary to repair a new low-contrast adjacency after servers are added
+or removed. They are released after all sessions from that server disappear.
+The table width is
 calculated from the visible directory names and status dots instead of reserving
 a large fixed directory column. The panel has no separate gray left border:
 each server color bar is flush with the visible left edge and acts as that row's
