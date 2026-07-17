@@ -48,6 +48,7 @@
 #define STATUS_BAR_SHADOW_SPREAD 2
 #define SERVER_COLOR_BAR_WIDTH 3
 #define SERVER_COLOR_COUNT 7
+#define SERVER_COLOR_MIN_DISTANCE_SQUARED (120 * 120)
 #define PANEL_BORDER_WIDTH 1
 #define ROW_HEIGHT 26
 #define PANEL_PADDING_Y 1
@@ -1304,34 +1305,121 @@ static int find_server_color_index(const char *server_key) {
     return -1;
 }
 
-static int choose_server_color_index(void) {
-    int used[SERVER_COLOR_COUNT];
-    int available[SERVER_COLOR_COUNT];
-    int available_count = 0;
-    int assignment;
+static int find_server_color_assignment_index(const char *server_key) {
+    int index;
+    for (index = 0; index < g_app.server_color_count; index++) {
+        if (strcmp(g_app.server_colors[index].server_key, server_key) == 0) {
+            return index;
+        }
+    }
+    return -1;
+}
+
+static int server_color_distance_squared(int left_index, int right_index) {
+    int red_difference;
+    int green_difference;
+    int blue_difference;
+    COLORREF left = SERVER_COLORS[left_index];
+    COLORREF right = SERVER_COLORS[right_index];
+    red_difference = (int)GetRValue(left) - (int)GetRValue(right);
+    green_difference = (int)GetGValue(left) - (int)GetGValue(right);
+    blue_difference = (int)GetBValue(left) - (int)GetBValue(right);
+    return red_difference * red_difference +
+        green_difference * green_difference +
+        blue_difference * blue_difference;
+}
+
+static int server_colors_have_high_contrast(int left_index, int right_index) {
+    if (left_index < 0 || left_index >= SERVER_COLOR_COUNT ||
+        right_index < 0 || right_index >= SERVER_COLOR_COUNT) {
+        return 0;
+    }
+    return server_color_distance_squared(left_index, right_index) >=
+        SERVER_COLOR_MIN_DISTANCE_SQUARED;
+}
+
+static int choose_server_color_index(
+    int previous_color,
+    int next_color,
+    const int used[SERVER_COLOR_COUNT]
+) {
+    int candidates[SERVER_COLOR_COUNT];
+    int candidate_count = 0;
     int color;
-    ZeroMemory(used, sizeof(used));
-    for (assignment = 0; assignment < g_app.server_color_count; assignment++) {
-        int assigned_color = g_app.server_colors[assignment].color_index;
-        if (assigned_color >= 0 && assigned_color < SERVER_COLOR_COUNT) {
-            used[assigned_color] = 1;
+    int prefer_unused = 0;
+    int prefer_next_contrast = 0;
+    for (color = 0; color < SERVER_COLOR_COUNT; color++) {
+        if (previous_color >= 0 &&
+            !server_colors_have_high_contrast(previous_color, color)) {
+            continue;
+        }
+        if (used[color] == 0) {
+            prefer_unused = 1;
+        }
+    }
+    if (next_color >= 0) {
+        for (color = 0; color < SERVER_COLOR_COUNT; color++) {
+            if (previous_color >= 0 &&
+                !server_colors_have_high_contrast(previous_color, color)) {
+                continue;
+            }
+            if (prefer_unused && used[color] != 0) {
+                continue;
+            }
+            if (server_colors_have_high_contrast(color, next_color)) {
+                prefer_next_contrast = 1;
+                break;
+            }
         }
     }
     for (color = 0; color < SERVER_COLOR_COUNT; color++) {
-        if (!used[color]) {
-            available[available_count++] = color;
+        if (previous_color >= 0 &&
+            !server_colors_have_high_contrast(previous_color, color)) {
+            continue;
         }
+        if (prefer_unused && used[color] != 0) {
+            continue;
+        }
+        if (prefer_next_contrast &&
+            !server_colors_have_high_contrast(color, next_color)) {
+            continue;
+        }
+        candidates[candidate_count++] = color;
     }
-    if (available_count > 0) {
-        return available[rand() % available_count];
+    return candidate_count > 0
+        ? candidates[rand() % candidate_count]
+        : rand() % SERVER_COLOR_COUNT;
+}
+
+static int collect_ordered_server_keys(char server_keys[MAX_SESSIONS][256]) {
+    int row;
+    int server_count = 0;
+    for (row = 0; row < g_app.row_count; row++) {
+        char server_key[256];
+        server_identity_key(
+            g_app.rows[row].server_id,
+            g_app.rows[row].server_name,
+            server_key,
+            sizeof(server_key)
+        );
+        if (server_count > 0 &&
+            strcmp(server_keys[server_count - 1], server_key) == 0) {
+            continue;
+        }
+        copy_ascii(server_keys[server_count], sizeof(server_keys[server_count]), server_key);
+        server_count++;
     }
-    return rand() % SERVER_COLOR_COUNT;
+    return server_count;
 }
 
 static void sync_server_colors(void) {
+    char server_keys[MAX_SESSIONS][256];
+    int used[SERVER_COLOR_COUNT];
     int read_index;
     int write_index = 0;
-    int session_index;
+    int server_count;
+    int server_index;
+    int previous_color = -1;
     for (read_index = 0; read_index < g_app.server_color_count; read_index++) {
         if (server_key_is_active(g_app.server_colors[read_index].server_key)) {
             if (write_index != read_index) {
@@ -1341,31 +1429,57 @@ static void sync_server_colors(void) {
         }
     }
     g_app.server_color_count = write_index;
-    for (session_index = 0; session_index < g_app.session_count; session_index++) {
-        char server_key[256];
+    ZeroMemory(used, sizeof(used));
+    for (read_index = 0; read_index < g_app.server_color_count; read_index++) {
+        int color_index = g_app.server_colors[read_index].color_index;
+        if (color_index >= 0 && color_index < SERVER_COLOR_COUNT) {
+            used[color_index]++;
+        }
+    }
+    server_count = collect_ordered_server_keys(server_keys);
+    for (server_index = 0; server_index < server_count; server_index++) {
         ServerColorAssignment *assignment;
-        int color_index;
-        server_identity_key(
-            g_app.sessions[session_index].server_id,
-            g_app.sessions[session_index].server_name,
-            server_key,
-            sizeof(server_key)
-        );
-        if (find_server_color_index(server_key) >= 0 ||
-            g_app.server_color_count >= MAX_SESSIONS) {
+        int assignment_index = find_server_color_assignment_index(server_keys[server_index]);
+        int color_index = -1;
+        int next_color = -1;
+        int next_index;
+        if (assignment_index < 0) {
+            if (g_app.server_color_count >= MAX_SESSIONS) {
+                break;
+            }
+            assignment_index = g_app.server_color_count++;
+            assignment = &g_app.server_colors[assignment_index];
+            ZeroMemory(assignment, sizeof(*assignment));
+            copy_ascii(assignment->server_key, sizeof(assignment->server_key), server_keys[server_index]);
+            assignment->color_index = -1;
+        } else {
+            assignment = &g_app.server_colors[assignment_index];
+        }
+        color_index = assignment->color_index;
+        if (color_index >= 0 && color_index < SERVER_COLOR_COUNT &&
+            (previous_color < 0 ||
+             server_colors_have_high_contrast(previous_color, color_index))) {
+            previous_color = color_index;
             continue;
         }
-        color_index = choose_server_color_index();
-        assignment = &g_app.server_colors[g_app.server_color_count];
-        copy_ascii(assignment->server_key, sizeof(assignment->server_key), server_key);
+        if (color_index >= 0 && color_index < SERVER_COLOR_COUNT) {
+            used[color_index]--;
+        }
+        for (next_index = server_index + 1; next_index < server_count; next_index++) {
+            next_color = find_server_color_index(server_keys[next_index]);
+            if (next_color >= 0 && next_color < SERVER_COLOR_COUNT) {
+                break;
+            }
+        }
+        color_index = choose_server_color_index(previous_color, next_color, used);
         assignment->color_index = color_index;
-        g_app.server_color_count++;
+        used[color_index]++;
+        previous_color = color_index;
     }
 }
 
 static void rebuild_directory_rows(void) {
     int index;
-    sync_server_colors();
     g_app.row_count = 0;
     for (index = 0; index < g_app.session_count; index++) {
         Session *session = &g_app.sessions[index];
@@ -1403,13 +1517,24 @@ static void rebuild_directory_rows(void) {
             copy_ascii(g_app.rows[target_row].server_id, sizeof(g_app.rows[target_row].server_id), session->server_id);
             copy_ascii(g_app.rows[target_row].server_name, sizeof(g_app.rows[target_row].server_name), session->server_name);
             g_app.rows[target_row].original_order = target_row;
-            g_app.rows[target_row].server_color_index = find_server_color_index(session_server_key);
+            g_app.rows[target_row].server_color_index = -1;
         }
         if (g_app.rows[target_row].session_count < MAX_SESSIONS) {
             g_app.rows[target_row].session_indexes[g_app.rows[target_row].session_count++] = index;
         }
     }
     sort_directory_rows();
+    sync_server_colors();
+    for (index = 0; index < g_app.row_count; index++) {
+        char row_server_key[256];
+        server_identity_key(
+            g_app.rows[index].server_id,
+            g_app.rows[index].server_name,
+            row_server_key,
+            sizeof(row_server_key)
+        );
+        g_app.rows[index].server_color_index = find_server_color_index(row_server_key);
+    }
     if (g_app.hovered_session >= g_app.session_count) {
         g_app.hovered_session = -1;
     }
