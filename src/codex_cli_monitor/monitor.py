@@ -236,6 +236,7 @@ def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, .
         pid
         for pid in codex_pids
         if not _is_inactive_root_state(processes[pid])
+        and not _is_confirmed_detached_terminal_root(processes[pid], processes)
     }
     roots = [
         processes[pid]
@@ -247,6 +248,26 @@ def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, .
 
 def _is_inactive_root_state(process: ProcessInfo) -> bool:
     return process.state in INACTIVE_ROOT_STATES
+
+
+def _is_confirmed_detached_terminal_root(
+    process: ProcessInfo,
+    processes: dict[int, ProcessInfo],
+) -> bool:
+    if process.tty_nr is None or process.tty_nr <= 0:
+        return False
+    if process.tty is not None and process.tty.endswith(" (deleted)"):
+        return True
+    if (
+        process.foreground_process_group_id is not None
+        and process.foreground_process_group_id < 0
+    ):
+        return True
+    return (
+        process.session_id is not None
+        and process.session_id > 1
+        and process.session_id not in processes
+    )
 
 
 def _collect_descendants(

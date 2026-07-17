@@ -14,12 +14,27 @@ class ProcfsTests(unittest.TestCase):
         parsed = parse_stat(stat)
 
         self.assertIsNotNone(parsed)
-        pid, comm, state, ppid, tty_nr, utime, stime, start = parsed
+        (
+            pid,
+            comm,
+            state,
+            ppid,
+            process_group_id,
+            session_id,
+            tty_nr,
+            foreground_process_group_id,
+            utime,
+            stime,
+            start,
+        ) = parsed
         self.assertEqual(pid, 42)
         self.assertEqual(comm, "codex worker")
         self.assertEqual(state, "S")
         self.assertEqual(ppid, 1)
+        self.assertEqual(process_group_id, 0)
+        self.assertEqual(session_id, 0)
         self.assertEqual(tty_nr, 34816)
+        self.assertEqual(foreground_process_group_id, 0)
         self.assertEqual(utime, 5)
         self.assertEqual(stime, 7)
         self.assertEqual(start, 100)
@@ -37,6 +52,9 @@ class ProcfsTests(unittest.TestCase):
         self.assertEqual(processes[101].ppid, 100)
         self.assertEqual(processes[100].cwd, "/work/a")
         self.assertEqual(processes[100].tty, "/dev/pts/3")
+        self.assertEqual(processes[100].process_group_id, 0)
+        self.assertEqual(processes[100].session_id, 0)
+        self.assertEqual(processes[100].foreground_process_group_id, 0)
 
     def test_read_network_connections_maps_socket_inode_to_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

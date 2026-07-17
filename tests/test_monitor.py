@@ -49,6 +49,104 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual(sessions, ())
 
+    def test_codex_with_missing_terminal_session_leader_is_not_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            _write_common_proc(proc)
+            _write_process(
+                proc,
+                100,
+                "codex",
+                "S",
+                99,
+                ["codex"],
+                "/work/a",
+                process_group_id=100,
+                session_id=90,
+                foreground_process_group_id=100,
+            )
+
+            sessions = discover_sessions(proc, sample_window=0)
+
+        self.assertEqual(sessions, ())
+
+    def test_codex_with_live_terminal_session_leader_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            _write_common_proc(proc)
+            _write_process(
+                proc,
+                90,
+                "bash",
+                "S",
+                1,
+                ["bash"],
+                "/work/a",
+                process_group_id=90,
+                session_id=90,
+                foreground_process_group_id=100,
+            )
+            _write_process(
+                proc,
+                100,
+                "codex",
+                "S",
+                90,
+                ["codex"],
+                "/work/a",
+                process_group_id=100,
+                session_id=90,
+                foreground_process_group_id=100,
+            )
+
+            sessions = discover_sessions(proc, sample_window=0)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].root.pid, 100)
+
+    def test_codex_with_hung_up_terminal_is_not_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            _write_common_proc(proc)
+            _write_process(
+                proc,
+                100,
+                "codex",
+                "S",
+                1,
+                ["codex"],
+                "/work/a",
+                process_group_id=100,
+                session_id=100,
+                foreground_process_group_id=-1,
+            )
+
+            sessions = discover_sessions(proc, sample_window=0)
+
+        self.assertEqual(sessions, ())
+
+    def test_codex_with_deleted_terminal_is_not_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            _write_common_proc(proc)
+            _write_process(
+                proc,
+                100,
+                "codex",
+                "S",
+                1,
+                ["codex"],
+                "/work/a",
+                process_group_id=100,
+                session_id=100,
+                foreground_process_group_id=100,
+                stdin_target="/dev/pts/3 (deleted)",
+            )
+
+            sessions = discover_sessions(proc, sample_window=0)
+
+        self.assertEqual(sessions, ())
+
     def test_new_codex_run_does_not_count_stopped_same_directory_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc = Path(tmp)
@@ -1616,17 +1714,30 @@ def _write_process(
     cmdline: list[str],
     cwd: str,
     start_ticks: int = 100,
+    process_group_id: int = 0,
+    session_id: int = 0,
+    foreground_process_group_id: int = 0,
+    stdin_target: str = "/dev/pts/3",
 ) -> None:
     pid_dir = proc / str(pid)
     (pid_dir / "fd").mkdir(parents=True)
     (pid_dir / "stat").write_text(
-        _stat_line(pid, comm, state, ppid, start_ticks=start_ticks),
+        _stat_line(
+            pid,
+            comm,
+            state,
+            ppid,
+            start_ticks=start_ticks,
+            process_group_id=process_group_id,
+            session_id=session_id,
+            foreground_process_group_id=foreground_process_group_id,
+        ),
         encoding="utf-8",
     )
     (pid_dir / "cmdline").write_bytes(b"\0".join(item.encode() for item in cmdline) + b"\0")
     (pid_dir / "cwd").symlink_to(cwd)
     (pid_dir / "exe").symlink_to(f"/usr/bin/{cmdline[0]}")
-    (pid_dir / "fd" / "0").symlink_to("/dev/pts/3")
+    (pid_dir / "fd" / "0").symlink_to(stdin_target)
 
 
 def _write_session(home: Path, cwd: str, last_record: str) -> Path:
@@ -1700,14 +1811,17 @@ def _stat_line(
     state: str,
     ppid: int,
     start_ticks: int = 100,
+    process_group_id: int = 0,
+    session_id: int = 0,
+    foreground_process_group_id: int = 0,
 ) -> str:
     fields = [
         state,
         str(ppid),
-        "0",
-        "0",
+        str(process_group_id),
+        str(session_id),
         "34816",
-        "0",
+        str(foreground_process_group_id),
         "0",
         "0",
         "0",
