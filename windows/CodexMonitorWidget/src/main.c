@@ -174,6 +174,7 @@ static int actual_panel_width(void);
 static int directory_column_left(void);
 static int rect_width(const RECT *rect);
 static void finish_drag_move(void);
+static void resume_edge_tuck_after_drag(void);
 static void settle_dragged_window(void);
 
 static void utf8_to_wide(const char *source, wchar_t *target, int target_count) {
@@ -1030,20 +1031,9 @@ static void set_edge_tuck_target(int collapsed) {
 }
 
 static void sync_edge_tuck_after_layout_change(void) {
-    int old_progress = g_app.edge_tuck_progress;
-    int old_target = g_app.edge_tuck_target_collapsed;
     if (!edge_tuck_available()) {
         cancel_edge_tuck_delay();
-        g_app.edge_tuck_target_collapsed = 0;
-        g_app.edge_tuck_progress = 0;
-        g_app.edge_tuck_side = 0;
-        if (old_progress != g_app.edge_tuck_progress ||
-            old_target != g_app.edge_tuck_target_collapsed) {
-            update_animation_timer();
-            resize_panel();
-            update_tool_rect();
-            InvalidateRect(g_app.hwnd, NULL, FALSE);
-        }
+        set_edge_tuck_target(0);
         return;
     }
     if (g_app.mouse_inside || g_app.dragging || g_app.context_menu_open) {
@@ -2159,9 +2149,24 @@ static void finish_drag_move(void) {
         refresh_widget_view();
     } else {
         sync_edge_tuck_after_layout_change();
-        update_animation_timer();
     }
+    resume_edge_tuck_after_drag();
     start_fetch();
+}
+
+static void resume_edge_tuck_after_drag(void) {
+    int side = 0;
+    if (g_app.edge_tuck_enabled) {
+        side = attached_horizontal_edge_side();
+    }
+    if (side != 0) {
+        g_app.edge_tuck_side = side;
+        set_edge_tuck_target(1);
+    } else {
+        set_edge_tuck_target(0);
+    }
+    g_app.edge_tuck_last_tick = GetTickCount();
+    update_animation_timer();
 }
 
 static void set_tooltip_for_hover(int index) {
