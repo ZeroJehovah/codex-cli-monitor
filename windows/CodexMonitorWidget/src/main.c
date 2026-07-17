@@ -167,6 +167,7 @@ static void cancel_edge_tuck_delay(void);
 static void schedule_edge_tuck_delay(void);
 static void set_edge_tuck_target(int collapsed);
 static void sync_edge_tuck_after_layout_change(void);
+static int attached_horizontal_edge_side(void);
 static int edge_tuck_side(void);
 static int panel_width(void);
 static int actual_panel_width(void);
@@ -909,13 +910,9 @@ static void save_widget_placement(void) {
     RegCloseKey(key);
 }
 
-static int edge_tuck_side(void) {
+static int attached_horizontal_edge_side(void) {
     RECT rect;
     RECT work_area;
-    if ((g_app.edge_tuck_target_collapsed || g_app.edge_tuck_progress != 0) &&
-        g_app.edge_tuck_side != 0) {
-        return g_app.edge_tuck_side;
-    }
     if (g_app.hwnd == NULL) {
         return 0;
     }
@@ -932,8 +929,16 @@ static int edge_tuck_side(void) {
     return 0;
 }
 
+static int edge_tuck_side(void) {
+    if ((g_app.edge_tuck_target_collapsed || g_app.edge_tuck_progress != 0) &&
+        g_app.edge_tuck_side != 0) {
+        return g_app.edge_tuck_side;
+    }
+    return attached_horizontal_edge_side();
+}
+
 static int edge_tuck_available(void) {
-    return g_app.edge_tuck_enabled && edge_tuck_side() != 0;
+    return g_app.edge_tuck_enabled && attached_horizontal_edge_side() != 0;
 }
 
 static int attach_horizontal_edge_anchor(void) {
