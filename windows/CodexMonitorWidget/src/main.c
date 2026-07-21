@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
+#include <mmsystem.h>
 #include <shellapi.h>
 #include <winhttp.h>
 #include <ctype.h>
@@ -25,11 +26,13 @@
 #define REFRESH_INTERVAL_MS 500
 #define EMPTY_RESULT_CONFIRMATIONS 1
 #define ANIMATION_INTERVAL_MS 16
+#define EDGE_TUCK_FRAME_INTERVAL_MS 8
 #define RUNNING_PULSE_PERIOD_MS 1200
 #define EDGE_TUCK_ANIMATION_DURATION_MS 260
 #define EDGE_TUCK_PROGRESS_MAX 1000
 #define EDGE_TUCK_ATTACH_TOLERANCE 1
 #define WM_FETCH_DONE (WM_APP + 1)
+#define WM_EDGE_TUCK_FRAME (WM_APP + 2)
 #define MENU_EXIT_ID 1001
 #define MENU_ABOUT_ID 1002
 #define MENU_EDGE_TUCK_ID 1003
@@ -128,7 +131,11 @@ typedef struct AppState {
     int edge_tuck_progress;
     int edge_tuck_enabled;
     int edge_tuck_side;
-    DWORD edge_tuck_last_tick;
+    LARGE_INTEGER edge_tuck_last_counter;
+    LARGE_INTEGER performance_frequency;
+    HANDLE edge_tuck_timer;
+    volatile LONG edge_tuck_frame_pending;
+    int timer_resolution_active;
     int anchor_right;
     int anchor_bottom;
     int placement_offset_x;
@@ -160,6 +167,7 @@ static AppState g_app;
 static void set_tooltip_for_hover(int index);
 static void show_context_menu(HWND hwnd, POINT point);
 static void update_animation_timer(void);
+static void stop_edge_tuck_timer(int wait_for_callbacks);
 static void update_tool_rect(void);
 static void resize_panel(void);
 static void update_window_region(int actual_width, int visible_width, int height);
@@ -1026,7 +1034,7 @@ static void set_edge_tuck_target(int collapsed) {
         return;
     }
     g_app.edge_tuck_target_collapsed = normalized;
-    g_app.edge_tuck_last_tick = GetTickCount();
+    QueryPerformanceCounter(&g_app.edge_tuck_last_counter);
     update_animation_timer();
 }
 
@@ -2010,28 +2018,33 @@ static void resize_panel(void) {
 }
 
 static void advance_edge_tuck_animation(void) {
-    DWORD now;
-    DWORD elapsed;
+    LARGE_INTEGER now;
+    LONGLONG elapsed;
+    LONGLONG duration;
     int target = edge_tuck_target_progress();
     int direction;
     int delta;
     if (!edge_tuck_animating()) {
         return;
     }
-    now = GetTickCount();
-    if (g_app.edge_tuck_last_tick == 0) {
-        g_app.edge_tuck_last_tick = now;
+    QueryPerformanceCounter(&now);
+    if (g_app.edge_tuck_last_counter.QuadPart == 0) {
+        g_app.edge_tuck_last_counter = now;
     }
-    elapsed = now - g_app.edge_tuck_last_tick;
-    g_app.edge_tuck_last_tick = now;
-    if (elapsed > EDGE_TUCK_ANIMATION_DURATION_MS) {
-        elapsed = EDGE_TUCK_ANIMATION_DURATION_MS;
+    elapsed = now.QuadPart - g_app.edge_tuck_last_counter.QuadPart;
+    duration = g_app.performance_frequency.QuadPart * EDGE_TUCK_ANIMATION_DURATION_MS / 1000;
+    if (elapsed <= 0 || duration <= 0) {
+        return;
+    }
+    if (elapsed > duration) {
+        elapsed = duration;
     }
     direction = target > g_app.edge_tuck_progress ? 1 : -1;
-    delta = (int)(elapsed * EDGE_TUCK_PROGRESS_MAX / EDGE_TUCK_ANIMATION_DURATION_MS);
+    delta = (int)((elapsed * EDGE_TUCK_PROGRESS_MAX + duration / 2) / duration);
     if (delta < 1) {
-        delta = 1;
+        return;
     }
+    g_app.edge_tuck_last_counter = now;
     g_app.edge_tuck_progress += direction * delta;
     if ((direction > 0 && g_app.edge_tuck_progress > target) ||
         (direction < 0 && g_app.edge_tuck_progress < target)) {
@@ -2044,6 +2057,61 @@ static void advance_edge_tuck_animation(void) {
     update_tool_rect();
 }
 
+static VOID CALLBACK edge_tuck_timer_callback(PVOID context, BOOLEAN timer_fired) {
+    HWND hwnd = (HWND)context;
+    (void)timer_fired;
+    if (InterlockedCompareExchange(&g_app.edge_tuck_frame_pending, 1, 0) != 0) {
+        return;
+    }
+    if (!PostMessageW(hwnd, WM_EDGE_TUCK_FRAME, 0, 0)) {
+        InterlockedExchange(&g_app.edge_tuck_frame_pending, 0);
+    }
+}
+
+static int start_edge_tuck_timer(void) {
+    HANDLE timer = NULL;
+    if (g_app.edge_tuck_timer != NULL) {
+        return 1;
+    }
+    if (!g_app.timer_resolution_active && timeBeginPeriod(1) == TIMERR_NOERROR) {
+        g_app.timer_resolution_active = 1;
+    }
+    InterlockedExchange(&g_app.edge_tuck_frame_pending, 0);
+    if (!CreateTimerQueueTimer(
+            &timer,
+            NULL,
+            edge_tuck_timer_callback,
+            g_app.hwnd,
+            0,
+            EDGE_TUCK_FRAME_INTERVAL_MS,
+            WT_EXECUTEDEFAULT)) {
+        if (g_app.timer_resolution_active) {
+            timeEndPeriod(1);
+            g_app.timer_resolution_active = 0;
+        }
+        return 0;
+    }
+    g_app.edge_tuck_timer = timer;
+    return 1;
+}
+
+static void stop_edge_tuck_timer(int wait_for_callbacks) {
+    HANDLE timer = g_app.edge_tuck_timer;
+    g_app.edge_tuck_timer = NULL;
+    if (timer != NULL) {
+        DeleteTimerQueueTimer(
+            NULL,
+            timer,
+            wait_for_callbacks ? INVALID_HANDLE_VALUE : NULL
+        );
+    }
+    InterlockedExchange(&g_app.edge_tuck_frame_pending, 0);
+    if (g_app.timer_resolution_active) {
+        timeEndPeriod(1);
+        g_app.timer_resolution_active = 0;
+    }
+}
+
 static void update_tool_rect(void) {
     RECT rect;
     GetClientRect(g_app.hwnd, &rect);
@@ -2052,14 +2120,24 @@ static void update_tool_rect(void) {
 }
 
 static void update_animation_timer(void) {
+    int edge_timer_started = 0;
+    int needs_window_timer;
     if (g_app.dragging) {
+        stop_edge_tuck_timer(0);
         if (g_app.animation_timer_active) {
             KillTimer(g_app.hwnd, ANIMATION_TIMER_ID);
             g_app.animation_timer_active = 0;
         }
         return;
     }
-    if (has_running_sessions() || empty_state_is_connecting() || edge_tuck_animating()) {
+    if (edge_tuck_animating()) {
+        edge_timer_started = start_edge_tuck_timer();
+    } else {
+        stop_edge_tuck_timer(0);
+    }
+    needs_window_timer = !edge_timer_started &&
+        (has_running_sessions() || empty_state_is_connecting() || edge_tuck_animating());
+    if (needs_window_timer) {
         if (!g_app.animation_timer_active) {
             SetTimer(g_app.hwnd, ANIMATION_TIMER_ID, ANIMATION_INTERVAL_MS, NULL);
             g_app.animation_timer_active = 1;
@@ -2165,7 +2243,7 @@ static void resume_edge_tuck_after_drag(void) {
     } else {
         set_edge_tuck_target(0);
     }
-    g_app.edge_tuck_last_tick = GetTickCount();
+    QueryPerformanceCounter(&g_app.edge_tuck_last_counter);
     update_animation_timer();
 }
 
@@ -2950,6 +3028,17 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             update_animation_timer();
         }
         return 0;
+    case WM_EDGE_TUCK_FRAME:
+        if (g_app.dragging) {
+            update_animation_timer();
+            InterlockedExchange(&g_app.edge_tuck_frame_pending, 0);
+            return 0;
+        }
+        advance_edge_tuck_animation();
+        RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
+        update_animation_timer();
+        InterlockedExchange(&g_app.edge_tuck_frame_pending, 0);
+        return 0;
     case WM_ERASEBKGND:
         return 1;
     case WM_FETCH_DONE: {
@@ -3099,6 +3188,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         save_widget_placement();
         KillTimer(hwnd, REFRESH_TIMER_ID);
         KillTimer(hwnd, ANIMATION_TIMER_ID);
+        stop_edge_tuck_timer(1);
         if (g_app.font != NULL) {
             DeleteObject(g_app.font);
             g_app.font = NULL;
@@ -3252,6 +3342,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
     }
 
     ZeroMemory(&g_app, sizeof(g_app));
+    if (!QueryPerformanceFrequency(&g_app.performance_frequency) ||
+        g_app.performance_frequency.QuadPart <= 0) {
+        CloseHandle(single_instance_mutex);
+        return 1;
+    }
     srand((unsigned int)(GetTickCount() ^ GetCurrentProcessId() ^ GetCurrentThreadId()));
     g_app.display_font_points = DEFAULT_DISPLAY_FONT_POINTS;
     g_app.edge_tuck_enabled = 1;
