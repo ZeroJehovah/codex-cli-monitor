@@ -26,13 +26,13 @@
 #define REFRESH_INTERVAL_MS 500
 #define EMPTY_RESULT_CONFIRMATIONS 1
 #define ANIMATION_INTERVAL_MS 16
-#define EDGE_TUCK_FRAME_INTERVAL_MS 8
+#define ANIMATION_FRAME_INTERVAL_MS 8
 #define RUNNING_PULSE_PERIOD_MS 1200
 #define EDGE_TUCK_ANIMATION_DURATION_MS 260
 #define EDGE_TUCK_PROGRESS_MAX 1000
 #define EDGE_TUCK_ATTACH_TOLERANCE 1
 #define WM_FETCH_DONE (WM_APP + 1)
-#define WM_EDGE_TUCK_FRAME (WM_APP + 2)
+#define WM_ANIMATION_FRAME (WM_APP + 2)
 #define MENU_EXIT_ID 1001
 #define MENU_ABOUT_ID 1002
 #define MENU_EDGE_TUCK_ID 1003
@@ -133,8 +133,8 @@ typedef struct AppState {
     int edge_tuck_side;
     LARGE_INTEGER edge_tuck_last_counter;
     LARGE_INTEGER performance_frequency;
-    HANDLE edge_tuck_timer;
-    volatile LONG edge_tuck_frame_pending;
+    HANDLE animation_frame_timer;
+    volatile LONG animation_frame_pending;
     int timer_resolution_active;
     int anchor_right;
     int anchor_bottom;
@@ -167,7 +167,7 @@ static AppState g_app;
 static void set_tooltip_for_hover(int index);
 static void show_context_menu(HWND hwnd, POINT point);
 static void update_animation_timer(void);
-static void stop_edge_tuck_timer(int wait_for_callbacks);
+static void stop_animation_frame_timer(int wait_for_callbacks);
 static void update_tool_rect(void);
 static void resize_panel(void);
 static void update_window_region(int actual_width, int visible_width, int height);
@@ -1580,11 +1580,20 @@ static COLORREF empty_state_color(void) {
 }
 
 static int running_pulse_level(void) {
-    DWORD elapsed = GetTickCount() % RUNNING_PULSE_PERIOD_MS;
-    DWORD half_period = RUNNING_PULSE_PERIOD_MS / 2;
+    LARGE_INTEGER now;
+    LONGLONG period;
+    LONGLONG elapsed;
+    LONGLONG half_period;
     int raw;
+    QueryPerformanceCounter(&now);
+    period = g_app.performance_frequency.QuadPart * RUNNING_PULSE_PERIOD_MS / 1000;
+    if (period <= 0) {
+        return 0;
+    }
+    elapsed = now.QuadPart % period;
+    half_period = period / 2;
     if (elapsed > half_period) {
-        elapsed = RUNNING_PULSE_PERIOD_MS - elapsed;
+        elapsed = period - elapsed;
     }
     raw = (int)(elapsed * 100 / half_period);
     return (raw * raw * (300 - 2 * raw) + 5000) / 10000;
@@ -2057,33 +2066,33 @@ static void advance_edge_tuck_animation(void) {
     update_tool_rect();
 }
 
-static VOID CALLBACK edge_tuck_timer_callback(PVOID context, BOOLEAN timer_fired) {
+static VOID CALLBACK animation_frame_timer_callback(PVOID context, BOOLEAN timer_fired) {
     HWND hwnd = (HWND)context;
     (void)timer_fired;
-    if (InterlockedCompareExchange(&g_app.edge_tuck_frame_pending, 1, 0) != 0) {
+    if (InterlockedCompareExchange(&g_app.animation_frame_pending, 1, 0) != 0) {
         return;
     }
-    if (!PostMessageW(hwnd, WM_EDGE_TUCK_FRAME, 0, 0)) {
-        InterlockedExchange(&g_app.edge_tuck_frame_pending, 0);
+    if (!PostMessageW(hwnd, WM_ANIMATION_FRAME, 0, 0)) {
+        InterlockedExchange(&g_app.animation_frame_pending, 0);
     }
 }
 
-static int start_edge_tuck_timer(void) {
+static int start_animation_frame_timer(void) {
     HANDLE timer = NULL;
-    if (g_app.edge_tuck_timer != NULL) {
+    if (g_app.animation_frame_timer != NULL) {
         return 1;
     }
     if (!g_app.timer_resolution_active && timeBeginPeriod(1) == TIMERR_NOERROR) {
         g_app.timer_resolution_active = 1;
     }
-    InterlockedExchange(&g_app.edge_tuck_frame_pending, 0);
+    InterlockedExchange(&g_app.animation_frame_pending, 0);
     if (!CreateTimerQueueTimer(
             &timer,
             NULL,
-            edge_tuck_timer_callback,
+            animation_frame_timer_callback,
             g_app.hwnd,
             0,
-            EDGE_TUCK_FRAME_INTERVAL_MS,
+            ANIMATION_FRAME_INTERVAL_MS,
             WT_EXECUTEDEFAULT)) {
         if (g_app.timer_resolution_active) {
             timeEndPeriod(1);
@@ -2091,13 +2100,13 @@ static int start_edge_tuck_timer(void) {
         }
         return 0;
     }
-    g_app.edge_tuck_timer = timer;
+    g_app.animation_frame_timer = timer;
     return 1;
 }
 
-static void stop_edge_tuck_timer(int wait_for_callbacks) {
-    HANDLE timer = g_app.edge_tuck_timer;
-    g_app.edge_tuck_timer = NULL;
+static void stop_animation_frame_timer(int wait_for_callbacks) {
+    HANDLE timer = g_app.animation_frame_timer;
+    g_app.animation_frame_timer = NULL;
     if (timer != NULL) {
         DeleteTimerQueueTimer(
             NULL,
@@ -2105,7 +2114,7 @@ static void stop_edge_tuck_timer(int wait_for_callbacks) {
             wait_for_callbacks ? INVALID_HANDLE_VALUE : NULL
         );
     }
-    InterlockedExchange(&g_app.edge_tuck_frame_pending, 0);
+    InterlockedExchange(&g_app.animation_frame_pending, 0);
     if (g_app.timer_resolution_active) {
         timeEndPeriod(1);
         g_app.timer_resolution_active = 0;
@@ -2120,23 +2129,25 @@ static void update_tool_rect(void) {
 }
 
 static void update_animation_timer(void) {
-    int edge_timer_started = 0;
+    int high_refresh_needed;
+    int high_refresh_started = 0;
     int needs_window_timer;
     if (g_app.dragging) {
-        stop_edge_tuck_timer(0);
+        stop_animation_frame_timer(0);
         if (g_app.animation_timer_active) {
             KillTimer(g_app.hwnd, ANIMATION_TIMER_ID);
             g_app.animation_timer_active = 0;
         }
         return;
     }
-    if (edge_tuck_animating()) {
-        edge_timer_started = start_edge_tuck_timer();
+    high_refresh_needed = edge_tuck_animating() || has_running_sessions() ||
+        empty_state_is_connecting();
+    if (high_refresh_needed) {
+        high_refresh_started = start_animation_frame_timer();
     } else {
-        stop_edge_tuck_timer(0);
+        stop_animation_frame_timer(0);
     }
-    needs_window_timer = !edge_timer_started &&
-        (has_running_sessions() || empty_state_is_connecting() || edge_tuck_animating());
+    needs_window_timer = high_refresh_needed && !high_refresh_started;
     if (needs_window_timer) {
         if (!g_app.animation_timer_active) {
             SetTimer(g_app.hwnd, ANIMATION_TIMER_ID, ANIMATION_INTERVAL_MS, NULL);
@@ -3028,16 +3039,16 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             update_animation_timer();
         }
         return 0;
-    case WM_EDGE_TUCK_FRAME:
+    case WM_ANIMATION_FRAME:
         if (g_app.dragging) {
             update_animation_timer();
-            InterlockedExchange(&g_app.edge_tuck_frame_pending, 0);
+            InterlockedExchange(&g_app.animation_frame_pending, 0);
             return 0;
         }
         advance_edge_tuck_animation();
         RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
         update_animation_timer();
-        InterlockedExchange(&g_app.edge_tuck_frame_pending, 0);
+        InterlockedExchange(&g_app.animation_frame_pending, 0);
         return 0;
     case WM_ERASEBKGND:
         return 1;
@@ -3188,7 +3199,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         save_widget_placement();
         KillTimer(hwnd, REFRESH_TIMER_ID);
         KillTimer(hwnd, ANIMATION_TIMER_ID);
-        stop_edge_tuck_timer(1);
+        stop_animation_frame_timer(1);
         if (g_app.font != NULL) {
             DeleteObject(g_app.font);
             g_app.font = NULL;
