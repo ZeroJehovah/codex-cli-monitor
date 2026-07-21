@@ -2490,23 +2490,6 @@ static int clamp_int(int value, int minimum, int maximum) {
     return value;
 }
 
-static RECT centered_rect(const RECT *rect, int width, int height) {
-    RECT result;
-    int center_x2 = rect->left + rect->right;
-    int center_y2 = rect->top + rect->bottom;
-    if (width < 1) {
-        width = 1;
-    }
-    if (height < 1) {
-        height = 1;
-    }
-    result.left = (center_x2 - width) / 2;
-    result.top = (center_y2 - height) / 2;
-    result.right = result.left + width;
-    result.bottom = result.top + height;
-    return result;
-}
-
 static void fill_soft_indicator(
     HDC hdc,
     const RECT *rect,
@@ -2617,46 +2600,55 @@ static void fill_soft_indicator(
 
 static void fill_indicator_glow(
     HDC hdc,
-    const RECT *rect,
+    const RECT *core_rect,
+    int spread,
     COLORREF color,
     COLORREF fallback_background,
     int max_alpha
 ) {
-    int width = rect->right - rect->left;
-    int height = rect->bottom - rect->top;
+    RECT bounds = *core_rect;
+    int width = core_rect->right - core_rect->left;
+    int height = core_rect->bottom - core_rect->top;
     int diameter = width < height ? width : height;
     double center_x;
     double center_y;
     double segment_start;
     double segment_end;
-    double radius;
-    double radius_squared;
+    double core_radius;
+    double core_radius_squared;
+    double outer_radius;
+    double outer_radius_squared;
+    double fade_denominator;
     int total_samples = DOT_EDGE_SAMPLES * DOT_EDGE_SAMPLES;
     int x;
     int y;
-    if (width <= 0 || height <= 0 || diameter <= 0) {
+    if (width <= 0 || height <= 0 || diameter <= 0 || spread <= 0) {
         return;
     }
     max_alpha = clamp_int(max_alpha, 0, 255);
     if (max_alpha <= 0) {
         return;
     }
-    center_x = rect->left + width / 2.0;
-    center_y = rect->top + height / 2.0;
-    radius = diameter / 2.0;
+    center_x = core_rect->left + width / 2.0;
+    center_y = core_rect->top + height / 2.0;
+    core_radius = diameter / 2.0;
     if (height >= width) {
-        segment_start = rect->top + radius;
-        segment_end = rect->bottom - radius;
+        segment_start = core_rect->top + core_radius;
+        segment_end = core_rect->bottom - core_radius;
     } else {
-        segment_start = rect->left + radius;
-        segment_end = rect->right - radius;
+        segment_start = core_rect->left + core_radius;
+        segment_end = core_rect->right - core_radius;
     }
-    radius_squared = radius * radius;
-    if (radius_squared <= 0.0) {
+    core_radius_squared = core_radius * core_radius;
+    outer_radius = core_radius + spread;
+    outer_radius_squared = outer_radius * outer_radius;
+    fade_denominator = outer_radius_squared - core_radius_squared;
+    if (fade_denominator <= 0.0) {
         return;
     }
-    for (y = rect->top; y < rect->bottom; y++) {
-        for (x = rect->left; x < rect->right; x++) {
+    InflateRect(&bounds, spread, spread);
+    for (y = bounds.top; y < bounds.bottom; y++) {
+        for (x = bounds.left; x < bounds.right; x++) {
             int alpha_sum = 0;
             int sample_y;
             for (sample_y = 0; sample_y < DOT_EDGE_SAMPLES; sample_y++) {
@@ -2687,9 +2679,15 @@ static void fill_indicator_glow(
                         dy = py - center_y;
                     }
                     distance_squared = dx * dx + dy * dy;
-                    if (distance_squared <= radius_squared) {
-                        double fade = (radius_squared - distance_squared) / radius_squared;
-                        fade = fade * fade;
+                    if (distance_squared <= outer_radius_squared) {
+                        double fade;
+                        if (distance_squared <= core_radius_squared) {
+                            fade = 1.0;
+                        } else {
+                            fade = (outer_radius_squared - distance_squared) / fade_denominator;
+                        }
+                        fade = fade * fade * (3.0 - 2.0 * fade);
+                        fade *= fade;
                         alpha_sum += (int)(max_alpha * fade + 0.5);
                     }
                 }
@@ -2709,60 +2707,38 @@ static void fill_indicator_glow(
 static void draw_status_indicator(HDC hdc, const RECT *rect, const char *status, COLORREF row_background) {
     if (is_running_status(status)) {
         int pulse = running_pulse_level();
-        int indicator_width = rect_width(rect);
-        int indicator_height = rect->bottom - rect->top;
         int max_shadow_spread = current_running_shadow_spread();
-        int min_shadow_spread = max_shadow_spread / 2;
+        int min_shadow_spread = (max_shadow_spread * 3 + 2) / 4;
         int shadow_spread;
-        int shadow_alpha = 56 + pulse * 120 / 100;
-        int core_margin = interpolate_by_edge_tuck(scale_px(3), scale_px(1));
-        int core_growth = interpolate_by_edge_tuck(scale_px(3), scale_px(1));
-        int highlight_margin = interpolate_by_edge_tuck(scale_px(6), scale_px(3));
-        int highlight_growth = interpolate_by_edge_tuck(scale_px(4), scale_px(1));
-        int core_width = indicator_width - core_margin +
-            (pulse * core_growth + 50) / 100;
-        int core_height = indicator_height - core_margin +
-            (pulse * core_growth + 50) / 100;
-        int highlight_width = indicator_width - highlight_margin +
-            (pulse * highlight_growth + 50) / 100;
-        int highlight_height = indicator_height - highlight_margin +
-            (pulse * highlight_growth + 50) / 100;
-        int core_brightness = 55 + pulse * 150 / 100;
-        int highlight_alpha = 72 + pulse * 112 / 100;
-        RECT halo;
-        RECT core;
-        RECT highlight;
-        COLORREF dim_blue = RGB(29, 78, 216);
+        int shadow_alpha = 30 + pulse * 90 / 100;
+        int core_brightness = 38 + pulse * 92 / 100;
         COLORREF running_blue = RGB(37, 99, 235);
         COLORREF bright_blue = RGB(96, 165, 250);
         COLORREF core_blue = blend_color(bright_blue, running_blue, core_brightness);
         if (min_shadow_spread < 1) {
             min_shadow_spread = 1;
         }
-        if (core_width < 1) {
-            core_width = 1;
-        }
-        if (core_height < 1) {
-            core_height = 1;
-        }
-        if (highlight_width < 1) {
-            highlight_width = 1;
-        }
-        if (highlight_height < 1) {
-            highlight_height = 1;
-        }
         shadow_spread = min_shadow_spread +
             (pulse * (max_shadow_spread - min_shadow_spread) + 50) / 100;
-        halo = *rect;
-        InflateRect(&halo, shadow_spread, shadow_spread);
-        core = centered_rect(rect, core_width, core_height);
-        highlight = centered_rect(rect, highlight_width, highlight_height);
         if (shadow_spread > 0) {
-            fill_indicator_glow(hdc, &halo, running_blue, row_background, shadow_alpha);
+            fill_indicator_glow(
+                hdc,
+                rect,
+                shadow_spread,
+                running_blue,
+                row_background,
+                shadow_alpha
+            );
         }
-        fill_soft_indicator(hdc, rect, dim_blue, row_background, 255, ui_running_dot_soft_edge(), 1);
-        fill_soft_indicator(hdc, &core, core_blue, row_background, 255, ui_running_dot_soft_edge(), 1);
-        fill_soft_indicator(hdc, &highlight, bright_blue, row_background, highlight_alpha, ui_running_dot_soft_edge(), 1);
+        fill_soft_indicator(
+            hdc,
+            rect,
+            core_blue,
+            row_background,
+            255,
+            ui_running_dot_soft_edge(),
+            1
+        );
         return;
     }
     fill_soft_indicator(hdc, rect, status_color(status), row_background, 255, current_status_soft_edge(), 0);
@@ -2772,29 +2748,33 @@ static void draw_empty_state_indicator(HDC hdc, const RECT *rect, COLORREF row_b
     COLORREF color = empty_state_color();
     if (empty_state_is_connecting()) {
         int pulse = running_pulse_level();
-        int shadow_spread = current_running_shadow_spread() / 2;
-        int shadow_alpha = 22 + pulse * 46 / 100;
-        int highlight_alpha = 54 + pulse * 58 / 100;
-        RECT halo = *rect;
-        RECT highlight;
+        int max_shadow_spread = current_running_shadow_spread() / 2;
+        int min_shadow_spread;
+        int shadow_spread;
+        int shadow_alpha = 16 + pulse * 42 / 100;
+        int core_brightness = 28 + pulse * 38 / 100;
         COLORREF highlight_color = RGB(239, 217, 171);
-        if (shadow_spread < 1) {
-            shadow_spread = 1;
+        COLORREF core_color = blend_color(highlight_color, color, core_brightness);
+        if (max_shadow_spread < 1) {
+            max_shadow_spread = 1;
         }
-        InflateRect(&halo, shadow_spread, shadow_spread);
-        highlight = centered_rect(
+        min_shadow_spread = max_shadow_spread > 1 ? max_shadow_spread - 1 : 1;
+        shadow_spread = min_shadow_spread +
+            (pulse * (max_shadow_spread - min_shadow_spread) + 50) / 100;
+        fill_indicator_glow(
+            hdc,
             rect,
-            rect_width(rect) - interpolate_by_edge_tuck(scale_px(6), scale_px(2)),
-            rect_height(rect) - interpolate_by_edge_tuck(scale_px(6), scale_px(4))
+            shadow_spread,
+            color,
+            row_background,
+            shadow_alpha
         );
-        fill_indicator_glow(hdc, &halo, color, row_background, shadow_alpha);
-        fill_soft_indicator(hdc, rect, color, row_background, 225, current_status_soft_edge(), 1);
         fill_soft_indicator(
             hdc,
-            &highlight,
-            highlight_color,
+            rect,
+            core_color,
             row_background,
-            highlight_alpha,
+            225,
             current_status_soft_edge(),
             1
         );
