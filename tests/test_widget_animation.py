@@ -51,19 +51,27 @@ class WidgetAnimationTests(unittest.TestCase):
         self.assertIn("QueryPerformanceCounter", pulse_body)
         self.assertNotIn("GetTickCount", pulse_body)
 
-    def test_running_glow_uses_one_core_and_continuous_falloff(self) -> None:
+    def test_running_glow_uses_one_continuous_luminous_field(self) -> None:
         glow_match = re.search(
-            r"static void fill_indicator_glow\((?P<body>.*?)\n\}\n\n"
+            r"static void fill_luminous_indicator\((?P<body>.*?)\n\}\n\n"
             r"static void draw_status_indicator",
             self.source,
             re.DOTALL,
         )
         self.assertIsNotNone(glow_match)
         glow_body = glow_match.group("body")
-        self.assertIn("const RECT *core_rect", glow_body)
+        self.assertIn("const RECT *rect", glow_body)
         self.assertIn("int spread", glow_body)
+        self.assertIn("if (height >= width)", glow_body)
+        self.assertIn("segment_start = rect->top + radius", glow_body)
+        self.assertIn("segment_start = rect->left + radius", glow_body)
+        self.assertIn(
+            "(outer_radius_squared - distance_squared) / outer_radius_squared",
+            glow_body,
+        )
         self.assertIn("fade = fade * fade * (3.0 - 2.0 * fade);", glow_body)
         self.assertIn("fade *= fade;", glow_body)
+        self.assertNotIn("core_radius", glow_body)
 
         running_match = re.search(
             r"static void draw_status_indicator\(.*?"
@@ -74,8 +82,8 @@ class WidgetAnimationTests(unittest.TestCase):
         )
         self.assertIsNotNone(running_match)
         running_body = running_match.group("body")
-        self.assertEqual(running_body.count("fill_soft_indicator("), 1)
-        self.assertNotIn("centered_rect", running_body)
+        self.assertEqual(running_body.count("fill_luminous_indicator("), 1)
+        self.assertNotIn("fill_soft_indicator(", running_body)
 
 
 if __name__ == "__main__":
