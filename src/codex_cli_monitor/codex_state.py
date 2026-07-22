@@ -18,6 +18,7 @@ from .models import CodexStateSummary, SessionActivity, StateFile
 
 DEFAULT_MAX_FILES = 12
 SESSION_ACTIVITY_CACHE_MAX_ENTRIES = 256
+SESSION_METADATA_CACHE_MAX_ENTRIES = 2048
 RUNTIME_LOG_DATABASE = "logs_2.sqlite"
 RUNTIME_LOG_WAL = f"{RUNTIME_LOG_DATABASE}-wal"
 RUNTIME_FAILURE_MATCH_GRACE_SECONDS = 30.0
@@ -113,8 +114,17 @@ class _SessionActivityCacheEntry:
     activity: SessionActivity
 
 
+@dataclass(frozen=True)
+class _SessionMetadataCacheEntry:
+    size_bytes: int
+    modified_at: float
+    activity: SessionActivity
+
+
 _SESSION_ACTIVITY_CACHE: dict[tuple[str, str], _SessionActivityCacheEntry] = {}
 _SESSION_ACTIVITY_CACHE_LOCK = threading.Lock()
+_SESSION_METADATA_CACHE: dict[tuple[str, str], _SessionMetadataCacheEntry] = {}
+_SESSION_METADATA_CACHE_LOCK = threading.Lock()
 
 
 class _TurnRecordSummary:
@@ -430,8 +440,18 @@ def _session_activity_metadata(
     except ValueError:
         relative_path = path.as_posix()
 
+    cache_key = (str(home), relative_path)
+    with _SESSION_METADATA_CACHE_LOCK:
+        cached = _SESSION_METADATA_CACHE.get(cache_key)
+        if (
+            cached is not None
+            and cached.size_bytes == stat.st_size
+            and cached.modified_at == stat.st_mtime
+        ):
+            return replace(cached.activity, observed_at=observed_at)
+
     first_record = _scan_first_session_record(path)
-    return SessionActivity(
+    activity = SessionActivity(
         relative_path=relative_path,
         session_id=_session_id_from_record(first_record) or _session_id_from_name(path.name),
         turn_id=None,
@@ -441,6 +461,21 @@ def _session_activity_metadata(
         observed_at=observed_at,
         session_started_at=_timestamp_from_record(first_record),
     )
+    with _SESSION_METADATA_CACHE_LOCK:
+        _SESSION_METADATA_CACHE[cache_key] = _SessionMetadataCacheEntry(
+            size_bytes=stat.st_size,
+            modified_at=stat.st_mtime,
+            activity=activity,
+        )
+        overflow = len(_SESSION_METADATA_CACHE) - SESSION_METADATA_CACHE_MAX_ENTRIES
+        if overflow > 0:
+            stale_keys = sorted(
+                _SESSION_METADATA_CACHE,
+                key=lambda key: _SESSION_METADATA_CACHE[key].modified_at,
+            )[:overflow]
+            for stale_key in stale_keys:
+                _SESSION_METADATA_CACHE.pop(stale_key, None)
+    return activity
 
 
 def _included_session_path(home: Path, relative_path: str) -> Path | None:

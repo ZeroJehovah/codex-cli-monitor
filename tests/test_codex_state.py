@@ -86,6 +86,27 @@ class CodexStateTests(unittest.TestCase):
         self.assertEqual(second[0].session_id, "s")
         self.assertTrue(second[0].terminal_event)
 
+    def test_scan_session_metadata_reuses_unchanged_cached_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            session = home / "sessions" / "2026" / "06" / "26" / "rollout.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(
+                '{"type":"session_meta","payload":{"session_id":"s","cwd":"/work/a"}}\n',
+                encoding="utf-8",
+            )
+
+            first = scan_session_activities(home, metadata_only=True)
+            with patch(
+                "codex_cli_monitor.codex_state._scan_first_session_record",
+                side_effect=AssertionError("unchanged metadata should use cache"),
+            ):
+                second = scan_session_activities(home, metadata_only=True)
+
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(second[0].session_id, "s")
+
     def test_scan_session_activities_marks_successful_terminal_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

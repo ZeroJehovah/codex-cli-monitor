@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_cli_monitor.hook_state import (
     append_hook_event,
@@ -13,6 +14,21 @@ from codex_cli_monitor.hook_state import (
 
 
 class HookStateTests(unittest.TestCase):
+    def test_load_hook_events_reuses_unchanged_file_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.jsonl"
+            append_hook_event("session_start", cwd="/work/a", ppid=100, path=path)
+
+            first = load_hook_events(path)
+            with patch.object(
+                Path,
+                "read_text",
+                side_effect=AssertionError("unchanged hook log should use cache"),
+            ):
+                second = load_hook_events(path)
+
+        self.assertEqual(first, second)
+
     def test_summarize_open_turn_and_tool_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "hooks.jsonl"
