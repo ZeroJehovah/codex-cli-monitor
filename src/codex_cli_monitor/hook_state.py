@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Iterable, Mapping
 
 HOOK_LOG_ENV = "CODEX_MONITOR_HOOK_LOG"
 DEFAULT_MAX_EVENTS = 2000
+HOOK_EVENT_CACHE_MAX_ENTRIES = 32
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,17 @@ class HookSessionState:
             "codex_pid": self.codex_pid,
             "source": self.source,
         }
+
+
+@dataclass(frozen=True)
+class _HookEventCacheEntry:
+    size_bytes: int
+    modified_at_ns: int
+    events: tuple[HookEvent, ...]
+
+
+_HOOK_EVENT_CACHE: dict[str, _HookEventCacheEntry] = {}
+_HOOK_EVENT_CACHE_LOCK = threading.Lock()
 
 
 def default_hook_log_path(env: Mapping[str, str] | None = None) -> Path:
@@ -145,8 +158,22 @@ def load_hook_events(
     max_age_seconds: float = 24 * 3600,
 ) -> tuple[HookEvent, ...]:
     log_path = path or default_hook_log_path()
-    if not log_path.exists():
+    try:
+        stat = log_path.stat()
+    except OSError:
         return ()
+    cache_key = str(log_path)
+    with _HOOK_EVENT_CACHE_LOCK:
+        cached = _HOOK_EVENT_CACHE.get(cache_key)
+        if (
+            cached is not None
+            and cached.size_bytes == stat.st_size
+            and cached.modified_at_ns == stat.st_mtime_ns
+        ):
+            min_timestamp = time.time() - max_age_seconds
+            return tuple(
+                event for event in cached.events if event.timestamp >= min_timestamp
+            )
     min_timestamp = time.time() - max_age_seconds
     try:
         lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -159,8 +186,6 @@ def load_hook_events(
             payload = json.loads(line)
             timestamp = float(payload["timestamp"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if timestamp < min_timestamp:
             continue
         event = _optional_str(payload.get("event"))
         cwd = _optional_str(payload.get("cwd"))
@@ -179,7 +204,22 @@ def load_hook_events(
                 source=str(log_path),
             )
         )
-    return tuple(events)
+    cached_events = tuple(events)
+    with _HOOK_EVENT_CACHE_LOCK:
+        _HOOK_EVENT_CACHE[cache_key] = _HookEventCacheEntry(
+            size_bytes=stat.st_size,
+            modified_at_ns=stat.st_mtime_ns,
+            events=cached_events,
+        )
+        overflow = len(_HOOK_EVENT_CACHE) - HOOK_EVENT_CACHE_MAX_ENTRIES
+        if overflow > 0:
+            stale_keys = sorted(
+                _HOOK_EVENT_CACHE,
+                key=lambda key: _HOOK_EVENT_CACHE[key].modified_at_ns,
+            )[:overflow]
+            for stale_key in stale_keys:
+                _HOOK_EVENT_CACHE.pop(stale_key, None)
+    return tuple(event for event in cached_events if event.timestamp >= min_timestamp)
 
 
 def summarize_hook_events(
@@ -193,9 +233,12 @@ def summarize_hook_events(
     session_started_at: dict[tuple[str, int | None], float | None] = {}
     session_start_source: dict[tuple[str, int | None], str | None] = {}
     session_id: dict[tuple[str, int | None], str | None] = {}
+    normalized_cwds: dict[str, str | None] = {}
 
     for event in sorted(events, key=lambda item: item.timestamp):
-        cwd = _normalize_path(event.cwd)
+        if event.cwd not in normalized_cwds:
+            normalized_cwds[event.cwd] = _normalize_path(event.cwd)
+        cwd = normalized_cwds[event.cwd]
         if cwd is None:
             continue
         key = (cwd, event.ppid)
