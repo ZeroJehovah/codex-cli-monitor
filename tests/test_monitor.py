@@ -7,12 +7,72 @@ import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_cli_monitor.hook_state import append_hook_event
 from codex_cli_monitor.monitor import discover_sessions, inspect_runtime
 
 
 class MonitorTests(unittest.TestCase):
+    def test_skips_codex_state_scan_without_local_codex_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            _write_common_proc(proc)
+
+            with patch(
+                "codex_cli_monitor.monitor.scan_session_activities",
+                side_effect=AssertionError("no local session state should be scanned"),
+            ):
+                sessions = discover_sessions(
+                    proc,
+                    sample_window=0.25,
+                    sleep=lambda _: None,
+                )
+
+        self.assertEqual(sessions, ())
+
+    def test_runtime_failures_are_checked_only_for_bound_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            session_started_at = time.time() - 100.0
+            _write_completed_session(
+                home,
+                "matching.jsonl",
+                "/work/a",
+                session_started_at,
+            )
+            _write_completed_session(
+                home,
+                "historical.jsonl",
+                "/work/b",
+                session_started_at + 1.0,
+            )
+            checked: list[tuple[str, ...]] = []
+
+            def record_checked(activities, _codex_home):
+                activities = tuple(activities)
+                checked.append(tuple(item.relative_path for item in activities))
+                return activities
+
+            with patch(
+                "codex_cli_monitor.monitor.apply_runtime_failures",
+                side_effect=record_checked,
+            ):
+                sessions = discover_sessions(
+                    proc_root=proc,
+                    sample_window=0,
+                    codex_home=home,
+                )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(checked, [("sessions/2026/06/26/matching.jsonl",)])
+
     def test_discovers_waiting_codex_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc = Path(tmp)

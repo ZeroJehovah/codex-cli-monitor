@@ -7,6 +7,7 @@ from typing import Callable
 
 from .classify import infer_status, is_native_codex_process
 from .codex_state import (
+    apply_runtime_failures,
     scan_codex_state,
     scan_session_activities,
 )
@@ -79,13 +80,14 @@ def discover_sessions(
     sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[CodexSession, ...]:
     first_snapshot = read_processes(proc_root)
+    first_codex_roots = _find_codex_roots(first_snapshot)
     first_activities = (
         scan_session_activities(
             codex_home,
             max_files=SESSION_ACTIVITY_METADATA_MAX_FILES,
             metadata_only=True,
         )
-        if sample_window > 0
+        if sample_window > 0 and first_codex_roots
         else ()
     )
     first_activities_by_path = {
@@ -131,12 +133,24 @@ def discover_sessions(
         max_files=SESSION_ACTIVITY_MAX_FILES,
         previous=first_activities_by_path,
         include_relative_paths=candidate_paths,
+        merge_runtime_failures=False,
     )
     state_activities_by_pid = _state_activities_for_roots(
         codex_roots,
         session_activities,
         hook_states_by_pid,
     )
+    bound_activities = apply_runtime_failures(
+        state_activities_by_pid.values(),
+        codex_home,
+    )
+    bound_activities_by_path = {
+        activity.relative_path: activity for activity in bound_activities
+    }
+    state_activities_by_pid = {
+        pid: bound_activities_by_path.get(activity.relative_path, activity)
+        for pid, activity in state_activities_by_pid.items()
+    }
 
     sessions = []
     for root in codex_roots:
