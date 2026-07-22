@@ -211,6 +211,7 @@ def scan_session_activities(
     previous: Mapping[str, SessionActivity] | None = None,
     metadata_only: bool = False,
     include_relative_paths: Iterable[str] = (),
+    merge_runtime_failures: bool = True,
 ) -> tuple[SessionActivity, ...]:
     home = (codex_home or default_codex_home()).expanduser()
     if not home.is_dir():
@@ -254,9 +255,17 @@ def scan_session_activities(
             )
         activities.append(activity)
 
-    if activities and not metadata_only:
+    if activities and not metadata_only and merge_runtime_failures:
         activities = _merge_runtime_failures(home, activities)
     return tuple(activities)
+
+
+def apply_runtime_failures(
+    activities: Iterable[SessionActivity],
+    codex_home: Path | None = None,
+) -> tuple[SessionActivity, ...]:
+    home = (codex_home or default_codex_home()).expanduser()
+    return tuple(_merge_runtime_failures(home, list(activities)))
 
 
 def _cached_session_activity(
