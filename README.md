@@ -322,7 +322,7 @@ vim start-collector.sh
 | `SERVICE_USER` | 必须确认 | 必须是该服务器实际运行 Codex 的用户 |
 | `SERVER_ID` | 必须保证唯一 | 例如 `dev-01`、`gpu-server`，不能与 VPS 或其他采集器重复 |
 | `SERVER_NAME` | 建议修改 | Windows 前端显示名称 |
-| `AGGREGATOR_URL` | 必须修改 | 聚合服务根地址，例如 `http://100.64.0.10:8765` 或 `https://monitor.example.com` |
+| `AGGREGATOR_URL` | 通常不改 | 中央聚合服务默认使用 `https://codex-monitor.aiof.top`；自建部署可改为自己的地址 |
 | `COLLECTOR_WRITE_TOKEN` | 必须修改 | 必须与 VPS 的 `COLLECTOR_WRITE_TOKEN` 完全相同 |
 | `LISTEN_HOST` | 通常不改 | 本机诊断 API，建议保持 `127.0.0.1` |
 | `LISTEN_PORT` | 可选 | 本机诊断 API 端口，默认 `8765` |
@@ -336,13 +336,15 @@ Tailscale 直连示例：
 AGGREGATOR_URL="http://100.64.0.10:8765"
 ```
 
-公网反向代理示例：
+项目中央聚合器：
 
 ```bash
-AGGREGATOR_URL="https://monitor.example.com"
+AGGREGATOR_URL="https://codex-monitor.aiof.top"
 ```
 
-程序在根地址后自动追加 `/api/collector/snapshot`。也可以直接填写完整上报端点。
+程序在根地址后自动追加 `/api/collector/snapshot`，也可以直接填写完整上报端点。采集器
+上传会显式绕过进程继承的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `ALL_PROXY` 等代理配置，
+避免工作站代理抖动让远端快照超过 TTL。
 
 先进行 dry-run：
 
@@ -379,7 +381,14 @@ curl http://127.0.0.1:8765/healthz
 curl http://127.0.0.1:8765/api/sessions
 ```
 
-在 VPS 查询 `/api/servers`，应当能看到该采集器的 `SERVER_ID`。如果采集器断联超过 `REMOTE_TTL`，聚合端会移除它的旧会话。默认 30 秒 TTL 可以避免单次 HTTPS 超时导致服务器在悬浮窗中短暂消失。
+启用远程上报时，`/healthz` 的 `collector` 字段会包含规范化目标地址、是否绕过代理、
+累计尝试/成功/失败次数、连续失败次数、最近尝试/成功/失败时间和最新错误；该字段不含
+Bearer Token。采集日志使用 UTC 时间戳，在首次失败、持续失败每 30 秒以及恢复时记录
+摘要，便于直接从 `journalctl` 判断断联持续时间。
+
+在 VPS 查询 `/api/servers`，应当能看到该采集器的 `SERVER_ID`。如果采集器断联超过
+`REMOTE_TTL`，聚合端会移除它的旧会话。默认 30 秒 TTL 用来限制失联服务器的陈旧
+状态；悬浮窗的连续空响应确认则负责吸收短暂的快照抖动。
 
 ### 5. 配置和信任 Codex Hook
 
@@ -450,7 +459,7 @@ notepad .\dist\CodexMonitorWidget-win-x64\CodexMonitorWidget.ini
 
 ```ini
 [CodexMonitorWidget]
-ApiUrl=https://monitor.example.com/api/sessions
+ApiUrl=https://codex-monitor.aiof.top/api/sessions
 ApiToken=填写 VPS 的 API_READ_TOKEN
 ```
 
@@ -577,10 +586,13 @@ curl http://127.0.0.1:8765/healthz
 然后检查采集器是否能访问 VPS：
 
 ```bash
-curl http://VPS地址:8765/healthz
+curl --noproxy '*' https://codex-monitor.aiof.top/healthz
 ```
 
-常见原因包括写入 Token 不一致、URL 错误、VPS 只监听 `127.0.0.1`、防火墙阻止端口、HTTPS 证书无效或服务器 ID 重复。
+`/healthz` 中 `collector.healthy=false` 或 `collector.consecutive_failures` 持续增长时，结合
+最近的 `last_error` 和带时间戳的服务日志排查。常见原因包括写入 Token 不一致、URL
+错误、防火墙阻止连接、HTTPS 证书无效或服务器 ID 重复。采集器本身不使用环境代理，
+因此无需修改系统级代理即可验证直连链路。
 
 #### 状态一直不准确或一直显示成功
 
@@ -657,11 +669,12 @@ exe 会直接退出，不会打开第二个悬浮窗。它会轮询 `/api/sessio
 制单独的灰
 色左边框，服务器彩条贴住窗口左缘并作为每行的左边框，首末行彩条与上下边框无间隙。
 
-尚未收到首次后端响应、后端成功返回空会话列表，或者请求失败且当前没有可显示会话时，
+尚未收到首次后端响应、后端确认返回空会话列表，或者请求失败且当前没有可显示会话时，
 悬浮窗会显示独立的单行空状态，而不是只剩三条边框的空矩形。三种情况分别显示“正在连
 接”“暂无会话”和“连接失败”，并使用不占用蓝、绿、红会话状态色的中性左侧强调条与
 柔化指示点。空状态同样支持左右贴边收纳：文字渐隐，指示点平滑变为窄竖向胶囊，左侧
-强调条始终保留。
+强调条始终保留。已有会话可见时，悬浮窗需要连续收到 6 次成功空响应才会清空；请求
+失败或重新收到非空响应会重置计数，避免远端 TTL 短暂抖动造成整台服务器闪消。
 
 圆点颜色：
 
@@ -725,7 +738,7 @@ CodexMonitorWidget.ini
 
 ```ini
 [CodexMonitorWidget]
-ApiUrl=http://localhost:8765/api/sessions
+ApiUrl=https://codex-monitor.aiof.top/api/sessions
 ApiToken=
 ```
 

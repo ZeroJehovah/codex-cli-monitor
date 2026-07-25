@@ -35,7 +35,7 @@ The output directory contains exactly `CodexMonitorWidget.exe` and
 
 ```ini
 [CodexMonitorWidget]
-ApiUrl=https://monitor.example.com/api/sessions
+ApiUrl=https://codex-monitor.aiof.top/api/sessions
 ApiToken=replace-with-the-read-token
 ```
 
@@ -86,7 +86,9 @@ when no session data is available after a request error. A neutral accent bar
 fills the visible left edge and a softened neutral indicator avoids the blue,
 green, and red session-status colors. The empty state also edge-tucks: its text
 fades out and the indicator morphs into a narrow capsule while the accent bar
-remains visible.
+remains visible. When sessions are already visible, the widget requires six
+consecutive successful empty responses before clearing them. A failed request
+or a later non-empty response resets that confirmation sequence.
 
 For an aggregated multi-server response, rows are grouped by both server id and
 directory. Server color bars distinguish the rows, while hover details include

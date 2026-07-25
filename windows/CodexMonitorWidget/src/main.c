@@ -24,7 +24,7 @@
 #define REFRESH_TIMER_ID 1
 #define ANIMATION_TIMER_ID 2
 #define REFRESH_INTERVAL_MS 500
-#define EMPTY_RESULT_CONFIRMATIONS 1
+#define EMPTY_RESULT_CONFIRMATIONS 6
 #define ANIMATION_INTERVAL_MS 16
 #define ANIMATION_FRAME_INTERVAL_MS 8
 #define RUNNING_PULSE_PERIOD_MS 1200
@@ -3025,6 +3025,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
                 }
                 g_app.last_error[0] = '\0';
             } else {
+                g_app.empty_success_count = 0;
                 copy_ascii(g_app.last_error, sizeof(g_app.last_error), result->error);
             }
             if (g_app.row_count <= 0) {

@@ -113,6 +113,7 @@ def make_api_handler(
     identity: ServerIdentity | None = None,
     provider: LocalSessionProvider | None = None,
     remote_store: RemoteSnapshotStore | None = None,
+    collector_status_provider: Callable[[], dict] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     identity = identity or resolve_server_identity(
         config.server_id,
@@ -138,13 +139,14 @@ def make_api_handler(
                 self._handle_sessions(servers_only=parsed.path == "/api/servers")
                 return
             if parsed.path == "/healthz":
-                self._send_json(
-                    {
-                        "ok": True,
-                        "mode": "aggregator" if config.aggregate else "collector",
-                        "server": identity.to_dict(),
-                    }
-                )
+                payload = {
+                    "ok": True,
+                    "mode": "aggregator" if config.aggregate else "collector",
+                    "server": identity.to_dict(),
+                }
+                if collector_status_provider is not None:
+                    payload["collector"] = collector_status_provider()
+                self._send_json(payload)
                 return
             if parsed.path == "/":
                 self._send_json(
@@ -330,25 +332,35 @@ def serve_api(
     remote_store = (
         RemoteSnapshotStore(config.remote_ttl_seconds) if config.aggregate else None
     )
-    server = ReusableThreadingHTTPServer(
-        (host, port),
-        make_api_handler(config, identity, provider, remote_store),
-    )
-    collector_stop = threading.Event()
-    collector_thread: threading.Thread | None = None
+    collector_pusher: CollectorPusher | None = None
     if config.collector_url is not None:
         def collector_snapshot() -> dict:
             sessions, observed_at = provider.get()
             return build_collector_snapshot(sessions, identity, observed_at)
 
-        pusher = CollectorPusher(
+        collector_pusher = CollectorPusher(
             config.collector_url,
             config.collector_token or "",
             collector_snapshot,
             interval_seconds=config.collector_interval_seconds,
         )
+    server = ReusableThreadingHTTPServer(
+        (host, port),
+        make_api_handler(
+            config,
+            identity,
+            provider,
+            remote_store,
+            collector_pusher.status_snapshot
+            if collector_pusher is not None
+            else None,
+        ),
+    )
+    collector_stop = threading.Event()
+    collector_thread: threading.Thread | None = None
+    if collector_pusher is not None:
         collector_thread = threading.Thread(
-            target=pusher.run,
+            target=collector_pusher.run,
             args=(collector_stop,),
             name="codex-monitor-collector",
             daemon=True,

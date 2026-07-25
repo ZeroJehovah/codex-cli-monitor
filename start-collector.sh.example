@@ -22,7 +22,7 @@ SERVICE_USER="${SUDO_USER:-$(id -un)}"
 
 SERVER_ID="$(hostname -s)"
 SERVER_NAME="$SERVER_ID"
-AGGREGATOR_URL="https://REPLACE_WITH_AGGREGATOR_ADDRESS"
+AGGREGATOR_URL="https://codex-monitor.aiof.top"
 COLLECTOR_WRITE_TOKEN="REPLACE_WITH_COLLECTOR_WRITE_TOKEN"
 
 # 本机诊断 API 仅监听回环地址。
@@ -44,7 +44,6 @@ systemd_quote() {
   printf '"%s"' "$value"
 }
 
-[[ "$AGGREGATOR_URL" != *REPLACE_WITH_* ]] || fail "replace AGGREGATOR_URL"
 [[ "$AGGREGATOR_URL" =~ ^https?:// ]] || fail "AGGREGATOR_URL must use http:// or https://"
 [[ "$COLLECTOR_WRITE_TOKEN" != REPLACE_WITH_* ]] || fail "replace COLLECTOR_WRITE_TOKEN"
 [[ "$COLLECTOR_WRITE_TOKEN" =~ ^[A-Za-z0-9._~-]{16,}$ ]] || fail "COLLECTOR_WRITE_TOKEN contains unsupported characters or is too short"
@@ -99,6 +98,7 @@ WorkingDirectory=$REPO_ROOT
 Environment=$(systemd_quote "HOME=$SERVICE_HOME")
 Environment=$(systemd_quote "PYTHONPATH=$REPO_ROOT/src")
 EnvironmentFile=$ENV_FILE
+# Snapshot delivery explicitly bypasses inherited proxy settings in the client.
 ExecStart=$(systemd_quote "$PYTHON_BIN") -m codex_cli_monitor --serve --host $LISTEN_HOST --port $LISTEN_PORT --collector-interval $COLLECTOR_INTERVAL --cache-seconds $LOCAL_CACHE_SECONDS
 Restart=on-failure
 RestartSec=2

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import configparser
+import re
 import unittest
 from pathlib import Path
 
@@ -20,9 +21,38 @@ class WidgetConfigTests(unittest.TestCase):
 
         self.assertEqual(
             config["CodexMonitorWidget"]["ApiUrl"],
-            "http://localhost:8765/api/sessions",
+            "https://codex-monitor.aiof.top/api/sessions",
         )
         self.assertEqual(config["CodexMonitorWidget"]["ApiToken"], "")
+
+    def test_widget_requires_consecutive_empty_responses_before_clearing(self) -> None:
+        source = (
+            Path(__file__).parents[1]
+            / "windows"
+            / "CodexMonitorWidget"
+            / "src"
+            / "main.c"
+        ).read_text(encoding="utf-8")
+        confirmations = re.search(
+            r"#define EMPTY_RESULT_CONFIRMATIONS (\d+)",
+            source,
+        )
+        self.assertIsNotNone(confirmations)
+        self.assertGreaterEqual(int(confirmations.group(1)), 3)
+
+        fetch_done = source[source.index("case WM_FETCH_DONE:") :]
+        fetch_done = fetch_done[: fetch_done.index("case WM_PAINT:")]
+        self.assertIn("g_app.empty_success_count++;", fetch_done)
+        self.assertIn(
+            "g_app.empty_success_count >= EMPTY_RESULT_CONFIRMATIONS",
+            fetch_done,
+        )
+        error_branch_start = fetch_done.index(
+            "} else {",
+            fetch_done.index("g_app.last_error[0]"),
+        )
+        error_branch = fetch_done[error_branch_start:]
+        self.assertIn("g_app.empty_success_count = 0;", error_branch)
 
 
 if __name__ == "__main__":
