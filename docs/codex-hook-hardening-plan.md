@@ -155,7 +155,7 @@ Hook session 状态按 `(session_id, turn_id)` 聚合；缺少 ID 的旧事件�
 - 校验实际 payload 的 `hook_event_name`，避免安装命令事件名和 stdin 事件错配。
 - 默认安装事件缩减为 `SessionStart`、`UserPromptSubmit`、`Stop`。
 - 增加显式工具诊断开关，例如安装器 `--include-tool-events`；仅在开启时安装 `PreToolUse`/`PostToolUse`。
-- 工具诊断模式读取白名单 `session_id`、`turn_id`、`tool_name`、`tool_use_id`，不读取或保存 tool input/response。先用真实 payload 尺寸测试同步白名单解析是否足够轻；若不能满足延迟门槛，再进入阶段 3 的集中接收方案。
+- 工具诊断模式读取白名单 `session_id`、`turn_id`、`tool_name`、`tool_use_id`，不读取或保存 tool input/response。先用真实 payload 尺寸测试同步白名单解析是否足够轻；若不能满足延迟门槛，再进入阶段 4B 的集中接收方案。
 - 对现有已安装的工具 Hook 提供迁移：默认重新安装会移除旧 monitor 工具条目，并明确告知 trust hash 变化。
 
 主要文件：
@@ -353,4 +353,3 @@ python3 -m compileall -q src tests
 - 健康诊断能说明实际信号和退化路径，同时不泄露会话正文或凭据。
 - sidecar baseline、collector/aggregator、Windows widget 的现有行为均通过回归测试。
 - README、部署说明、项目约束和中央运行实例全部与最终实现一致。
-
