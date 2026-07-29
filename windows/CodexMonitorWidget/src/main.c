@@ -83,6 +83,11 @@ typedef struct FetchResult {
     Session sessions[MAX_SESSIONS];
 } FetchResult;
 
+typedef struct GlyphVerticalMetrics {
+    int black_box_y;
+    int origin_y;
+} GlyphVerticalMetrics;
+
 typedef struct DirectoryRow {
     char directory[512];
     char server_id[128];
@@ -91,6 +96,7 @@ typedef struct DirectoryRow {
     int session_count;
     int original_order;
     int server_color_index;
+    GlyphVerticalMetrics text_vertical_metrics;
 } DirectoryRow;
 
 typedef struct ServerColorAssignment {
@@ -98,15 +104,11 @@ typedef struct ServerColorAssignment {
     int color_index;
 } ServerColorAssignment;
 
-typedef struct GlyphVerticalMetrics {
-    int black_box_y;
-    int origin_y;
-} GlyphVerticalMetrics;
-
 typedef struct AppState {
     HWND hwnd;
     HWND tooltip;
     HFONT font;
+    GlyphVerticalMetrics empty_text_vertical_metrics;
     wchar_t api_url[1024];
     wchar_t api_token[512];
     wchar_t tooltip_text[1024];
@@ -427,6 +429,133 @@ static int glyph_vertical_metrics(HDC hdc, GlyphVerticalMetrics *metrics) {
     metrics->black_box_y = scale_px(15);
     metrics->origin_y = metrics->black_box_y;
     return 0;
+}
+
+static int text_contains_cjk(const wchar_t *text, int length) {
+    int index;
+    for (index = 0; index < length; index++) {
+        unsigned int code_unit = (unsigned int)text[index];
+        if ((code_unit >= 0x2e80 && code_unit <= 0x9fff) ||
+            (code_unit >= 0xf900 && code_unit <= 0xfaff) ||
+            (code_unit >= 0xff00 && code_unit <= 0xffef) ||
+            (code_unit >= 0xd840 && code_unit <= 0xd87f)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int rendered_text_vertical_metrics(
+    HDC hdc,
+    const wchar_t *text,
+    int length,
+    GlyphVerticalMetrics *metrics
+) {
+    BITMAPINFO bitmap_info;
+    HDC memory_hdc;
+    HBITMAP bitmap;
+    HGDIOBJ old_bitmap;
+    HGDIOBJ old_font;
+    TEXTMETRICW text_metrics;
+    SIZE text_size;
+    void *bitmap_bits = NULL;
+    unsigned char *pixels;
+    int padding;
+    int width;
+    int height;
+    int baseline_y;
+    int top;
+    int bottom;
+    int x;
+    int y;
+    int measured = 0;
+    if (hdc == NULL || text == NULL || length <= 0 || metrics == NULL ||
+        !GetTextMetricsW(hdc, &text_metrics) ||
+        !GetTextExtentPoint32W(hdc, text, length, &text_size)) {
+        return 0;
+    }
+    padding = text_metrics.tmHeight + 4;
+    width = text_size.cx + padding * 2;
+    height = text_metrics.tmHeight + padding * 2;
+    if (width <= 0 || height <= 0) {
+        return 0;
+    }
+    ZeroMemory(&bitmap_info, sizeof(bitmap_info));
+    bitmap_info.bmiHeader.biSize = sizeof(bitmap_info.bmiHeader);
+    bitmap_info.bmiHeader.biWidth = width;
+    bitmap_info.bmiHeader.biHeight = -height;
+    bitmap_info.bmiHeader.biPlanes = 1;
+    bitmap_info.bmiHeader.biBitCount = 32;
+    bitmap_info.bmiHeader.biCompression = BI_RGB;
+    memory_hdc = CreateCompatibleDC(hdc);
+    if (memory_hdc == NULL) {
+        return 0;
+    }
+    bitmap = CreateDIBSection(
+        memory_hdc,
+        &bitmap_info,
+        DIB_RGB_COLORS,
+        &bitmap_bits,
+        NULL,
+        0
+    );
+    if (bitmap == NULL || bitmap_bits == NULL) {
+        if (bitmap != NULL) {
+            DeleteObject(bitmap);
+        }
+        DeleteDC(memory_hdc);
+        return 0;
+    }
+    old_bitmap = SelectObject(memory_hdc, bitmap);
+    old_font = SelectObject(memory_hdc, GetCurrentObject(hdc, OBJ_FONT));
+    PatBlt(memory_hdc, 0, 0, width, height, BLACKNESS);
+    SetBkMode(memory_hdc, TRANSPARENT);
+    SetTextColor(memory_hdc, RGB(255, 255, 255));
+    SetTextAlign(memory_hdc, TA_LEFT | TA_BASELINE);
+    baseline_y = padding + text_metrics.tmAscent;
+    if (ExtTextOutW(memory_hdc, padding, baseline_y, 0, NULL, text, length, NULL)) {
+        GdiFlush();
+        pixels = (unsigned char *)bitmap_bits;
+        top = height;
+        bottom = -1;
+        for (y = 0; y < height; y++) {
+            unsigned char *row = pixels + (size_t)y * (size_t)width * 4;
+            for (x = 0; x < width; x++) {
+                unsigned char *pixel = row + (size_t)x * 4;
+                if (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0) {
+                    if (y < top) {
+                        top = y;
+                    }
+                    if (y > bottom) {
+                        bottom = y;
+                    }
+                }
+            }
+        }
+        if (bottom >= top) {
+            metrics->black_box_y = bottom - top + 1;
+            metrics->origin_y = baseline_y - top;
+            measured = 1;
+        }
+    }
+    SelectObject(memory_hdc, old_font);
+    SelectObject(memory_hdc, old_bitmap);
+    DeleteObject(bitmap);
+    DeleteDC(memory_hdc);
+    return measured;
+}
+
+static void text_vertical_metrics(
+    HDC hdc,
+    const wchar_t *text,
+    int length,
+    GlyphVerticalMetrics *metrics
+) {
+    if (text_contains_cjk(text, length) &&
+        rendered_text_vertical_metrics(hdc, text, length, metrics)) {
+        return;
+    }
+    glyph_vertical_metrics(hdc, metrics);
 }
 
 static int ui_font_height(void) {
@@ -1103,21 +1232,36 @@ static void update_directory_column_width(void) {
     old_font = SelectObject(hdc, widget_font());
     if (g_app.row_count <= 0) {
         const wchar_t *text = empty_state_text();
+        int length = (int)wcslen(text);
         SIZE size;
-        if (GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &size)) {
+        if (GetTextExtentPoint32W(hdc, text, length, &size)) {
             max_width = size.cx;
         }
+        text_vertical_metrics(
+            hdc,
+            text,
+            length,
+            &g_app.empty_text_vertical_metrics
+        );
     }
     for (row = 0; row < g_app.row_count; row++) {
         char display_name[768];
         wchar_t display_name_wide[768];
+        int length;
         SIZE size;
         row_display_name(&g_app.rows[row], display_name, sizeof(display_name));
         utf8_to_wide(display_name, display_name_wide, (int)(sizeof(display_name_wide) / sizeof(display_name_wide[0])));
-        if (GetTextExtentPoint32W(hdc, display_name_wide, (int)wcslen(display_name_wide), &size) &&
+        length = (int)wcslen(display_name_wide);
+        if (GetTextExtentPoint32W(hdc, display_name_wide, length, &size) &&
             size.cx > max_width) {
             max_width = size.cx;
         }
+        text_vertical_metrics(
+            hdc,
+            display_name_wide,
+            length,
+            &g_app.rows[row].text_vertical_metrics
+        );
     }
     SelectObject(hdc, old_font);
     ReleaseDC(dc_window, hdc);
@@ -2756,7 +2900,13 @@ static void draw_empty_state_indicator(HDC hdc, const RECT *rect, COLORREF row_b
     fill_soft_indicator(hdc, rect, color, row_background, 220, current_status_soft_edge(), 0);
 }
 
-static void draw_directory_text(HDC hdc, const wchar_t *text, const RECT *rect, int row_top) {
+static void draw_directory_text(
+    HDC hdc,
+    const wchar_t *text,
+    const RECT *rect,
+    int row_top,
+    const GlyphVerticalMetrics *cached_metrics
+) {
     GlyphVerticalMetrics metrics;
     SIZE size;
     int length;
@@ -2770,7 +2920,11 @@ static void draw_directory_text(HDC hdc, const wchar_t *text, const RECT *rect, 
     if (!GetTextExtentPoint32W(hdc, text, length, &size)) {
         return;
     }
-    glyph_vertical_metrics(hdc, &metrics);
+    if (cached_metrics != NULL && cached_metrics->black_box_y > 0) {
+        metrics = *cached_metrics;
+    } else {
+        text_vertical_metrics(hdc, text, length, &metrics);
+    }
     x = rect->right - size.cx;
     if (x < rect->left) {
         x = rect->left;
@@ -2843,7 +2997,13 @@ static void draw_empty_state(HDC hdc, const RECT *client, const RECT *visible_cl
     text_rect.bottom = row_rect.bottom;
     if (text_rect.right > text_rect.left && text_alpha > 0) {
         SetTextColor(hdc, blend_color(RGB(205, 207, 211), row_color, text_alpha));
-        draw_directory_text(hdc, text, &text_rect, row_rect.top);
+        draw_directory_text(
+            hdc,
+            text,
+            &text_rect,
+            row_rect.top,
+            &g_app.empty_text_vertical_metrics
+        );
     }
 
     indicator_rect = status_indicator_rect(0, 0);
@@ -2926,7 +3086,13 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         text_rect.bottom = row_rect.bottom;
         if (text_rect.right > text_rect.left && directory_text_alpha() > 0) {
             SetTextColor(hdc, blend_color(RGB(225, 225, 225), row_color, directory_text_alpha()));
-            draw_directory_text(hdc, display_name_wide, &text_rect, row_rect.top);
+            draw_directory_text(
+                hdc,
+                display_name_wide,
+                &text_rect,
+                row_rect.top,
+                &g_app.rows[row].text_vertical_metrics
+            );
         }
         for (indicator = 0; indicator < g_app.rows[row].session_count; indicator++) {
             int session_index = g_app.rows[row].session_indexes[indicator];

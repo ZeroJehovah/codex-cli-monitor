@@ -60,7 +60,11 @@ when necessary to repair a new low-contrast adjacency after servers are added
 or removed. They are released after all sessions from that server disappear.
 The table width is
 calculated from the visible directory names and status dots instead of reserving
-a large fixed directory column. The panel has no separate gray left border:
+a large fixed directory column. Latin-only directory labels retain the lowercase
+`o` glyph's visual center, while Chinese and mixed CJK labels are centered from
+their actual rendered ink bounds after Windows font fallback. These measurements
+are cached when rows or display size change, so animation painting does not repeat
+the raster scan. The panel has no separate gray left border:
 each server color bar is flush with the visible left edge and acts as that row's
 left border, with the first and last bars meeting the top and bottom borders.
 Running sessions are shown with a blue breathing glow,
