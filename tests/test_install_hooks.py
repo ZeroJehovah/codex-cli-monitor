@@ -96,6 +96,7 @@ class InstallHooksTests(unittest.TestCase):
             b"{broken",
             b"[]",
             b'{"hooks": []}',
+            b'{"hooks": null}',
             b'{"hooks":{"Stop":{}}}',
             b'{"hooks":{"Stop":[{"hooks":["bad"]}]}}',
         ):
@@ -202,6 +203,18 @@ class InstallHooksTests(unittest.TestCase):
             payload = json.loads(hooks_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["hooks"]["Stop"][0]["matcher"], "third-party")
         self.assertEqual(payload["hooks"]["Stop"][0]["hooks"], [])
+
+    def test_uninstall_without_hooks_field_does_not_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hooks_path = Path(tmp) / "hooks.json"
+            hooks_path.write_text('{"description":"third-party"}\n', encoding="utf-8")
+            before = hooks_path.stat().st_mtime_ns
+            result = uninstall_hooks(hooks_path)
+            after = hooks_path.stat().st_mtime_ns
+            raw = hooks_path.read_text(encoding="utf-8")
+        self.assertFalse(result.changed)
+        self.assertEqual(before, after)
+        self.assertEqual(raw, '{"description":"third-party"}\n')
 
     def test_check_reports_stale_disabled_and_invalid_states(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

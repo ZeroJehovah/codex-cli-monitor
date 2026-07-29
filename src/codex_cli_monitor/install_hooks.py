@@ -281,10 +281,9 @@ def _read_hooks_config(path: Path) -> tuple[dict[str, Any], bool]:
         raise HooksConfigError(f"invalid JSON in {path}: {error}") from error
     if not isinstance(payload, dict):
         raise HooksConfigError(f"{path} root must be a JSON object")
-    hooks = payload.get("hooks")
-    if hooks is None:
-        payload["hooks"] = {}
+    if "hooks" not in payload:
         return payload, True
+    hooks = payload["hooks"]
     if not isinstance(hooks, dict):
         raise HooksConfigError(f"{path} hooks must be a JSON object")
     for event_name, entries in hooks.items():
