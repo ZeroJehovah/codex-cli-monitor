@@ -15,7 +15,7 @@
 - 安装器用 marker 识别自己的条目，只同步或删除自己的 Hook，保留用户其他配置。
 - 修改配置前创建备份，写入采用临时文件加原子替换。
 - Hook 中继设置 stdin 和网络短超时，失败静默退出，不让辅助功能阻塞 Agent。
-- 高频事件与低频用户提醒分开；Codex 默认只安装 `SessionStart`、`UserPromptSubmit`、`Stop`。
+- 高频事件与低频用户提醒分开；Codex 默认只安装 `UserPromptSubmit`、`Stop`。
 - 安装器支持检测、同步更新和卸载，而不是只做一次性追加。
 - Windows/WSL 命令分别处理，并支持 Codex 的 `commandWindows` 字段。
 - 集中接收端让并发 Hook 不直接竞争写同一个状态文件。
@@ -46,7 +46,7 @@
 
 ## 3. 总体设计原则
 
-1. **低频事件构成默认正确性路径。** 默认安装 `SessionStart`、`UserPromptSubmit`、`Stop`；工具事件只作为显式启用的增强诊断。
+1. **低频事件构成默认正确性路径。** 默认安装 `UserPromptSubmit`、`Stop`；新会话在首次提交前不显示，工具事件只作为显式启用的增强诊断。
 2. **稳定 ID 优先。** 关联顺序为 `turn_id` 精确匹配、`session_id` 精确匹配、PID/启动时间、时间窗口兜底。ID 冲突时保守拒绝绑定，不做模糊覆盖。
 3. **Hook 全链路 fail-open。** stdin 无效、目录不可写、锁失败、接收端不可达或日志轮转失败，都不得改变 Codex turn 结果；Hook 应快速、无 stdout、以 0 退出。
 4. **配置写入事务化。** 配置不可解析时停止并返回可操作错误；只修改带 monitor marker 的条目；备份、同目录临时文件、flush/fsync、原子替换。
@@ -148,12 +148,12 @@ Hook session 状态按 `(session_id, turn_id)` 聚合；缺少 ID 的旧事件�
 
 任务：
 
-- 对 `SessionStart`、`UserPromptSubmit`、`Stop` 完整读取小型 stdin JSON，只提取白名单字段。
+- 对 `UserPromptSubmit`、`Stop` 完整读取小型 stdin JSON，只提取白名单字段；继续兼容读取旧 `SessionStart` 记录。
 - 将 `turn_id` 加入 `HookEvent`、JSONL、加载器和 `HookSessionState`；schema 升级到 v2，兼容 v1。
 - 将 Hook 入口最外层包成 fail-open：所有解析、目录、写入、锁和编码异常均以 0 退出，不向 stdout 输出。
 - 对 stdin 设置合理的最大字节数；超限时排空或安全停止读取，只记录不含正文的诊断计数。不得因 payload 含大 tool output 耗尽内存。
 - 校验实际 payload 的 `hook_event_name`，避免安装命令事件名和 stdin 事件错配。
-- 默认安装事件缩减为 `SessionStart`、`UserPromptSubmit`、`Stop`。
+- 默认安装事件缩减为 `UserPromptSubmit`、`Stop`。
 - 增加显式工具诊断开关，例如安装器 `--include-tool-events`；仅在开启时安装 `PreToolUse`/`PostToolUse`。
 - 工具诊断模式读取白名单 `session_id`、`turn_id`、`tool_name`、`tool_use_id`，不读取或保存 tool input/response。先用真实 payload 尺寸测试同步白名单解析是否足够轻；若不能满足延迟门槛，再进入阶段 4B 的集中接收方案。
 - 对现有已安装的工具 Hook 提供迁移：默认重新安装会移除旧 monitor 工具条目，并明确告知 trust hash 变化。
@@ -302,7 +302,7 @@ Hook session 状态按 `(session_id, turn_id)` 聚合；缺少 ID 的旧事件�
 | 配置 | 不存在、有效空配置、第三方 Hook、旧 monitor Hook、损坏 JSON、错误类型、只读目录、写到一半失败 |
 | 安装生命周期 | 初装、重复安装、仓库路径变化、check、卸载、备份恢复、trust hash 无变化 |
 | Hook stdin | 空、无效 JSON、超限、缺字段、未知字段、事件名不一致、schema 演进 |
-| 事件 | SessionStart、UserPromptSubmit、Stop；可选 Pre/PostToolUse 并发、乱序、缺失 |
+| 事件 | UserPromptSubmit、Stop；兼容旧 SessionStart；可选 Pre/PostToolUse 并发、乱序、缺失 |
 | 绑定 | 同 cwd 多 PID、同 session 多 turn、ID 精确、ID 冲突、仅 PID、仅时间、旧日志无 ID |
 | 日志 | 并发追加、NUL、截断尾、轮转、inode 替换、超大文件、权限/磁盘错误 |
 | 状态 | 新开成功、开放 turn 运行中、Stop 成功、同 turn failure 失败、下一 turn 清除旧失败 |

@@ -39,7 +39,7 @@ MAX_SNAPSHOT_BODY_BYTES = 1024 * 1024
 @dataclass(frozen=True)
 class ApiConfig:
     proc_root: Path = Path("/proc")
-    sample_window: float = 0.25
+    sample_window: float = 0.0
     shim_log: Path | None = None
     codex_home: Path | None = None
     hook_log: Path | None = None

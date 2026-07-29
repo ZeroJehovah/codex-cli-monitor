@@ -95,8 +95,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sample-window",
         type=_non_negative_float,
-        default=0.25,
-        help="seconds between CPU samples; use 0 for a single snapshot",
+        default=0.0,
+        help="deprecated compatibility option; runtime scans are single-snapshot",
     )
     parser.add_argument(
         "--shim-log",

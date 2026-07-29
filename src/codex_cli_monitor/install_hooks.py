@@ -16,15 +16,21 @@ from typing import Any
 
 MONITOR_MARKER = "CODEX_CLI_MONITOR_HOOK=1"
 DEFAULT_HOOK_EVENTS = {
-    "SessionStart": {"matcher": "*", "command": "session_start"},
     "UserPromptSubmit": {"command": "user_prompt_submit"},
     "Stop": {"command": "stop"},
+}
+LEGACY_HOOK_EVENTS = {
+    "SessionStart": {"matcher": "*", "command": "session_start"},
 }
 TOOL_HOOK_EVENTS = {
     "PreToolUse": {"matcher": "*", "command": "pre_tool_use"},
     "PostToolUse": {"matcher": "*", "command": "post_tool_use"},
 }
-ALL_HOOK_EVENTS = {**DEFAULT_HOOK_EVENTS, **TOOL_HOOK_EVENTS}
+ALL_HOOK_EVENTS = {
+    **DEFAULT_HOOK_EVENTS,
+    **LEGACY_HOOK_EVENTS,
+    **TOOL_HOOK_EVENTS,
+}
 
 
 class HooksConfigError(ValueError):

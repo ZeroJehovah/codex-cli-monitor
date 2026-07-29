@@ -8,6 +8,7 @@ from io import StringIO
 from pathlib import Path
 
 from codex_cli_monitor.cli import main
+from codex_cli_monitor.hook_state import append_hook_event
 
 
 class CliTests(unittest.TestCase):
@@ -44,10 +45,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("schema_versions", payload["hook_health"]["runtime"])
         self.assertIn("installation", payload["hook_health"])
         self.assertEqual(payload["codex_state"]["codex_home"], str(home))
-        self.assertEqual(
-            payload["codex_state"]["newest_files"][0]["kind"],
-            "session_jsonl",
-        )
+        self.assertEqual(payload["codex_state"]["newest_files"], [])
 
     def test_json_output_uses_display_status_for_session_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -56,8 +54,23 @@ class CliTests(unittest.TestCase):
             home = root / "codex-home"
             proc.mkdir()
             home.mkdir()
+            hook_log = root / "hooks.jsonl"
             _write_common_proc(proc)
             _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                path=hook_log,
+                hook_payload={"session_id": "session-a", "turn_id": "turn-a"},
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=100,
+                path=hook_log,
+                hook_payload={"session_id": "session-a", "turn_id": "turn-a"},
+            )
             stdout = StringIO()
 
             with redirect_stdout(stdout):
@@ -70,6 +83,8 @@ class CliTests(unittest.TestCase):
                         str(proc),
                         "--codex-home",
                         str(home),
+                        "--hook-log",
+                        str(hook_log),
                     ]
                 )
 
@@ -78,7 +93,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["sessions"][0]["status"], "成功")
         self.assertEqual(
             payload["sessions"][0]["inferred_status"]["status"],
-            "waiting_user_likely",
+            "success_hook",
         )
 
     def test_text_output_includes_explicit_session_count(self) -> None:
@@ -114,8 +129,23 @@ class CliTests(unittest.TestCase):
             home = root / "codex-home"
             proc.mkdir()
             home.mkdir()
+            hook_log = root / "hooks.jsonl"
             _write_common_proc(proc)
             _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                path=hook_log,
+                hook_payload={"session_id": "session-a", "turn_id": "turn-a"},
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=100,
+                path=hook_log,
+                hook_payload={"session_id": "session-a", "turn_id": "turn-a"},
+            )
             stdout = StringIO()
 
             with redirect_stdout(stdout):
@@ -127,6 +157,8 @@ class CliTests(unittest.TestCase):
                         str(proc),
                         "--codex-home",
                         str(home),
+                        "--hook-log",
+                        str(hook_log),
                     ]
                 )
 

@@ -64,6 +64,7 @@ class HookSessionState:
     updated_at: float
     last_event: str
     in_turn: bool
+    has_turn_activity: bool = False
     turn_started_at: float | None = None
     last_stopped_at: float | None = None
     session_started_at: float | None = None
@@ -84,6 +85,7 @@ class HookSessionState:
             "age_seconds": max(0.0, time.time() - self.updated_at),
             "last_event": self.last_event,
             "in_turn": self.in_turn,
+            "has_turn_activity": self.has_turn_activity,
             "turn_started_at": self.turn_started_at,
             "last_stopped_at": self.last_stopped_at,
             "session_started_at": self.session_started_at,
@@ -314,6 +316,7 @@ def summarize_hook_events(
         session_id = event.session_id or previous.session_id
         turn_id = previous.turn_id
         in_turn = previous.in_turn
+        has_turn_activity = previous.has_turn_activity
         turn_started_at = previous.turn_started_at
         last_stopped_at = previous.last_stopped_at
         last_stopped_turn_id = previous.last_stopped_turn_id
@@ -326,6 +329,7 @@ def summarize_hook_events(
             tools.clear()
             anonymous = 0
             in_turn = False
+            has_turn_activity = False
             turn_id = None
             turn_started_at = None
             last_stopped_at = None
@@ -334,13 +338,11 @@ def summarize_hook_events(
             session_start_source = None
 
         if event.event == "session_start":
-            in_turn = False
-            turn_started_at = None
-            last_stopped_at = None
             session_started_at = event.timestamp
             session_start_source = event.hook_source
         elif event.event == "user_prompt_submit":
             in_turn = True
+            has_turn_activity = True
             turn_id = event.turn_id or turn_id
             turn_started_at = event.timestamp
             last_stopped_at = None
@@ -365,6 +367,7 @@ def summarize_hook_events(
             if turn_started_at is None:
                 turn_started_at = event.timestamp
         elif event.event == "stop":
+            has_turn_activity = True
             last_stopped_at = event.timestamp
             last_stopped_turn_id = event.turn_id or turn_id
             if not (event.turn_id and turn_id and event.turn_id != turn_id):
@@ -379,6 +382,7 @@ def summarize_hook_events(
             updated_at=event.timestamp,
             last_event=event.event,
             in_turn=in_turn,
+            has_turn_activity=has_turn_activity,
             turn_started_at=turn_started_at,
             last_stopped_at=last_stopped_at,
             session_started_at=session_started_at,

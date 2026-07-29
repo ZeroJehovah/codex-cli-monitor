@@ -5,8 +5,8 @@
 ## 功能
 
 - 扫描当前系统里的 Codex CLI 进程，显示会话数量、PID、TTY、工作目录、运行时长等信息。
-- 根据 Codex hooks、进程树、CPU 变化、网络连接和 Codex 本地状态文件，判断会话状态。
-- 区分“确定事实”和“推断状态”，不会把推断结果当成 Codex 内部真实状态。
+- 使用 Codex 低频 hooks 驱动三态流转，并用最小化结构化终端事件补足失败结果。
+- 保留轻量进程存活检查，用于清理未触发 Hook 就意外退出的会话。
 - 支持 JSON 输出，方便接入脚本或面板。
 - 支持常驻后台 HTTP API，供桌面前端轮询当前 Codex 会话状态。
 - 支持多服务器采集与聚合：每台服务器本地采集，VPS 聚合服务同时监控自身 Codex 并合并远端状态。
@@ -15,15 +15,15 @@
 
 ## 大概原理
 
-默认方式是 sidecar 监控：工具独立运行，不修改 Codex，也不要求改变正常使用习惯。它主要读取这些只读信号：
+默认方式是 Hook 状态机加轻量 sidecar：工具独立运行，不修改 Codex，也不要求改变正常使用习惯。它只读取这些必要信号：
 
-- `/proc` 里的进程、父子进程、命令行、TTY、当前工作目录和 CPU 时间。
-- 进程持有的网络连接，用作远程 API 请求的辅助判断。
-- `$CODEX_HOME` 下的本地状态文件元数据，例如 session JSONL 文件路径、大小、修改时间，以及头尾结构化事件类型。
-- Codex hooks 默认写入 session/turn/stop 低频生命周期事件；工具事件只在显式诊断模式下启用。
+- `/proc` 里的进程、父子关系、命令行、TTY、当前工作目录和进程启动时间。
+- Codex hooks 默认只写入 `UserPromptSubmit` 和 `Stop` 两个低频生命周期事件。
+- `$CODEX_HOME/sessions` 中与 Hook `session_id` 精确对应的 session JSONL；读取器只增量读取有上限的文件尾，并且只识别结构化 `task_complete.error`、`turn_complete.error`、`TurnAborted` 等终端结果。
 - 可选 shim 写入的启动记录。
 
-为了减少误判，远程 API 进行中的判断不会只依赖长连接；它需要近期 Codex session 文件活动和网络连接共同支撑。监控不会输出 session JSONL 的消息正文。
+常驻扫描不做 CPU 差值采样，不读取进程网络连接，不扫描运行时诊断数据库，也不根据
+assistant 文本、工具输出或错误关键词推断状态。监控不会输出 session JSONL 的消息正文。
 
 监控还会读取 Linux 进程的会话 ID、进程组和终端前台进程组。若 Codex 仍残留在
 `/proc` 中，但其 TTY 已删除、终端前台进程组已失效，或者原终端会话 leader 已经不存
@@ -33,14 +33,17 @@
 主状态只有三种：
 
 - `运行中`：已提交提示词，AI 正在思考、等待 API、执行 MCP、本地工具或其他操作。
-- `成功`：新打开、空闲等待输入，或最近一轮结果完成成功。
+- `成功`：已显示会话的最近一轮通过 `Stop` 或结构化终端事件完成成功。
 - `失败`：从运行中结束，且最近一轮出现 API/模型错误，或被手动 Ctrl+C 中断。
 
-JSON 里仍保留 `inferred_status` 诊断字段，里面可能出现 `waiting_user_likely`、`api_inflight_likely`、`tool_running_likely` 等内部推断值，用来解释证据和置信度；表格和顶层 `status` 只显示上面的三种主状态。
+新打开但尚未提交提示词的 Codex 进程不会显示；`SessionStart` 本身也不创建状态行。JSON
+为兼容现有调用方仍保留 `inferred_status` 字段，但其中只使用 `running_hook`、
+`success_hook` 和 `failure_terminal` 这类来源说明，不再包含 CPU、网络或工具活动推断。
+表格和顶层 `status` 只显示上面的三种主状态。
 
 ## 使用方法
 
-先安装低侵入 hooks。默认只记录 `SessionStart`、`UserPromptSubmit` 和 `Stop`：
+先安装低侵入 hooks。默认只记录 `UserPromptSubmit` 和 `Stop`：
 
 ```bash
 ./bin/codex-monitor-install-hooks
@@ -48,7 +51,12 @@ JSON 里仍保留 `inferred_status` 诊断字段，里面可能出现 `waiting_u
 
 安装后，在每个正在运行或新打开的 Codex CLI 里执行 `/hooks`，按提示 review/trust 新 hook。这个步骤是 Codex 的安全机制。
 
-信任后，监控会优先使用 hook 事件判断状态：用户提交后到 `Stop` 前视为 `运行中`，`Stop` 后结合 session JSONL 末尾事件判断 `成功` 或 `失败`；新打开或等待输入的 Codex 进程显示为 `成功`。同一工作目录下的多个 Codex 进程优先按 `turn_id`、`session_id` 精确绑定，再退化到 PID、进程启动时间和 cwd；已知 ID 冲突不会被时间接近度覆盖。没有 hook 事件的旧会话会继续使用 sidecar 信号降级推断。
+信任后，`UserPromptSubmit` 把进程置为 `运行中`，`Stop` 把同一 `turn_id` 置为
+`成功`。Codex 的错误和 Ctrl+C 分支不会触发 `Stop`，因此监控还会按 `session_id` 定位
+唯一 session 文件，仅增量尾读同一 `turn_id` 的结构化终端事件：非空
+`task_complete.error`/`turn_complete.error` 或 `TurnAborted` 置为 `失败`，无错误的完成事件
+置为 `成功`。已知 ID 冲突绝不会由时间接近度覆盖。没有提交 Hook 的新会话和旧会话不
+显示；进程消失时，即使没有终止 Hook，也会清理其状态行。
 
 直接在项目目录运行：
 
@@ -62,7 +70,7 @@ PYTHONPATH=src python3 -m codex_cli_monitor
 PYTHONPATH=src python3 -m codex_cli_monitor --json
 ```
 
-单次快照，不采样 CPU：
+`--sample-window` 仅作为旧脚本兼容参数保留；当前扫描始终是单次进程快照：
 
 ```bash
 PYTHONPATH=src python3 -m codex_cli_monitor --sample-window 0
@@ -138,7 +146,7 @@ VPS 本机 Codex  ──┘                     （同时采集 VPS 本机）
 ```
 
 - VPS 聚合服务接收远端快照，并使用相同的本地采集逻辑显示 VPS 自己的 Codex。
-- 每台 Linux 采集服务器只读取本机 `/proc`、Hook 日志和 Codex session 文件，然后异步推送最小状态快照。
+- 每台 Linux 采集服务器只读取本机 `/proc`、Hook 日志和 Hook 精确绑定的 Codex session 文件尾，然后异步推送最小状态快照。
 - Hook 始终只写本地文件，不直接访问 VPS；VPS 离线不会阻塞 Codex。
 - Windows 悬浮窗只访问聚合服务，不直接连接每台采集服务器。
 
@@ -404,12 +412,12 @@ Monitor marker 的 command handler，同一 matcher group 内的第三方 handle
 默认安装的事件固定为：
 
 ```text
-SessionStart
 UserPromptSubmit
 Stop
 ```
 
-`PreToolUse` 和 `PostToolUse` 不是三态正确性的依赖。仅在排查工具生命周期时临时启用：
+`SessionStart`、`PreToolUse` 和 `PostToolUse` 都不是三态正确性的依赖。旧版 Monitor
+安装的 `SessionStart` 会在下次运行安装器时移除。仅在排查工具生命周期时临时启用后两者：
 
 ```bash
 ./bin/codex-monitor-install-hooks --include-tool-events
@@ -665,7 +673,7 @@ curl --noproxy '*' https://codex-monitor.aiof.top/healthz
 错误、防火墙阻止连接、HTTPS 证书无效或服务器 ID 重复。采集器本身不使用环境代理，
 因此无需修改系统级代理即可验证直连链路。
 
-#### 状态一直不准确或一直显示成功
+#### 状态不更新、没有会话行或结果不准确
 
 - 确认 systemd 服务的 `SERVICE_USER` 与运行 Codex 的用户一致。
 - 运行 `./bin/codex-monitor-install-hooks --check`，修复未安装、陈旧路径、损坏配置或显式关闭。
@@ -673,6 +681,8 @@ curl --noproxy '*' https://codex-monitor.aiof.top/healthz
 - 查看 `curl http://127.0.0.1:8765/healthz` 中的 `hooks.installation` 和 `hooks.runtime`。
 - 检查 Hook 日志是否更新；有活动 Codex 但长期无事件时，只能判断“可能未 trust 或被禁用”，不能据此断言具体原因。
 - 检查 `~/.codex` 是否属于正确用户。
+- 新进程在第一次 `UserPromptSubmit` 前按设计不会显示；只看到进程而没有 Hook 事件不是故障状态行。
+- 确认 Codex session 文件名包含 Hook 记录的 `session_id`；终端读取器不会用同目录时间接近度猜测其他文件。
 - 如果移动过仓库，重新安装 Hook。
 
 #### SSH 已断开但 Codex 会话仍显示

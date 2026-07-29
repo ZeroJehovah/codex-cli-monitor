@@ -34,6 +34,47 @@ def _append_events_in_process(arguments: tuple[str, int]) -> int:
 
 
 class HookStateTests(unittest.TestCase):
+    def test_session_start_alone_has_no_displayable_turn_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.jsonl"
+            append_hook_event(
+                "session_start",
+                cwd="/work/a",
+                ppid=100,
+                path=path,
+                hook_payload={"session_id": "session-a"},
+            )
+            state = summarize_hook_events(load_hook_events(path))[
+                str(Path("/work/a").resolve())
+            ][0]
+
+        self.assertFalse(state.has_turn_activity)
+
+    def test_session_start_diagnostic_does_not_close_open_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.jsonl"
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                path=path,
+                hook_payload={"session_id": "session-a", "turn_id": "turn-a"},
+            )
+            append_hook_event(
+                "session_start",
+                cwd="/work/a",
+                ppid=100,
+                path=path,
+                hook_payload={"session_id": "session-a"},
+            )
+            state = summarize_hook_events(load_hook_events(path))[
+                str(Path("/work/a").resolve())
+            ][0]
+
+        self.assertTrue(state.has_turn_activity)
+        self.assertTrue(state.in_turn)
+        self.assertEqual(state.turn_id, "turn-a")
+
     def test_schema_v1_v2_corruption_and_truncated_tail_are_tolerated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "hooks.jsonl"
