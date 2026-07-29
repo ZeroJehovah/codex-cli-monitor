@@ -173,6 +173,12 @@ def discover_sessions(
             state_activity,
             hook_state,
         )
+        binding = _binding_diagnostics(
+            root,
+            state_activity,
+            hook_state,
+            session_activities,
+        )
         sessions.append(
             CodexSession(
                 root=root,
@@ -189,6 +195,15 @@ def discover_sessions(
                     hook_state,
                     state_activity,
                 ),
+                binding_method=_binding_method(root, state_activity, hook_state),
+                binding_confidence=_binding_confidence(
+                    root,
+                    state_activity,
+                    hook_state,
+                ),
+                binding_ambiguous=binding[0],
+                binding_candidate_count=binding[1],
+                binding_evidence=binding[2],
             )
         )
 
@@ -329,7 +344,7 @@ def _state_activities_for_roots(
     hook_states_by_pid: dict[int, HookSessionState | None],
 ) -> dict[int, SessionActivity]:
     candidate_pairs: list[
-        tuple[tuple[float, float, float, float, float, float], int, str, SessionActivity]
+        tuple[tuple[float, float, float, float, float], int, str, SessionActivity]
     ] = []
     for root in roots:
         hook_state = hook_states_by_pid.get(root.pid)
@@ -382,7 +397,10 @@ def _activity_sort_key_for_root(
     root: ProcessInfo,
     activity: SessionActivity,
     hook_state: HookSessionState | None,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float]:
+    id_rank = _activity_id_match_rank(activity, hook_state)
+    if id_rank is None:
+        id_rank = 3.0
     hook_rank = 0.0 if hook_state is not None else 1.0
     hook_lifecycle_rank = _hook_lifecycle_sort_rank(hook_state)
     delta = _activity_hook_delta(activity, hook_state)
@@ -393,6 +411,7 @@ def _activity_sort_key_for_root(
     event_at = _activity_event_time(activity)
     recency = -(event_at or activity.modified_at)
     return (
+        id_rank,
         hook_rank,
         hook_lifecycle_rank,
         delta,
@@ -453,7 +472,10 @@ def _hook_state_for_root(
     if not candidates:
         return None
     for state in candidates:
-        if state.codex_pid == root.pid:
+        if state.codex_pid == root.pid and not _is_before_process_start(
+            state.updated_at,
+            root,
+        ):
             return state
     for state in candidates:
         if state.codex_pid is None and not _is_before_process_start(state.updated_at, root):
@@ -576,6 +598,11 @@ def _activity_is_current_for_hook(
 ) -> bool:
     if state_activity is None:
         return False
+    id_rank = _activity_id_match_rank(state_activity, hook_state)
+    if id_rank is None:
+        return False
+    if id_rank < 2.0:
+        return True
     return (
         state_activity.modified_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS
         >= hook_state.updated_at
@@ -588,6 +615,12 @@ def _activity_terminal_event_is_for_open_hook_turn(
 ) -> bool:
     if state_activity is None or not state_activity.terminal_event:
         return False
+    if (
+        state_activity.turn_id is not None
+        and hook_state.turn_id is not None
+        and state_activity.turn_id != hook_state.turn_id
+    ):
+        return False
     started_at = hook_state.turn_started_at or hook_state.updated_at
     return _activity_event_time(state_activity) >= started_at
 
@@ -596,6 +629,11 @@ def _activity_matches_hook(
     activity: SessionActivity,
     hook_state: HookSessionState,
 ) -> bool:
+    id_rank = _activity_id_match_rank(activity, hook_state)
+    if id_rank is None:
+        return False
+    if id_rank < 2.0:
+        return True
     event_at = _activity_event_time(activity)
     turn_started_at = hook_state.turn_started_at
     if (
@@ -615,6 +653,97 @@ def _activity_matches_hook(
         return event_at + ACTIVITY_TIMESTAMP_GRACE_SECONDS >= started_at
 
     return True
+
+
+def _activity_id_match_rank(
+    activity: SessionActivity,
+    hook_state: HookSessionState | None,
+) -> float | None:
+    if hook_state is None:
+        return 2.0
+    if (
+        activity.session_id is not None
+        and hook_state.session_id is not None
+        and activity.session_id != hook_state.session_id
+    ):
+        return None
+    expected_turn_id = hook_state.turn_id or hook_state.last_stopped_turn_id
+    if (
+        activity.turn_id is not None
+        and expected_turn_id is not None
+        and activity.turn_id != expected_turn_id
+    ):
+        return None
+    if activity.turn_id is not None and expected_turn_id == activity.turn_id:
+        return 0.0
+    if (
+        activity.session_id is not None
+        and hook_state.session_id == activity.session_id
+    ):
+        return 1.0
+    return 2.0
+
+
+def _binding_method(
+    root: ProcessInfo,
+    activity: SessionActivity | None,
+    hook_state: HookSessionState | None,
+) -> str | None:
+    if activity is None:
+        return None
+    rank = _activity_id_match_rank(activity, hook_state)
+    if rank == 0.0:
+        return "turn_id"
+    if rank == 1.0:
+        return "session_id"
+    if hook_state is not None and hook_state.codex_pid == root.pid:
+        return "pid_time"
+    return "cwd_time"
+
+
+def _binding_confidence(
+    root: ProcessInfo,
+    activity: SessionActivity | None,
+    hook_state: HookSessionState | None,
+) -> float | None:
+    method = _binding_method(root, activity, hook_state)
+    return {
+        "turn_id": 1.0,
+        "session_id": 0.95,
+        "pid_time": 0.75,
+        "cwd_time": 0.45,
+    }.get(method)
+
+
+def _binding_diagnostics(
+    root: ProcessInfo,
+    activity: SessionActivity | None,
+    hook_state: HookSessionState | None,
+    activities: tuple[SessionActivity, ...],
+) -> tuple[bool, int, tuple[str, ...]]:
+    if activity is None:
+        return False, 0, ("no compatible session activity was bound",)
+    method = _binding_method(root, activity, hook_state) or "unknown"
+    selected_rank = _activity_id_match_rank(activity, hook_state)
+    compatible = _activity_candidates_for_root(root, activities, hook_state)
+    same_rank = tuple(
+        candidate
+        for candidate in compatible
+        if _activity_id_match_rank(candidate, hook_state) == selected_rank
+    )
+    ambiguous = selected_rank in {0.0, 1.0} and len(same_rank) > 1
+    evidence = [f"binding selected by {method}"]
+    if hook_state is not None:
+        evidence.append("known stable-id conflicts were excluded before time ranking")
+    if ambiguous:
+        evidence.append(
+            f"{len(same_rank)} equally ranked stable-id candidates; lifecycle time broke the tie"
+        )
+    elif selected_rank in {0.0, 1.0}:
+        evidence.append("stable-id match was unique among compatible candidates")
+    else:
+        evidence.append("stable identifiers were unavailable; compatibility fallback was used")
+    return ambiguous, len(same_rank), tuple(evidence)
 
 
 def _activity_is_missing_response_failure(

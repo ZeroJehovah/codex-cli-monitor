@@ -252,7 +252,11 @@ class AggregationTests(unittest.TestCase):
             "consecutive_failures": 1,
             "last_error": "timeout",
         }
-        config = ApiConfig(server_id="server-a", server_name="Server A")
+        config = ApiConfig(
+            server_id="server-a",
+            server_name="Server A",
+            hook_log=Path("/definitely-missing/codex-monitor-hooks.jsonl"),
+        )
         handler = make_api_handler(
             config,
             ServerIdentity("server-a", "Server A", "boot-a"),
@@ -274,6 +278,11 @@ class AggregationTests(unittest.TestCase):
 
         self.assertEqual(response.status, 200)
         self.assertEqual(payload["collector"], status)
+        self.assertEqual(payload["hooks"]["runtime"]["event_mode"], "default")
+        self.assertFalse(payload["hooks"]["runtime"]["exists"])
+        self.assertIn("installation", payload["hooks"])
+        self.assertIn("signal_state", payload["hooks"])
+        self.assertEqual(payload["hooks"]["installation"]["trust_state"], "unknown")
         self.assertNotIn("token", json.dumps(payload).lower())
 
     def test_collector_logs_timestamped_failure_and_recovery(self) -> None:

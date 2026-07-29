@@ -40,6 +40,9 @@ class CliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(result, 0)
         self.assertEqual(payload["session_count"], 0)
+        self.assertIn("hook_health", payload)
+        self.assertIn("schema_versions", payload["hook_health"]["runtime"])
+        self.assertIn("installation", payload["hook_health"])
         self.assertEqual(payload["codex_state"]["codex_home"], str(home))
         self.assertEqual(
             payload["codex_state"]["newest_files"][0]["kind"],

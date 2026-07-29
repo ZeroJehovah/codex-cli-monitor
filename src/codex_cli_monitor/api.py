@@ -22,6 +22,8 @@ from .aggregation import (
     snapshot_server_id,
 )
 from .collector import CollectorPusher
+from .hook_state import hook_log_health
+from .install_hooks import check_hooks
 from .models import CodexSession
 from .monitor import discover_sessions
 
@@ -108,6 +110,49 @@ def build_sessions_payload(
     )
 
 
+def build_hook_health(
+    codex_home: Path | None = None,
+    hook_log: Path | None = None,
+) -> dict[str, object]:
+    home = (codex_home or Path.home() / ".codex").expanduser()
+    repo_root = Path(__file__).resolve().parents[2]
+    installation = check_hooks(
+        home / "hooks.json",
+        repo_root,
+        config_path=home / "config.toml",
+    )
+    configured_mode = "default"
+    if set(installation.unexpected_events) == {"PreToolUse", "PostToolUse"}:
+        tool_installation = check_hooks(
+            home / "hooks.json",
+            repo_root,
+            include_tool_events=True,
+            config_path=home / "config.toml",
+        )
+        if tool_installation.current:
+            installation = tool_installation
+            configured_mode = "tool_diagnostics"
+    runtime = hook_log_health(hook_log)
+    if not installation.valid:
+        signal_state = "config_invalid"
+    elif installation.hooks_disabled:
+        signal_state = "explicitly_disabled"
+    elif not installation.installed:
+        signal_state = "not_installed"
+    elif not installation.current:
+        signal_state = "out_of_date"
+    elif runtime["latest_event_at"] is None:
+        signal_state = "no_events_observed_trust_unknown"
+    else:
+        signal_state = "events_observed"
+    return {
+        "signal_state": signal_state,
+        "configured_mode": configured_mode,
+        "installation": installation.to_dict(),
+        "runtime": runtime,
+    }
+
+
 def make_api_handler(
     config: ApiConfig,
     identity: ServerIdentity | None = None,
@@ -143,6 +188,7 @@ def make_api_handler(
                     "ok": True,
                     "mode": "aggregator" if config.aggregate else "collector",
                     "server": identity.to_dict(),
+                    "hooks": build_hook_health(config.codex_home, config.hook_log),
                 }
                 if collector_status_provider is not None:
                     payload["collector"] = collector_status_provider()

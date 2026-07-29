@@ -9,8 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_cli_monitor.hook_state import append_hook_event
-from codex_cli_monitor.monitor import discover_sessions, inspect_runtime
+from codex_cli_monitor.hook_state import HookSessionState, append_hook_event
+from codex_cli_monitor.models import ProcessInfo, SessionActivity
+from codex_cli_monitor.monitor import (
+    _activity_candidates_for_root,
+    _state_activities_for_roots,
+    discover_sessions,
+    inspect_runtime,
+)
 
 
 class MonitorTests(unittest.TestCase):
@@ -1760,9 +1766,109 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(state_summary.codex_home, str(home))
         self.assertEqual(state_summary.newest_files[0].kind, "session_jsonl")
 
+    def test_stable_ids_override_closer_same_cwd_activity(self) -> None:
+        roots = (
+            _process_info(100, "/work/a", 1000.0),
+            _process_info(200, "/work/a", 1000.0),
+        )
+        hook_states = {
+            100: HookSessionState(
+                cwd="/work/a", updated_at=2000.0, last_event="stop", in_turn=False,
+                session_id="session-a", turn_id="turn-a", last_stopped_turn_id="turn-a",
+                codex_pid=100,
+            ),
+            200: HookSessionState(
+                cwd="/work/a", updated_at=1000.0, last_event="stop", in_turn=False,
+                session_id="session-b", turn_id="turn-b", last_stopped_turn_id="turn-b",
+                codex_pid=200,
+            ),
+        }
+        activities = (
+            _session_activity("a.jsonl", "session-a", "turn-a", modified_at=1000.0),
+            _session_activity("b.jsonl", "session-b", "turn-b", modified_at=2000.0),
+        )
+
+        result = _state_activities_for_roots(roots, activities, hook_states)
+
+        self.assertEqual(result[100].session_id, "session-a")
+        self.assertEqual(result[200].session_id, "session-b")
+
+    def test_known_id_conflict_is_not_a_binding_candidate(self) -> None:
+        root = _process_info(100, "/work/a", 1000.0)
+        hook_state = HookSessionState(
+            cwd="/work/a", updated_at=1001.0, last_event="user_prompt_submit", in_turn=True,
+            session_id="expected-session", turn_id="expected-turn", codex_pid=100,
+        )
+        conflicting = _session_activity(
+            "conflict.jsonl", "other-session", "other-turn", modified_at=1001.0
+        )
+        compatible_legacy = _session_activity(
+            "legacy.jsonl", None, None, modified_at=1002.0
+        )
+
+        candidates = _activity_candidates_for_root(root, (conflicting, compatible_legacy), hook_state)
+
+        self.assertEqual(tuple(item.relative_path for item in candidates), ("legacy.jsonl",))
+
+    def test_reused_pid_ignores_hook_state_from_before_process_start(self) -> None:
+        from codex_cli_monitor.monitor import _hook_state_for_root
+
+        root = _process_info(100, "/work/a", 2000.0)
+        old_state = HookSessionState(
+            cwd=str(Path("/work/a").resolve()),
+            updated_at=1000.0,
+            last_event="stop",
+            in_turn=False,
+            codex_pid=100,
+        )
+        state = _hook_state_for_root(
+            root,
+            {str(Path("/work/a").resolve()): (old_state,)},
+        )
+        self.assertIsNone(state)
+
 
 def _write_common_proc(proc: Path) -> None:
     (proc / "uptime").write_text("200.00 0.00\n", encoding="utf-8")
+
+
+def _process_info(pid: int, cwd: str, started_at: float) -> ProcessInfo:
+    return ProcessInfo(
+        pid=pid,
+        ppid=1,
+        comm="codex",
+        state="S",
+        cmdline=("codex",),
+        cwd=cwd,
+        exe="/usr/bin/codex",
+        tty="/dev/pts/1",
+        tty_nr=1,
+        elapsed_seconds=10.0,
+        cpu_seconds=1.0,
+        started_at=started_at,
+    )
+
+
+def _session_activity(
+    relative_path: str,
+    session_id: str | None,
+    turn_id: str | None,
+    modified_at: float,
+) -> SessionActivity:
+    return SessionActivity(
+        relative_path=relative_path,
+        session_id=session_id,
+        turn_id=turn_id,
+        cwd="/work/a",
+        size_bytes=100,
+        modified_at=modified_at,
+        observed_at=modified_at,
+        session_started_at=1000.0,
+        last_record_at=modified_at,
+        turn_started_at=modified_at,
+        terminal_event_at=modified_at,
+        terminal_event=True,
+    )
 
 
 def _write_process(

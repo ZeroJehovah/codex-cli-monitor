@@ -17,6 +17,7 @@ from .api import (
     DEFAULT_LOCAL_CACHE_SECONDS,
     DEFAULT_REMOTE_TTL_SECONDS,
     ApiConfig,
+    build_hook_health,
     serve_api,
 )
 from .monitor import inspect_runtime
@@ -49,10 +50,26 @@ def main(argv: list[str] | None = None) -> int:
                 "session_count": len(sessions),
                 "sessions": [session.to_dict() for session in sessions],
                 "codex_state": codex_state.to_dict(),
+                "hook_health": build_hook_health(args.codex_home, args.hook_log),
             }
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
             _print_table(sessions, codex_state)
+            hook_health = build_hook_health(args.codex_home, args.hook_log)
+            runtime_health = hook_health["runtime"]
+            installation_health = hook_health["installation"]
+            if not installation_health["current"] or installation_health["hooks_disabled"]:
+                print(
+                    "Hook warning: installation is not active/current; "
+                    "run codex-monitor-install-hooks --check."
+                )
+            if runtime_health["corrupt_lines"] or runtime_health["write_error_count"]:
+                print(
+                    "Hook warning: "
+                    f"{runtime_health['corrupt_lines']} corrupt line(s), "
+                    f"{runtime_health['write_error_count']} write error(s); "
+                    "see --json or /healthz for diagnostics."
+                )
 
         if args.watch is None:
             return 0

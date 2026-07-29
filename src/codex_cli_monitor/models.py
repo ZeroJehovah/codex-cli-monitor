@@ -234,6 +234,11 @@ class CodexSession:
     hook_state: HookSessionState | None = None
     launch_record: LaunchRecord | None = None
     display_status: str = "成功"
+    binding_method: str | None = None
+    binding_confidence: float | None = None
+    binding_ambiguous: bool = False
+    binding_candidate_count: int = 0
+    binding_evidence: tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -248,6 +253,11 @@ class CodexSession:
             "hook_state": self.hook_state.to_dict()
             if self.hook_state is not None
             else None,
+            "binding_method": self.binding_method,
+            "binding_confidence": self.binding_confidence,
+            "binding_ambiguous": self.binding_ambiguous,
+            "binding_candidate_count": self.binding_candidate_count,
+            "binding_evidence": list(self.binding_evidence),
             "launch_record": self.launch_record.to_dict()
             if self.launch_record is not None
             else None,

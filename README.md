@@ -20,7 +20,7 @@
 - `/proc` 里的进程、父子进程、命令行、TTY、当前工作目录和 CPU 时间。
 - 进程持有的网络连接，用作远程 API 请求的辅助判断。
 - `$CODEX_HOME` 下的本地状态文件元数据，例如 session JSONL 文件路径、大小、修改时间，以及头尾结构化事件类型。
-- Codex hooks 写入的 turn/tool/stop 生命周期事件。
+- Codex hooks 默认写入 session/turn/stop 低频生命周期事件；工具事件只在显式诊断模式下启用。
 - 可选 shim 写入的启动记录。
 
 为了减少误判，远程 API 进行中的判断不会只依赖长连接；它需要近期 Codex session 文件活动和网络连接共同支撑。监控不会输出 session JSONL 的消息正文。
@@ -40,7 +40,7 @@ JSON 里仍保留 `inferred_status` 诊断字段，里面可能出现 `waiting_u
 
 ## 使用方法
 
-先安装低侵入 hooks，用来记录 Codex turn/tool/stop 生命周期事件：
+先安装低侵入 hooks。默认只记录 `SessionStart`、`UserPromptSubmit` 和 `Stop`：
 
 ```bash
 ./bin/codex-monitor-install-hooks
@@ -48,7 +48,7 @@ JSON 里仍保留 `inferred_status` 诊断字段，里面可能出现 `waiting_u
 
 安装后，在每个正在运行或新打开的 Codex CLI 里执行 `/hooks`，按提示 review/trust 新 hook。这个步骤是 Codex 的安全机制。
 
-信任后，监控会优先使用 hook 事件判断状态：用户提交后到 `Stop` 前视为 `运行中`，`Stop` 后结合 session JSONL 末尾事件判断 `成功` 或 `失败`；新打开或等待输入的 Codex 进程显示为 `成功`。同一工作目录下的多个 Codex 进程会按 Codex PID 和进程启动时间隔离，避免一个进程的会话文件覆盖另一个进程的状态。没有 hook 事件的旧会话会继续使用 sidecar 信号降级推断。
+信任后，监控会优先使用 hook 事件判断状态：用户提交后到 `Stop` 前视为 `运行中`，`Stop` 后结合 session JSONL 末尾事件判断 `成功` 或 `失败`；新打开或等待输入的 Codex 进程显示为 `成功`。同一工作目录下的多个 Codex 进程优先按 `turn_id`、`session_id` 精确绑定，再退化到 PID、进程启动时间和 cwd；已知 ID 冲突不会被时间接近度覆盖。没有 hook 事件的旧会话会继续使用 sidecar 信号降级推断。
 
 直接在项目目录运行：
 
@@ -392,11 +392,32 @@ Bearer Token。采集日志使用 UTC 时间戳，在首次失败、持续失败
 
 ### 5. 配置和信任 Codex Hook
 
-聚合服务和采集器安装脚本默认都会为 `SERVICE_USER` 执行 Hook 安装。也可以手动安装：
+聚合服务和采集器安装脚本默认都会为 `SERVICE_USER` 执行 Hook 安装。安装器只修改带
+Monitor marker 的 command handler，同一 matcher group 内的第三方 handler 和其他配置
+都会保留。配置损坏、根节点类型错误或 `hooks` 结构错误时会拒绝写入，不会用空配置覆盖
+原文件。也可以手动安装：
 
 ```bash
 ./bin/codex-monitor-install-hooks
 ```
+
+默认安装的事件固定为：
+
+```text
+SessionStart
+UserPromptSubmit
+Stop
+```
+
+`PreToolUse` 和 `PostToolUse` 不是三态正确性的依赖。仅在排查工具生命周期时临时启用：
+
+```bash
+./bin/codex-monitor-install-hooks --include-tool-events
+```
+
+工具诊断也只保存 `session_id`、`turn_id`、`tool_name` 和 `tool_use_id` 等白名单元数据，
+不保存 tool input、tool response、prompt、assistant 正文或 transcript 路径。恢复默认低频
+模式时重新运行不带该选项的安装命令；它会精准移除旧 Monitor 工具 Hook。
 
 指定其他 Codex 用户目录：
 
@@ -418,6 +439,19 @@ Hook 生命周期日志默认位置：
 ~/.local/state/codex-cli-monitor/hooks.jsonl
 ```
 
+检查安装状态而不修改文件：
+
+```bash
+./bin/codex-monitor-install-hooks --check
+```
+
+检查会报告配置是否有效、默认事件是否齐全、命令中的仓库路径是否仍存在、是否残留非默认
+Monitor 工具事件，以及 `~/.codex/config.toml` 是否明确设置了
+`[features].hooks = false`。显式关闭只会被报告，安装器不会把它改回 `true`。退出码 `0`
+表示配置当前且未显式关闭，`1` 表示未安装、陈旧或关闭，`2` 表示配置损坏或检查错误。
+Codex 是否已信任命令不能从外部可靠确认，因此检查结果中的 trust 状态始终是 unknown，
+仍需在 Codex 内执行 `/hooks`。
+
 安装配置后，在每个已经打开或新打开的 Codex CLI 中执行：
 
 ```text
@@ -426,13 +460,38 @@ Hook 生命周期日志默认位置：
 
 按 Codex 提示 review/trust 新 Hook。这个信任步骤不能由 systemd 安装脚本绕过。
 
+安装和升级采用事务式写入：存在旧配置时先生成同目录的 `hooks.json.bak`，再写入同目录
+临时文件、flush/fsync 并原子替换。备份失败或写入失败会中止更新；内容无变化时不会重写
+文件或改变 mtime，避免无意义地使 trust hash 失效。需要回滚时先确认备份可解析，再恢复：
+
+```bash
+python3 -m json.tool ~/.codex/hooks.json.bak >/dev/null
+cp ~/.codex/hooks.json.bak ~/.codex/hooks.json
+python3 -m json.tool ~/.codex/hooks.json >/dev/null
+```
+
+恢复或任何实际内容变化后，都要重新执行 `/hooks` review/trust。
+
 检查 Hook 是否产生事件：
 
 ```bash
 tail -f ~/.local/state/codex-cli-monitor/hooks.jsonl
 ```
 
-如果移动了仓库目录，必须重新运行对应安装脚本或 `codex-monitor-install-hooks`，因为 Hook 命令中记录了仓库的绝对路径。
+新记录使用 schema v2，并保存稳定的 `session_id`/`turn_id`；schema v1 历史记录继续兼容
+读取。日志使用 `0600` 权限、跨进程短时 advisory lock 和单次 `os.write` 追加。活动文件
+默认到 8 MiB 后轮转，保留 `hooks.jsonl.1`、`hooks.jsonl.2` 两代，因此正常事件日志约束
+在 24 MiB 附近；可通过 `CODEX_MONITOR_HOOK_LOG_MAX_BYTES` 调整单代阈值。读取器只反向
+读取所需尾部，跳过 NUL、截断尾行和无效 JSON，不自动修改历史日志。Hook 内部的 stdin
+损坏、payload 超限、锁竞争、只读目录、磁盘写入或轮转错误都 fail-open：快速返回 0、
+不输出正文，也不会失败、阻塞或改变 Codex turn。
+
+本机 `/healthz` 的 `hooks.installation` 给出安装、路径、显式关闭和 trust-unknown 状态，
+`hooks.runtime` 给出最近事件时间、schema 版本、有效/损坏行数、尾读字节数、日志大小、
+轮转代数、事件模式以及非敏感的 stdin/写入错误计数和最近诊断。CLI `--json` 的
+`hook_health` 字段提供相同信息。它们不包含消息正文、Token 或 transcript 路径。
+
+如果移动了仓库目录，必须重新运行对应安装脚本或 `codex-monitor-install-hooks`，因为 Hook 命令中记录了仓库的绝对路径。随后运行 `--check` 并重新 `/hooks` trust。
 
 同一台机器如果有多个 Linux 用户分别运行 Codex，需要为每个用户分别安装 Hook 和采集服务，并使用不同的 systemd unit 名称、PID 文件和本机 API 端口；默认模板针对一个 Codex 用户设计。
 
@@ -511,6 +570,8 @@ VPS：
 ```bash
 cd /path/to/codex-cli-monitor
 git pull --ff-only
+./bin/codex-monitor-install-hooks
+./bin/codex-monitor-install-hooks --check
 sudo systemctl restart codex-monitor-aggregator.service
 sudo systemctl status codex-monitor-aggregator.service
 ```
@@ -520,6 +581,8 @@ sudo systemctl status codex-monitor-aggregator.service
 ```bash
 cd /path/to/codex-cli-monitor
 git pull --ff-only
+./bin/codex-monitor-install-hooks
+./bin/codex-monitor-install-hooks --check
 sudo systemctl restart codex-monitor-collector.service
 sudo systemctl status codex-monitor-collector.service
 ```
@@ -562,7 +625,15 @@ sudo systemctl daemon-reload
 `CodexMonitorWidget.exe` 和 `CodexMonitorWidget.ini`。程序没有安装 Windows Service
 或计划任务。
 
-删除 systemd 服务不会自动删除 `~/.codex/hooks.json` 中的 Monitor Hook。需要移除时，应编辑该文件并删除包含 `codex_cli_monitor.hooks` 的 Monitor 项，保留其他项目自己的 Hook。
+删除 systemd 服务不会自动删除 `~/.codex/hooks.json` 中的 Monitor Hook。使用安装器卸载
+只会移除 Monitor handler，并保留第三方 Hook 和其他用户字段：
+
+```bash
+./bin/codex-monitor-install-hooks --uninstall
+```
+
+卸载发生实际配置变化后仍需在 Codex 中执行 `/hooks` 审查。事件历史默认保留用于诊断；
+确认不再需要后可单独归档 `hooks.jsonl` 及其轮转代，不必编辑 `hooks.json`。
 
 ### 10. 常见问题
 
@@ -597,8 +668,10 @@ curl --noproxy '*' https://codex-monitor.aiof.top/healthz
 #### 状态一直不准确或一直显示成功
 
 - 确认 systemd 服务的 `SERVICE_USER` 与运行 Codex 的用户一致。
+- 运行 `./bin/codex-monitor-install-hooks --check`，修复未安装、陈旧路径、损坏配置或显式关闭。
 - 在 Codex 中执行 `/hooks` 并确认 Hook 已受信任。
-- 检查 Hook 日志是否更新。
+- 查看 `curl http://127.0.0.1:8765/healthz` 中的 `hooks.installation` 和 `hooks.runtime`。
+- 检查 Hook 日志是否更新；有活动 Codex 但长期无事件时，只能判断“可能未 trust 或被禁用”，不能据此断言具体原因。
 - 检查 `~/.codex` 是否属于正确用户。
 - 如果移动过仓库，重新安装 Hook。
 
