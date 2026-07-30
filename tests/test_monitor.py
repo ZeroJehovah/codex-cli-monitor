@@ -125,6 +125,74 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual(sessions[0].display_status, "运行中")
 
+    def test_same_pid_active_session_beats_later_old_session_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            base = time.time() - 10
+            _hook(
+                hook_log,
+                "user_prompt_submit",
+                "session-old",
+                "turn-old",
+                timestamp=base,
+            )
+            _hook(
+                hook_log,
+                "user_prompt_submit",
+                "session-new",
+                "turn-new",
+                timestamp=base + 1,
+            )
+            _hook(
+                hook_log,
+                "stop",
+                "session-old",
+                "turn-old",
+                timestamp=base + 2,
+            )
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertEqual(sessions[0].hook_state.session_id, "session-new")
+
+    def test_goal_continuation_task_started_on_open_session_fd_is_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            old_session = "019fb158-36bb-7440-9128-2e4e0f7c6168"
+            new_session = "019fb176-333f-7071-aa87-1d1837579794"
+            _hook(hook_log, "user_prompt_submit", old_session, "turn-old")
+            _hook(hook_log, "stop", old_session, "turn-old")
+            old_path = _write_terminal(
+                home, old_session, "turn-old", "task_complete", error=None
+            )
+            new_path = _write_terminal(
+                home, new_session, "turn-auto", "task_started"
+            )
+            with new_path.open("ab") as handle:
+                handle.write(b"{}\n" * 400_000)
+            _bind_open_session(proc, 100, old_path, 14)
+            _bind_open_session(proc, 100, new_path, 25)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertEqual(sessions[0].inference.status, "running_terminal")
+        self.assertEqual(sessions[0].state_activity.session_id, new_session)
+        self.assertIsNone(sessions[0].hook_state)
+        self.assertEqual(sessions[0].binding_method, "process_fd_session_id")
+
+    def test_task_started_fd_does_not_display_process_without_any_prompt_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            session_id = "019fb176-333f-7071-aa87-1d1837579794"
+            path = _write_terminal(home, session_id, "turn-auto", "task_started")
+            _bind_open_session(proc, 100, path, 14)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(sessions, ())
+
     def test_same_directory_processes_bind_by_pid_and_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -234,11 +302,13 @@ def _hook(
     turn_id: str,
     *,
     ppid: int = 100,
+    timestamp: float | None = None,
 ) -> None:
     append_hook_event(
         event,
         cwd="/work/a",
         ppid=ppid,
+        timestamp=timestamp,
         path=path,
         hook_payload={"session_id": session_id, "turn_id": turn_id},
     )
@@ -270,6 +340,15 @@ def _write_terminal(
 
 def _session_path(home: Path, session_id: str) -> Path:
     return home / "sessions" / "2026" / "07" / "29" / f"rollout-{session_id}.jsonl"
+
+
+def _bind_open_session(
+    proc: Path,
+    pid: int,
+    session_path: Path,
+    fd: int,
+) -> None:
+    (proc / str(pid) / "fd" / str(fd)).symlink_to(session_path)
 
 
 def _fail_sleep(_: float) -> None:

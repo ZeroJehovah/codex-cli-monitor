@@ -298,9 +298,9 @@ def hook_log_health(path: Path | None = None) -> dict[str, object]:
 def summarize_hook_events(
     events: Iterable[HookEvent],
 ) -> dict[str, tuple[HookSessionState, ...]]:
-    states: dict[tuple[str, int | None], HookSessionState] = {}
-    active_tool_ids: dict[tuple[str, int | None], set[str]] = {}
-    anonymous_tools: dict[tuple[str, int | None], int] = {}
+    states: dict[tuple[str, int | None, str | None], HookSessionState] = {}
+    active_tool_ids: dict[tuple[str, int | None, str | None], set[str]] = {}
+    anonymous_tools: dict[tuple[str, int | None, str | None], int] = {}
     normalized_cwds: dict[str, str | None] = {}
 
     for event in sorted(events, key=lambda item: item.timestamp):
@@ -309,7 +309,7 @@ def summarize_hook_events(
         cwd = normalized_cwds[event.cwd]
         if cwd is None:
             continue
-        key = (cwd, event.ppid)
+        key = (cwd, event.ppid, event.session_id)
         previous = states.get(key)
         if previous is None:
             previous = HookSessionState(cwd, event.timestamp, event.event, False, codex_pid=event.ppid)
@@ -324,18 +324,6 @@ def summarize_hook_events(
         session_start_source = previous.session_start_source
         tools = active_tool_ids.setdefault(key, set())
         anonymous = anonymous_tools.get(key, 0)
-
-        if event.session_id and previous.session_id not in {None, event.session_id}:
-            tools.clear()
-            anonymous = 0
-            in_turn = False
-            has_turn_activity = False
-            turn_id = None
-            turn_started_at = None
-            last_stopped_at = None
-            last_stopped_turn_id = None
-            session_started_at = None
-            session_start_source = None
 
         if event.event == "session_start":
             session_started_at = event.timestamp

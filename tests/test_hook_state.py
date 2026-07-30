@@ -147,6 +147,32 @@ class HookStateTests(unittest.TestCase):
         self.assertEqual(state.turn_id, "new")
         self.assertEqual(state.last_stopped_turn_id, "old")
 
+    def test_same_pid_keeps_different_session_states_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.jsonl"
+            append_hook_event(
+                "user_prompt_submit", cwd="/work/a", ppid=100, timestamp=1, path=path,
+                hook_payload={"session_id": "session-old", "turn_id": "turn-old"},
+            )
+            append_hook_event(
+                "user_prompt_submit", cwd="/work/a", ppid=100, timestamp=2, path=path,
+                hook_payload={"session_id": "session-new", "turn_id": "turn-new"},
+            )
+            append_hook_event(
+                "stop", cwd="/work/a", ppid=100, timestamp=3, path=path,
+                hook_payload={"session_id": "session-old", "turn_id": "turn-old"},
+            )
+
+            states = summarize_hook_events(
+                load_hook_events(path, max_age_seconds=10**12)
+            )[str(Path("/work/a").resolve())]
+
+        by_session = {state.session_id: state for state in states}
+        self.assertEqual(set(by_session), {"session-old", "session-new"})
+        self.assertFalse(by_session["session-old"].in_turn)
+        self.assertTrue(by_session["session-new"].in_turn)
+        self.assertEqual(by_session["session-new"].turn_id, "turn-new")
+
     def test_concurrent_process_writes_are_complete_json_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "hooks.jsonl"

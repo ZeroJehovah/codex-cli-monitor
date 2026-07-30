@@ -10,6 +10,7 @@ from codex_cli_monitor.hook_state import HookSessionState
 from codex_cli_monitor.terminal_state import (
     MAX_INCREMENTAL_READ_BYTES,
     _TAIL_CACHE,
+    scan_process_terminal_activities,
     scan_terminal_activity,
 )
 
@@ -89,6 +90,54 @@ class TerminalStateTests(unittest.TestCase):
             activity = scan_terminal_activity(_state("session-a", "turn-new"), home)
 
         self.assertFalse(activity.terminal_event)
+
+    def test_task_started_is_active_without_being_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            path = _path(home, "session-a")
+            path.parent.mkdir(parents=True)
+            _append_terminal(path, "turn-a", "task_started")
+
+            activity = scan_terminal_activity(_state("session-a", "turn-a"), home)
+
+        self.assertTrue(activity.turn_active)
+        self.assertFalse(activity.terminal_event)
+        self.assertFalse(activity.failed_event)
+
+    def test_process_fd_binds_exact_open_session_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "codex-home"
+            proc = root / "proc"
+            fd_dir = proc / "100" / "fd"
+            fd_dir.mkdir(parents=True)
+            session_id = "019fb176-333f-7071-aa87-1d1837579794"
+            path = _path(home, session_id)
+            path.parent.mkdir(parents=True)
+            _append_terminal(path, "turn-auto", "task_started")
+            (fd_dir / "14").symlink_to(path)
+
+            activities = scan_process_terminal_activities(
+                100,
+                proc_root=proc,
+                codex_home=home,
+                cwd="/work/a",
+            )
+            _append_terminal(path, "turn-auto", "task_complete", error=None)
+            completed = scan_process_terminal_activities(
+                100,
+                proc_root=proc,
+                codex_home=home,
+                cwd="/work/a",
+            )
+
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0].session_id, session_id)
+        self.assertEqual(activities[0].turn_id, "turn-auto")
+        self.assertTrue(activities[0].turn_active)
+        self.assertFalse(completed[0].turn_active)
+        self.assertTrue(completed[0].terminal_event)
+        self.assertFalse(completed[0].failed_event)
 
 
 def _state(session_id: str, turn_id: str) -> HookSessionState:

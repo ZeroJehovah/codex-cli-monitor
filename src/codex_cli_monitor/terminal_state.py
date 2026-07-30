@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -15,10 +17,13 @@ if TYPE_CHECKING:
     from .hook_state import HookSessionState
 
 
-MAX_INITIAL_TAIL_BYTES = 1024 * 1024
+MAX_INITIAL_TAIL_BYTES = 4 * 1024 * 1024
 MAX_INCREMENTAL_READ_BYTES = 1024 * 1024
 MAX_TERMINAL_EVENTS_PER_FILE = 64
 MAX_CACHE_ENTRIES = 256
+MAX_OPEN_FDS_PER_PROCESS = 4096
+MAX_BOUND_SESSION_FILES = 32
+TERMINAL_ACTIVE_TYPES = {"task_started"}
 TERMINAL_SUCCESS_TYPES = {"task_complete", "turn_complete", "turn_completed"}
 TERMINAL_FAILURE_TYPES = {
     "thread_rolled_back",
@@ -26,6 +31,9 @@ TERMINAL_FAILURE_TYPES = {
     "turn_failed",
 }
 TIMESTAMP_GRACE_SECONDS = 5.0
+SESSION_ID_SUFFIX = re.compile(
+    r"([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\.jsonl$"
+)
 
 
 @dataclass(frozen=True)
@@ -33,6 +41,8 @@ class _TerminalEvent:
     event_type: str
     turn_id: str | None
     timestamp: float | None
+    active: bool
+    terminal: bool
     failed: bool
 
 
@@ -66,6 +76,68 @@ def scan_terminal_activity(
 
     events = _terminal_events(path, stat.st_dev, stat.st_ino, stat.st_size)
     event = _event_for_hook(events, hook_state)
+    return _session_activity(
+        home=home,
+        path=path,
+        stat=stat,
+        session_id=hook_state.session_id,
+        cwd=hook_state.cwd,
+        event=event,
+        fallback_turn_id=hook_state.turn_id,
+        fallback_turn_started_at=hook_state.turn_started_at,
+    )
+
+
+def scan_process_terminal_activities(
+    pid: int,
+    proc_root: Path = Path("/proc"),
+    codex_home: Path | None = None,
+    cwd: str | None = None,
+) -> tuple[SessionActivity, ...]:
+    """Read lifecycle markers from session files opened by one exact Codex PID."""
+    home = (codex_home or default_codex_home()).expanduser()
+    activities = []
+    for path in _open_session_paths(proc_root, pid, home):
+        session_id = _session_id_from_path(path)
+        if session_id is None:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        events = _terminal_events(path, stat.st_dev, stat.st_ino, stat.st_size)
+        if not events:
+            continue
+        activities.append(
+            _session_activity(
+                home=home,
+                path=path,
+                stat=stat,
+                session_id=session_id,
+                cwd=cwd,
+                event=events[-1],
+            )
+        )
+    return tuple(
+        sorted(
+            activities,
+            key=lambda activity: activity.last_record_at or 0.0,
+            reverse=True,
+        )
+    )
+
+
+def _session_activity(
+    *,
+    home: Path,
+    path: Path,
+    stat: os.stat_result,
+    session_id: str | None,
+    cwd: str | None,
+    event: _TerminalEvent | None,
+    fallback_turn_id: str | None = None,
+    fallback_turn_started_at: float | None = None,
+) -> SessionActivity:
     try:
         relative_path = path.relative_to(home).as_posix()
     except ValueError:
@@ -73,21 +145,70 @@ def scan_terminal_activity(
     observed_at = time.time()
     return SessionActivity(
         relative_path=relative_path,
-        session_id=hook_state.session_id,
-        turn_id=(event.turn_id if event is not None else hook_state.turn_id),
-        cwd=hook_state.cwd,
+        session_id=session_id,
+        turn_id=(event.turn_id if event is not None else fallback_turn_id),
+        cwd=cwd,
         size_bytes=stat.st_size,
         modified_at=stat.st_mtime,
         observed_at=observed_at,
-        turn_started_at=hook_state.turn_started_at,
-        terminal_event_at=(event.timestamp if event is not None else None),
+        turn_started_at=(
+            event.timestamp
+            if event is not None and event.active
+            else fallback_turn_started_at
+        ),
+        terminal_event_at=(
+            event.timestamp
+            if event is not None and event.terminal
+            else None
+        ),
         last_record_at=(event.timestamp if event is not None else None),
         last_record_type=("event_msg" if event is not None else None),
         last_payload_type=(event.event_type if event is not None else None),
         last_payload_reason=None,
-        terminal_event=event is not None,
+        turn_active=(event.active if event is not None else False),
+        terminal_event=(event.terminal if event is not None else False),
         failed_event=(event.failed if event is not None else False),
     )
+
+
+def _open_session_paths(proc_root: Path, pid: int, home: Path) -> tuple[Path, ...]:
+    sessions_root = home / "sessions"
+    if not sessions_root.is_dir():
+        return ()
+    try:
+        resolved_sessions_root = sessions_root.resolve()
+        entries = tuple((proc_root / str(pid) / "fd").iterdir())[
+            :MAX_OPEN_FDS_PER_PROCESS
+        ]
+    except OSError:
+        return ()
+
+    paths: set[Path] = set()
+    for entry in entries:
+        try:
+            target = os.readlink(entry)
+        except OSError:
+            continue
+        if not target.endswith(".jsonl") or target.endswith(" (deleted)"):
+            continue
+        target_path = Path(target)
+        if not target_path.is_absolute():
+            continue
+        try:
+            resolved = target_path.resolve(strict=True)
+            resolved.relative_to(resolved_sessions_root)
+        except (OSError, ValueError):
+            continue
+        if resolved.is_file() and _session_id_from_path(resolved) is not None:
+            paths.add(resolved)
+    return tuple(
+        sorted(paths, key=_mtime_or_zero, reverse=True)[:MAX_BOUND_SESSION_FILES]
+    )
+
+
+def _session_id_from_path(path: Path) -> str | None:
+    match = SESSION_ID_SUFFIX.search(path.name)
+    return match.group(1) if match is not None else None
 
 
 def _session_path(home: Path, session_id: str | None) -> Path | None:
@@ -145,8 +266,9 @@ def _terminal_events(
 
     if size == offset:
         return prior_events
-    if size - offset > MAX_INCREMENTAL_READ_BYTES:
-        offset = max(0, size - MAX_INCREMENTAL_READ_BYTES)
+    read_limit = MAX_INITIAL_TAIL_BYTES if reset else MAX_INCREMENTAL_READ_BYTES
+    if size - offset > read_limit:
+        offset = max(0, size - read_limit)
         carry = b""
         prior_events = ()
         discard_first_partial_line = offset > 0
@@ -154,7 +276,7 @@ def _terminal_events(
     try:
         with path.open("rb") as handle:
             handle.seek(offset)
-            chunk = handle.read(MAX_INCREMENTAL_READ_BYTES)
+            chunk = handle.read(read_limit)
     except OSError:
         return prior_events
 
@@ -193,9 +315,17 @@ def _terminal_event_from_line(line: bytes) -> _TerminalEvent | None:
     event_type = payload.get("type")
     if not isinstance(event_type, str):
         return None
-    if event_type in TERMINAL_SUCCESS_TYPES:
+    if event_type in TERMINAL_ACTIVE_TYPES:
+        active = True
+        terminal = False
+        failed = False
+    elif event_type in TERMINAL_SUCCESS_TYPES:
+        active = False
+        terminal = True
         failed = payload.get("error") is not None
     elif event_type in TERMINAL_FAILURE_TYPES:
+        active = False
+        terminal = True
         failed = True
     else:
         return None
@@ -203,6 +333,8 @@ def _terminal_event_from_line(line: bytes) -> _TerminalEvent | None:
         event_type=event_type,
         turn_id=_string(payload.get("turn_id") or record.get("turn_id")),
         timestamp=_timestamp(record.get("timestamp")),
+        active=active,
+        terminal=terminal,
         failed=failed,
     )
 

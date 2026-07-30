@@ -17,9 +17,13 @@
 
 默认方式是 Hook 状态机加轻量 sidecar：工具独立运行，不修改 Codex，也不要求改变正常使用习惯。它只读取这些必要信号：
 
-- `/proc` 里的进程、父子关系、命令行、TTY、当前工作目录和进程启动时间。
+- `/proc` 里的进程、父子关系、命令行、TTY、当前工作目录、进程启动时间，以及由准确
+  Codex PID 持有的 session JSONL 文件描述符。
 - Codex hooks 默认只写入 `UserPromptSubmit` 和 `Stop` 两个低频生命周期事件。
-- `$CODEX_HOME/sessions` 中与 Hook `session_id` 精确对应的 session JSONL；读取器只增量读取有上限的文件尾，并且只识别结构化 `task_complete.error`、`turn_complete.error`、`TurnAborted` 等终端结果。
+- `$CODEX_HOME/sessions` 中与 Hook `session_id` 精确对应、或由已显示 Codex PID 直接持有
+  的 session JSONL；读取器只增量读取有上限的文件尾，并且只识别结构化
+  `task_started`、`task_complete.error`、`turn_complete.error`、`TurnAborted` 等生命周期
+  记录。
 - 可选 shim 写入的启动记录。
 
 常驻扫描不做 CPU 差值采样，不读取进程网络连接，不扫描运行时诊断数据库，也不根据
@@ -32,14 +36,18 @@ assistant 文本、工具输出或错误关键词推断状态。监控不会输�
 
 主状态只有三种：
 
-- `运行中`：已提交提示词，AI 正在思考、等待 API、执行 MCP、本地工具或其他操作。
+- `运行中`：已提交提示词，AI 正在思考、等待 API、执行 MCP、本地工具或其他操作；若
+  同一 Codex PID 已经通过 Hook 显示，Goal 自动续跑创建的新 session 即使没有再次触发
+  `UserPromptSubmit`，也可由准确 PID 打开的文件中的结构化 `task_started` 进入运行中。
 - `成功`：已显示会话的最近一轮通过 `Stop` 或结构化终端事件完成成功。
 - `失败`：从运行中结束，且最近一轮出现 API/模型错误，或被手动 Ctrl+C 中断。
 
-新打开但尚未提交提示词的 Codex 进程不会显示；`SessionStart` 本身也不创建状态行。JSON
-为兼容现有调用方仍保留 `inferred_status` 字段，但其中只使用 `running_hook`、
-`success_hook` 和 `failure_terminal` 这类来源说明，不再包含 CPU、网络或工具活动推断。
-表格和顶层 `status` 只显示上面的三种主状态。
+新打开但尚未提交提示词的 Codex 进程不会显示；`SessionStart` 本身也不创建状态行。进程
+至少有过一次提交 Hook 后，后续无提交 Hook 的 Goal 自动续跑才可更新该进程已有的状态
+行。JSON 为兼容现有调用方仍保留 `inferred_status` 字段，但其中只使用
+`running_hook`、`running_terminal`、`success_hook`、`success_terminal` 和
+`failure_terminal` 这类确定来源说明，不再包含 CPU、网络或工具活动推断。表格和顶层
+`status` 只显示上面的三种主状态。
 
 ## 使用方法
 
@@ -55,8 +63,11 @@ assistant 文本、工具输出或错误关键词推断状态。监控不会输�
 `成功`。Codex 的错误和 Ctrl+C 分支不会触发 `Stop`，因此监控还会按 `session_id` 定位
 唯一 session 文件，仅增量尾读同一 `turn_id` 的结构化终端事件：非空
 `task_complete.error`/`turn_complete.error` 或 `TurnAborted` 置为 `失败`，无错误的完成事件
-置为 `成功`。已知 ID 冲突绝不会由时间接近度覆盖。没有提交 Hook 的新会话和旧会话不
-显示；进程消失时，即使没有终止 Hook，也会清理其状态行。
+置为 `成功`。Hook 状态按 PID 和 `session_id` 分开保存；同一 PID 下任何准确绑定的活动
+session 都优先于旧的已完成 session。对于已经提交过 Hook 的进程，监控还会检查该 PID
+实际打开的 session JSONL，并只用结构化 `task_started` 补足 Goal 自动续跑。已知 ID 冲突
+绝不会由时间接近度覆盖，也不会按同目录文件的新旧程度猜测绑定。完全没有提交 Hook 的
+新进程仍不显示；进程消失时，即使没有终止 Hook，也会清理其状态行。
 
 直接在项目目录运行：
 
@@ -682,7 +693,9 @@ curl --noproxy '*' https://codex-monitor.aiof.top/healthz
 - 检查 Hook 日志是否更新；有活动 Codex 但长期无事件时，只能判断“可能未 trust 或被禁用”，不能据此断言具体原因。
 - 检查 `~/.codex` 是否属于正确用户。
 - 新进程在第一次 `UserPromptSubmit` 前按设计不会显示；只看到进程而没有 Hook 事件不是故障状态行。
-- 确认 Codex session 文件名包含 Hook 记录的 `session_id`；终端读取器不会用同目录时间接近度猜测其他文件。
+- 确认 Codex session 文件名包含 Hook 记录的 `session_id`。Goal 自动续跑没有提交 Hook
+  时，确认新 session 文件仍由同一 Codex PID 打开且包含结构化 `task_started`；终端读取
+  器不会用同目录时间接近度猜测其他文件。
 - 如果移动过仓库，重新安装 Hook。
 
 #### SSH 已断开但 Codex 会话仍显示
