@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 MAX_INITIAL_TAIL_BYTES = 4 * 1024 * 1024
 MAX_INCREMENTAL_READ_BYTES = 1024 * 1024
+MAX_LIFECYCLE_PREFIX_BYTES = 1024 * 1024
 MAX_TERMINAL_EVENTS_PER_FILE = 64
 MAX_CACHE_ENTRIES = 256
 MAX_OPEN_FDS_PER_PROCESS = 4096
@@ -258,11 +259,13 @@ def _terminal_events(
         carry = b""
         prior_events: tuple[_TerminalEvent, ...] = ()
         discard_first_partial_line = offset > 0
+        recover_prefix = offset > 0
     else:
         offset = cached.offset
         carry = cached.carry
         prior_events = cached.events
         discard_first_partial_line = False
+        recover_prefix = False
 
     if size == offset:
         return prior_events
@@ -272,6 +275,10 @@ def _terminal_events(
         carry = b""
         prior_events = ()
         discard_first_partial_line = offset > 0
+        recover_prefix = offset > 0
+
+    if recover_prefix:
+        prior_events = _lifecycle_prefix_events(path, offset)
 
     try:
         with path.open("rb") as handle:
@@ -298,6 +305,29 @@ def _terminal_events(
         _TAIL_CACHE[key] = entry
         _prune_cache(_TAIL_CACHE)
     return events
+
+
+def _lifecycle_prefix_events(
+    path: Path,
+    tail_offset: int,
+) -> tuple[_TerminalEvent, ...]:
+    read_limit = min(tail_offset, MAX_LIFECYCLE_PREFIX_BYTES)
+    if read_limit <= 0:
+        return ()
+    try:
+        with path.open("rb") as handle:
+            chunk = handle.read(read_limit)
+    except OSError:
+        return ()
+    lines = chunk.split(b"\n")
+    if chunk and not chunk.endswith(b"\n"):
+        lines.pop()
+    events = []
+    for line in lines:
+        event = _terminal_event_from_line(line)
+        if event is not None:
+            events.append(event)
+    return tuple(events[-MAX_TERMINAL_EVENTS_PER_FILE:])
 
 
 def _terminal_event_from_line(line: bytes) -> _TerminalEvent | None:

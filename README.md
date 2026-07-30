@@ -21,9 +21,10 @@
   Codex PID 持有的 session JSONL 文件描述符。
 - Codex hooks 默认只写入 `UserPromptSubmit` 和 `Stop` 两个低频生命周期事件。
 - `$CODEX_HOME/sessions` 中与 Hook `session_id` 精确对应、或由已显示 Codex PID 直接持有
-  的 session JSONL；读取器只增量读取有上限的文件尾，并且只识别结构化
-  `task_started`、`task_complete.error`、`turn_complete.error`、`TurnAborted` 等生命周期
-  记录。
+  的 session JSONL；读取器增量读取有上限的文件尾。对于 PID 精确绑定的 Goal 自动续跑
+  文件，还会读取有上限的生命周期前缀，保证文件变大后开头的 `task_started` 仍可恢复。
+  两个区域都只识别结构化 `task_started`、`task_complete.error`、
+  `turn_complete.error`、`TurnAborted` 等生命周期记录。
 - 可选 shim 写入的启动记录。
 
 常驻扫描不做 CPU 差值采样，不读取进程网络连接，不扫描运行时诊断数据库，也不根据
@@ -65,9 +66,11 @@ assistant 文本、工具输出或错误关键词推断状态。监控不会输�
 `task_complete.error`/`turn_complete.error` 或 `TurnAborted` 置为 `失败`，无错误的完成事件
 置为 `成功`。Hook 状态按 PID 和 `session_id` 分开保存；同一 PID 下任何准确绑定的活动
 session 都优先于旧的已完成 session。对于已经提交过 Hook 的进程，监控还会检查该 PID
-实际打开的 session JSONL，并只用结构化 `task_started` 补足 Goal 自动续跑。已知 ID 冲突
-绝不会由时间接近度覆盖，也不会按同目录文件的新旧程度猜测绑定。完全没有提交 Hook 的
-新进程仍不显示；进程消失时，即使没有终止 Hook，也会清理其状态行。
+实际打开的 session JSONL，并只用结构化 `task_started` 补足 Goal 自动续跑。自动续跑
+文件使用有界生命周期前缀加有界增量尾部，因此长时间运行、文件超过尾读窗口或出现较大
+增量缺口后仍能恢复最初的运行标记。已知 ID 冲突绝不会由时间接近度覆盖，也不会按同目录
+文件的新旧程度猜测绑定。完全没有提交 Hook 的新进程仍不显示；进程消失时，即使没有
+终止 Hook，也会清理其状态行。
 
 直接在项目目录运行：
 

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from codex_cli_monitor.hook_state import HookSessionState
 from codex_cli_monitor.terminal_state import (
+    MAX_INITIAL_TAIL_BYTES,
     MAX_INCREMENTAL_READ_BYTES,
     _TAIL_CACHE,
     scan_process_terminal_activities,
@@ -139,6 +140,42 @@ class TerminalStateTests(unittest.TestCase):
         self.assertTrue(completed[0].terminal_event)
         self.assertFalse(completed[0].failed_event)
 
+    def test_large_open_session_recovers_active_turn_from_bounded_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "codex-home"
+            proc = root / "proc"
+            fd_dir = proc / "100" / "fd"
+            fd_dir.mkdir(parents=True)
+            session_id = "019fb18d-e2e2-7a00-a645-ddbb639854ba"
+            path = _path(home, session_id)
+            path.parent.mkdir(parents=True)
+            _append_terminal(path, "turn-auto", "task_started")
+            _extend_with_sparse_gap(path, MAX_INITIAL_TAIL_BYTES + 64 * 1024)
+            (fd_dir / "43").symlink_to(path)
+
+            active = scan_process_terminal_activities(
+                100,
+                proc_root=proc,
+                codex_home=home,
+                cwd="/work/a",
+            )
+            _append_terminal(path, "turn-auto", "task_complete", error=None)
+            completed = scan_process_terminal_activities(
+                100,
+                proc_root=proc,
+                codex_home=home,
+                cwd="/work/a",
+            )
+            large_size = path.stat().st_size
+
+        self.assertGreater(large_size, MAX_INITIAL_TAIL_BYTES)
+        self.assertTrue(active[0].turn_active)
+        self.assertEqual(active[0].last_payload_type, "task_started")
+        self.assertFalse(completed[0].turn_active)
+        self.assertTrue(completed[0].terminal_event)
+        self.assertEqual(completed[0].last_payload_type, "task_complete")
+
 
 def _state(session_id: str, turn_id: str) -> HookSessionState:
     return HookSessionState(
@@ -167,6 +204,13 @@ def _append_terminal(
 ) -> None:
     with path.open("ab") as handle:
         handle.write(_terminal_line(turn_id, event_type, error=error))
+
+
+def _extend_with_sparse_gap(path: Path, size: int) -> None:
+    with path.open("r+b") as handle:
+        handle.seek(0, 2)
+        handle.seek(size, 1)
+        handle.write(b"\n{}\n")
 
 
 def _terminal_line(

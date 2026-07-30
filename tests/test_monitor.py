@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from codex_cli_monitor.hook_state import append_hook_event
 from codex_cli_monitor.monitor import discover_sessions, inspect_runtime
+from codex_cli_monitor.terminal_state import MAX_INITIAL_TAIL_BYTES
 
 
 class MonitorTests(unittest.TestCase):
@@ -169,8 +170,10 @@ class MonitorTests(unittest.TestCase):
             new_path = _write_terminal(
                 home, new_session, "turn-auto", "task_started"
             )
-            with new_path.open("ab") as handle:
-                handle.write(b"{}\n" * 400_000)
+            _extend_with_sparse_gap(
+                new_path,
+                MAX_INITIAL_TAIL_BYTES + 64 * 1024,
+            )
             _bind_open_session(proc, 100, old_path, 14)
             _bind_open_session(proc, 100, new_path, 25)
 
@@ -349,6 +352,13 @@ def _bind_open_session(
     fd: int,
 ) -> None:
     (proc / str(pid) / "fd" / str(fd)).symlink_to(session_path)
+
+
+def _extend_with_sparse_gap(path: Path, size: int) -> None:
+    with path.open("r+b") as handle:
+        handle.seek(0, 2)
+        handle.seek(size, 1)
+        handle.write(b"\n{}\n")
 
 
 def _fail_sleep(_: float) -> None:
