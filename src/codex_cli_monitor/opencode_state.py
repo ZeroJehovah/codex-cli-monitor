@@ -190,7 +190,7 @@ def scan_opencode_state(
     if info.st_size > MAX_DB_SIZE_BYTES:
         return ()
 
-    signature = (info.st_size, info.st_mtime_ns, info.st_ino)
+    signature = _db_signature(db, info)
     with _CACHE_LOCK:
         if _STATE_SIGNATURE.get(db) == signature and _STATE_CACHE.get(db) is not None:
             cached = _STATE_CACHE[db]
@@ -206,6 +206,26 @@ def scan_opencode_state(
         _STATE_CACHE[db] = cache_value
         _STATE_SIGNATURE[db] = signature
     return states
+
+
+def _db_signature(db: Path, db_stat: os.stat_result) -> tuple[object, ...]:
+    """Build a cache-invalidation signature for an OpenCode SQLite database.
+
+    OpenCode runs its database in WAL journal mode.  In WAL mode, new writes
+    land in ``opencode.db-wal`` while the main ``opencode.db`` file's mtime
+    and size may not change until a checkpoint runs.  A signature that only
+    inspects the main file would therefore serve stale cached state long
+    after a session transitioned from ``运行中`` to ``成功`` or ``失败``.
+    Including the WAL file (size + mtime) ensures the cache invalidates on
+    every write.
+    """
+    signature: tuple[object, ...] = (db_stat.st_size, db_stat.st_mtime_ns, db_stat.st_ino)
+    wal = db.with_name(db.name + "-wal")
+    try:
+        wal_stat = wal.stat()
+    except OSError:
+        return signature
+    return signature + (wal_stat.st_size, wal_stat.st_mtime_ns)
 
 
 def _states_from_cached(cached: object) -> tuple[OpenCodeSessionState, ...]:

@@ -288,6 +288,104 @@ class OpenCodeStateTests(unittest.TestCase):
         self.assertEqual(states[0].status, STATUS_FAILURE)
         self.assertTrue(states[0].failed_event)
 
+    def test_wal_write_invalidates_cache(self) -> None:
+        """In WAL mode the main db file may not change on write; cache must
+        include the WAL file so state transitions are picked up promptly.
+
+        This reproduces the production scenario where the OpenCode CLI
+        process owns the write connection and keeps it open.  Writes land
+        in the WAL file; the main db file's mtime/size do not change
+        until a checkpoint runs.  The monitor opens the database
+        read-only and must see the WAL-backed writes immediately.
+        """
+        now_ms = 1786681500000
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            data_dir.mkdir()
+            db = data_dir / "opencode.db"
+            write_con = sqlite3.connect(str(db), isolation_level=None)
+            try:
+                write_con.execute("PRAGMA journal_mode=WAL")
+                write_con.execute("PRAGMA wal_autocheckpoint=0")
+                write_con.execute(
+                    "CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, "
+                    "slug TEXT, directory TEXT, title TEXT, version TEXT, "
+                    "time_created INTEGER, time_updated INTEGER)"
+                )
+                write_con.execute(
+                    "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, "
+                    "time_created INTEGER, time_updated INTEGER, data TEXT)"
+                )
+                write_con.execute(
+                    "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, "
+                    "session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)"
+                )
+                write_con.execute("BEGIN")
+                write_con.execute(
+                    "INSERT INTO session VALUES "
+                    "('s1','g','s','/work','t','1.0.0',1000,1000)"
+                )
+                write_con.execute(
+                    "INSERT INTO message VALUES "
+                    "('m1','s1',1000,1000,'{\"role\":\"user\",\"time\":{\"created\":1000}}')"
+                )
+                write_con.execute("COMMIT")
+            except Exception:
+                write_con.close()
+                raise
+
+            wal = db.with_name(db.name + "-wal")
+
+            # First scan: session is running (no completed assistant message).
+            states = scan_opencode_state(data_dir)
+            self.assertEqual(states[0].status, STATUS_RUNNING)
+
+            old_db_stat = db.stat()
+            old_wal_stat = wal.stat() if wal.exists() else None
+
+            # Write the completion message.  The write connection stays
+            # open, so the WAL retains the new pages and no checkpoint
+            # merges them into the main db file.
+            write_con.execute("BEGIN")
+            write_con.execute(
+                "INSERT INTO message VALUES "
+                "('m2','s1',1500,2000,"
+                "'{\"role\":\"assistant\",\"time\":{\"created\":1500,\"completed\":2000},"
+                "\"finish\":\"stop\"}')"
+            )
+            write_con.execute("UPDATE session SET time_updated=2000 WHERE id='s1'")
+            write_con.execute("COMMIT")
+
+            new_db_stat = db.stat()
+            new_wal_stat = wal.stat() if wal.exists() else None
+
+            # The main db file must not have grown (no checkpoint); only
+            # the WAL file changed.  This is the condition that made the
+            # old cache return stale 运行中 forever.
+            self.assertEqual(
+                new_db_stat.st_size,
+                old_db_stat.st_size,
+                "main db file should not have been checkpointed",
+            )
+            self.assertTrue(
+                new_wal_stat is not None and old_wal_stat is not None,
+                "WAL file should exist throughout",
+            )
+            self.assertGreaterEqual(
+                new_wal_stat.st_size,
+                old_wal_stat.st_size,
+                "WAL file should have grown",
+            )
+
+            # The cache must invalidate on the WAL change and return the
+            # new success status.
+            states = scan_opencode_state(data_dir)
+            self.assertEqual(states[0].status, STATUS_SUCCESS)
+            self.assertFalse(states[0].turn_active)
+            self.assertTrue(states[0].terminal_event)
+            self.assertFalse(states[0].failed_event)
+            write_con.close()
+
     def test_restricted_ids_selects_session(self) -> None:
         now_ms = 1786681500000
         states = self._scan(
