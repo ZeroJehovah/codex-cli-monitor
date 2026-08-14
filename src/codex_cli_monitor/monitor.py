@@ -5,7 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .classify import is_native_codex_process, is_opencode_process
+from .classify import (
+    is_codex_exec_process,
+    is_native_codex_process,
+    is_opencode_process,
+)
 from .codex_state import default_codex_home
 from .hook_state import HookSessionState, load_hook_events, summarize_hook_events
 from .models import (
@@ -415,7 +419,9 @@ def _lifecycle_inference(
 
 def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, ...]:
     codex_pids = {
-        pid for pid, process in processes.items() if is_native_codex_process(process)
+        pid
+        for pid, process in processes.items()
+        if is_native_codex_process(process) and not is_codex_exec_process(process)
     }
     visible_codex_pids = {
         pid

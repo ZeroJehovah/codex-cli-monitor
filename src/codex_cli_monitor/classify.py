@@ -229,6 +229,13 @@ def is_native_codex_process(process: ProcessInfo) -> bool:
     return bool(_process_names(process).intersection({"codex", "codex.exe"}))
 
 
+def is_codex_exec_process(process: ProcessInfo) -> bool:
+    """True for a 'codex exec' process that should be excluded from display."""
+    if not is_native_codex_process(process):
+        return False
+    return any(arg == "exec" for arg in process.cmdline)
+
+
 def is_opencode_process(process: ProcessInfo) -> bool:
     """True for a native OpenCode CLI process (``opencode``)."""
     return bool(_process_names(process).intersection({"opencode", "opencode.exe"}))

@@ -61,6 +61,42 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].display_status, "成功")
         self.assertEqual(sessions[0].inference.status, "success_hook")
 
+    def test_codex_exec_process_is_excluded_even_with_prompt_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            # 增加一个 exec 形态的 codex 进程（pid 101），并给它提交提示词 hook
+            _write_process(
+                proc,
+                101,
+                "codex",
+                "S",
+                1,
+                ["codex", "exec", "--model", "test-model"],
+                "/work/exec",
+            )
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/exec",
+                ppid=101,
+                path=hook_log,
+                hook_payload={"session_id": "session-exec", "turn_id": "turn-exec"},
+            )
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        # exec codex(101) 即使有匹配的提示词 hook 也被排除；默认 codex(100) 无 hook 不显示
+        self.assertEqual(sessions, ())
+
+    def test_normal_codex_process_still_displayed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            _hook(hook_log, "user_prompt_submit", "session-a", "turn-a")
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "运行中")
+
     def test_turn_complete_error_displays_failure_without_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _root, proc, home, hook_log = _runtime(tmp)
@@ -462,7 +498,7 @@ def _write_process(
     cwd: str,
 ) -> None:
     pid_dir = proc / str(pid)
-    (pid_dir / "fd").mkdir(parents=True)
+    (pid_dir / "fd").mkdir(parents=True, exist_ok=True)
     (pid_dir / "stat").write_text(_stat_line(pid, comm, state, ppid), encoding="utf-8")
     (pid_dir / "cmdline").write_bytes(b"\0".join(item.encode() for item in cmdline) + b"\0")
     (pid_dir / "cwd").symlink_to(cwd)
