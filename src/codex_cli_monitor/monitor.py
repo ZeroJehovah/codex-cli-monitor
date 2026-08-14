@@ -5,20 +5,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .classify import is_native_codex_process
+from .classify import is_native_codex_process, is_opencode_process
 from .codex_state import default_codex_home
 from .hook_state import HookSessionState, load_hook_events, summarize_hook_events
 from .models import (
-    CodexSession,
-    CodexStateSummary,
     Evidence,
     Inference,
     ProcessInfo,
     SessionActivity,
 )
+from .opencode_state import (
+    OpenCodeSessionState,
+    default_opencode_data_dir,
+    default_opencode_hook_log_path,
+    opencode_hook_events,
+    scan_opencode_state,
+)
 from .procfs import read_processes
 from .shim import default_log_path, load_launch_records
 from .terminal_state import scan_process_terminal_activities, scan_terminal_activity
+from .models import CodexSession, CodexStateSummary
 
 
 INACTIVE_ROOT_STATES = {"T", "t", "Z", "X", "x"}
@@ -69,57 +75,158 @@ def discover_sessions(
     del sample_window, sleep
     processes = read_processes(proc_root)
     codex_roots = _find_codex_roots(processes)
-    if not codex_roots:
+    opencode_roots = _find_opencode_roots(processes)
+    if not codex_roots and not opencode_roots:
         return ()
 
-    state_home = (codex_home or default_codex_home()).expanduser()
-    grouped_hook_states = summarize_hook_events(load_hook_events(hook_log))
-    hook_states_by_pid = {
-        root.pid: _hook_states_for_root(root, grouped_hook_states)
-        for root in codex_roots
-    }
-    visible_roots = tuple(
-        root
-        for root in codex_roots
-        if any(state.has_turn_activity for state in hook_states_by_pid[root.pid])
-    )
-    if not visible_roots:
-        return ()
-
-    launch_records = load_launch_records(shim_log or default_log_path())
-    sessions = []
-    for root in visible_roots:
-        candidates = _lifecycle_candidates_for_root(
-            root=root,
-            hook_states=hook_states_by_pid[root.pid],
-            proc_root=proc_root,
-            codex_home=state_home,
+    sessions: list[CodexSession] = []
+    if codex_roots:
+        state_home = (codex_home or default_codex_home()).expanduser()
+        grouped_hook_states = summarize_hook_events(load_hook_events(hook_log))
+        hook_states_by_pid = {
+            root.pid: _hook_states_for_root(root, grouped_hook_states)
+            for root in codex_roots
+        }
+        launch_records = load_launch_records(shim_log or default_log_path())
+        for root in codex_roots:
+            candidates = _lifecycle_candidates_for_root(
+                root=root,
+                hook_states=hook_states_by_pid[root.pid],
+                proc_root=proc_root,
+                codex_home=state_home,
+            )
+            if not candidates:
+                continue
+            selected = _select_lifecycle_candidate(candidates)
+            sessions.append(
+                CodexSession(
+                    root=root,
+                    descendants=tuple(_collect_descendants(root.pid, processes)),
+                    connections=(),
+                    inference=_lifecycle_inference(
+                        selected.display_status,
+                        selected.hook_state,
+                        selected.state_activity,
+                    ),
+                    state_activity=selected.state_activity,
+                    hook_state=selected.hook_state,
+                    launch_record=launch_records.get(root.pid),
+                    display_status=selected.display_status,
+                    binding_method=selected.binding_method,
+                    binding_confidence=selected.binding_confidence,
+                    binding_ambiguous=False,
+                    binding_candidate_count=len(candidates),
+                    binding_evidence=selected.binding_evidence,
+                    cli_type="codex",
+                )
+            )
+    if opencode_roots:
+        sessions.extend(
+            _discover_opencode_sessions(opencode_roots, processes)
         )
-        if not candidates:
+    return tuple(sorted(sessions, key=lambda session: session.root.pid))
+
+
+def _discover_opencode_sessions(
+    roots: tuple[ProcessInfo, ...],
+    processes: dict[int, ProcessInfo],
+) -> tuple[CodexSession, ...]:
+    data_dir = default_opencode_data_dir()
+    states = scan_opencode_state(
+        data_dir,
+        ids=tuple(),
+    )
+    by_cwd: dict[str, OpenCodeSessionState] = {}
+    by_id: dict[str, OpenCodeSessionState] = {}
+    for state in states:
+        if state.cwd and state.cwd not in by_cwd:
+            by_cwd[state.cwd] = state
+        by_id[state.session_id] = state
+
+    hook_events = opencode_hook_events(default_opencode_hook_log_path())
+    sessions: list[CodexSession] = []
+    for root in roots:
+        state = _opencode_state_for_root(root, by_cwd, by_id, hook_events)
+        if state is None:
             continue
-        selected = _select_lifecycle_candidate(candidates)
+        binding_method = "opencode_hook_session_id" if _opencode_hook_confirms_root(
+            root, hook_events
+        ) else "opencode_sqlite_cwd"
         sessions.append(
             CodexSession(
                 root=root,
                 descendants=tuple(_collect_descendants(root.pid, processes)),
                 connections=(),
-                inference=_lifecycle_inference(
-                    selected.display_status,
-                    selected.hook_state,
-                    selected.state_activity,
+                inference=Inference(
+                    status=_opencode_inference_status(state.status),
+                    confidence=1.0,
+                    evidence=(
+                        Evidence(
+                            "opencode_sqlite",
+                            f"OpenCode session {state.session_id} "
+                            f"({state.status}); last activity "
+                            f"{_age_description(state.last_activity_at)}.",
+                        ),
+                    ),
                 ),
-                state_activity=selected.state_activity,
-                hook_state=selected.hook_state,
-                launch_record=launch_records.get(root.pid),
-                display_status=selected.display_status,
-                binding_method=selected.binding_method,
-                binding_confidence=selected.binding_confidence,
+                state_activity=None,
+                hook_state=None,
+                launch_record=None,
+                display_status=state.status,
+                binding_method=binding_method,
+                binding_confidence=1.0,
                 binding_ambiguous=False,
-                binding_candidate_count=len(candidates),
-                binding_evidence=selected.binding_evidence,
+                binding_candidate_count=1,
+                binding_evidence=(
+                    "OpenCode process bound to session by current working directory",
+                    "lifecycle status read read-only from the OpenCode SQLite database",
+                ),
+                cli_type="opencode",
             )
         )
-    return tuple(sorted(sessions, key=lambda session: session.root.pid))
+    return tuple(sessions)
+
+
+def _opencode_state_for_root(
+    root: ProcessInfo,
+    by_cwd: dict[str, OpenCodeSessionState],
+    by_id: dict[str, OpenCodeSessionState],
+    hook_events: tuple[dict, ...],
+) -> OpenCodeSessionState | None:
+    if root.cwd is None:
+        return None
+    state = by_cwd.get(root.cwd)
+    if state is not None:
+        return state
+    return None
+
+
+def _opencode_hook_confirms_root(
+    root: ProcessInfo,
+    hook_events: tuple[dict, ...],
+) -> bool:
+    for event in hook_events:
+        if event.get("ppid") == root.pid or event.get("pid") == root.pid:
+            return True
+        cwd = event.get("cwd")
+        if cwd and root.cwd and _normalize_path(cwd) == _normalize_path(root.cwd):
+            return True
+    return False
+
+
+def _opencode_inference_status(status: str) -> str:
+    if status == "运行中":
+        return "running_terminal"
+    if status == "失败":
+        return "failure_terminal"
+    return "success_terminal"
+
+
+def _age_description(timestamp: float | None) -> str:
+    if timestamp is None:
+        return "unknown"
+    age = max(0.0, time.time() - timestamp)
+    return f"{age:.0f}s ago"
 
 
 def _lifecycle_candidates_for_root(
@@ -201,8 +308,12 @@ def _is_new_fd_lifecycle(
     hook_states: tuple[HookSessionState, ...],
     root: ProcessInfo,
 ) -> bool:
-    event_at = activity.last_record_at
-    if event_at is None or _is_before_process_start(event_at, root):
+    turn_started_at = activity.turn_started_at
+    if (
+        turn_started_at is None
+        or root.started_at is None
+        or _is_before_process_start(turn_started_at, root)
+    ):
         return False
     same_session = tuple(
         state for state in hook_states if state.session_id == activity.session_id
@@ -214,7 +325,7 @@ def _is_new_fd_lifecycle(
         for state in same_session
     ):
         return False
-    return event_at > max(state.updated_at for state in same_session)
+    return turn_started_at > max(state.updated_at for state in same_session)
 
 
 def _select_lifecycle_candidate(
@@ -316,6 +427,24 @@ def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, .
         processes[pid]
         for pid in visible_codex_pids
         if processes[pid].ppid not in visible_codex_pids
+    )
+    return tuple(sorted(roots, key=lambda process: process.pid))
+
+
+def _find_opencode_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, ...]:
+    opencode_pids = {
+        pid for pid, process in processes.items() if is_opencode_process(process)
+    }
+    visible_opencode_pids = {
+        pid
+        for pid in opencode_pids
+        if processes[pid].state not in INACTIVE_ROOT_STATES
+        and not _is_confirmed_detached_terminal_root(processes[pid], processes)
+    }
+    roots = (
+        processes[pid]
+        for pid in visible_opencode_pids
+        if processes[pid].ppid not in visible_opencode_pids
     )
     return tuple(sorted(roots, key=lambda process: process.pid))
 

@@ -109,6 +109,7 @@ def scan_process_terminal_activities(
         events = _terminal_events(path, stat.st_dev, stat.st_ino, stat.st_size)
         if not events:
             continue
+        event = events[-1]
         activities.append(
             _session_activity(
                 home=home,
@@ -116,7 +117,8 @@ def scan_process_terminal_activities(
                 stat=stat,
                 session_id=session_id,
                 cwd=cwd,
-                event=events[-1],
+                event=event,
+                fallback_turn_started_at=_matching_turn_started_at(events, event),
             )
         )
     return tuple(
@@ -393,6 +395,20 @@ def _event_for_hook(
         or event.timestamp + TIMESTAMP_GRACE_SECONDS >= started_at
     )
     return candidates[-1] if candidates else None
+
+
+def _matching_turn_started_at(
+    events: tuple[_TerminalEvent, ...],
+    event: _TerminalEvent,
+) -> float | None:
+    if event.active:
+        return event.timestamp
+    if event.turn_id is None:
+        return None
+    for candidate in reversed(events):
+        if candidate.active and candidate.turn_id == event.turn_id:
+            return candidate.timestamp
+    return None
 
 
 def _timestamp(value: object) -> float | None:

@@ -25,7 +25,7 @@ x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
   "$resource_obj" \
   -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
   -mwindows -municode -Wl,--subsystem,windows \
-  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lwinmm
+  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lmsimg32
 cp windows/CodexMonitorWidget/CodexMonitorWidget.ini.example \
   dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.ini
 ```
@@ -82,6 +82,11 @@ fully tucked view uses one equal horizontal gap from the server bar to the first
 status bar, between status bars, and from the final status bar to the right
 border. The right-click menu has a
 checked edge-tuck option; clearing it disables automatic tucking.
+
+The running and softened indicators use cached premultiplied DIB sprites with
+`AlphaBlend`; the static panel and per-frame buffers are reused instead of
+being recreated for every animation frame. The `msimg32` system library is
+therefore required by the Windows build.
 
 When there are no session rows, the widget uses a dedicated single-row empty
 state instead of a border-only rectangle. It shows `正在连接` before the first

@@ -241,10 +241,12 @@ class CodexSession:
     binding_ambiguous: bool = False
     binding_candidate_count: int = 0
     binding_evidence: tuple[str, ...] = field(default_factory=tuple)
+    cli_type: str = "codex"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.display_status,
+            "cli_type": self.cli_type,
             "inferred_status": self.inference.to_dict(),
             "root": self.root.to_dict(),
             "descendants": [process.to_dict() for process in self.descendants],

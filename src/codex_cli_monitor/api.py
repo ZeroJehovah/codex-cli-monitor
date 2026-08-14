@@ -26,6 +26,8 @@ from .hook_state import hook_log_health
 from .install_hooks import check_hooks
 from .models import CodexSession
 from .monitor import discover_sessions
+from .opencode_hook_state import opencode_hook_log_health
+from .opencode_state import opencode_db_path
 
 
 DEFAULT_API_HOST = "127.0.0.1"
@@ -110,6 +112,13 @@ def build_sessions_payload(
     )
 
 
+def _opencode_hook_health(config: ApiConfig) -> dict[str, object]:
+    db = opencode_db_path()
+    hooks = opencode_hook_log_health(None)
+    hooks["db_exists"] = db.is_file()
+    return hooks
+
+
 def build_hook_health(
     codex_home: Path | None = None,
     hook_log: Path | None = None,
@@ -189,6 +198,7 @@ def make_api_handler(
                     "mode": "aggregator" if config.aggregate else "collector",
                     "server": identity.to_dict(),
                     "hooks": build_hook_health(config.codex_home, config.hook_log),
+                    "opencode_hooks": _opencode_hook_health(config),
                 }
                 if collector_status_provider is not None:
                     payload["collector"] = collector_status_provider()

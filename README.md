@@ -1,34 +1,40 @@
 # codex-cli-monitor
 
-`codex-cli-monitor` 是一个用于观察本机 Codex CLI 运行状态的小工具。它的目标是低侵入地显示当前打开了多少个 Codex 会话，并把每个会话归类为少量可直接使用的状态。
+`codex-cli-monitor` 是一个用于观察本机 Codex CLI 和 OpenCode CLI 运行状态的小工具。它的目标是低侵入地显示当前打开了多少个会话，并把每个会话归类为少量可直接使用的状态。
 
 ## 功能
 
-- 扫描当前系统里的 Codex CLI 进程，显示会话数量、PID、TTY、工作目录、运行时长等信息。
+- 扫描当前系统里的 Codex CLI 和 OpenCode CLI 进程，显示会话数量、PID、TTY、工作目录、运行时长等信息。
 - 使用 Codex 低频 hooks 驱动三态流转，并用最小化结构化终端事件补足失败结果。
+- 对 OpenCode 会话通过只读 SQLite 旁路读取 `~/.local/share/opencode/opencode.db` 推理状态（运行中/成功/失败），可选安装生命周期 hook 增强绑定。
 - 保留轻量进程存活检查，用于清理未触发 Hook 就意外退出的会话。
 - 支持 JSON 输出，方便接入脚本或面板。
-- 支持常驻后台 HTTP API，供桌面前端轮询当前 Codex 会话状态。
-- 支持多服务器采集与聚合：每台服务器本地采集，VPS 聚合服务同时监控自身 Codex 并合并远端状态。
-- 提供轻量原生 Win32 小型悬浮窗前端，用状态圆点展示每个 Codex 进程。
+- 支持常驻后台 HTTP API，供桌面前端轮询当前会话状态。
+- 支持多服务器采集与聚合：每台服务器本地采集，VPS 聚合服务同时监控自身 Codex/OpenCode 并合并远端状态。
+- 提供轻量原生 Win32 小型悬浮窗前端，用状态圆点展示每个进程，可区分 Codex/OpenCode 并同时显示。
 - 提供可选的同名 `codex` shim，用来记录启动元数据后再透明执行真正的 Codex CLI。
 
 ## 大概原理
 
-默认方式是 Hook 状态机加轻量 sidecar：工具独立运行，不修改 Codex，也不要求改变正常使用习惯。它只读取这些必要信号：
+默认方式是 Hook 状态机加轻量 sidecar：工具独立运行，不修改 Codex/OpenCode，也不要求改变正常使用习惯。它只读取这些必要信号：
 
 - `/proc` 里的进程、父子关系、命令行、TTY、当前工作目录、进程启动时间，以及由准确
   Codex PID 持有的 session JSONL 文件描述符。
 - Codex hooks 默认只写入 `UserPromptSubmit` 和 `Stop` 两个低频生命周期事件。
-- `$CODEX_HOME/sessions` 中与 Hook `session_id` 精确对应、或由已显示 Codex PID 直接持有
-  的 session JSONL；读取器增量读取有上限的文件尾。对于 PID 精确绑定的 Goal 自动续跑
+- `$CODEX_HOME/sessions` 中与 Hook `session_id` 精确对应、或由准确 Codex PID 直接持有
+  的 session JSONL；读取器增量读取有上限的文件尾。对于 PID 精确绑定的直接 Goal 或续跑
   文件，还会读取有上限的生命周期前缀，保证文件变大后开头的 `task_started` 仍可恢复。
   两个区域都只识别结构化 `task_started`、`task_complete.error`、
   `turn_complete.error`、`TurnAborted` 等生命周期记录。
+- OpenCode 的 `~/.local/share/opencode/opencode.db`（SQLite）。读取器以只读 URI 打开，
+  仅查询 `session`/`message`/`part` 表的最小结构字段（目录、创建/更新时间、
+  `role`、`time.completed`、`finish`、工具运行状态），从不清除、写入或锁库。
+- OpenCode 可选 hook 写入的有界 JSONL marker（仅事件名、时间、目录、session id）。
 - 可选 shim 写入的启动记录。
 
 常驻扫描不做 CPU 差值采样，不读取进程网络连接，不扫描运行时诊断数据库，也不根据
-assistant 文本、工具输出或错误关键词推断状态。监控不会输出 session JSONL 的消息正文。
+assistant 文本、工具输出或错误关键词推断状态。监控不会输出 session JSONL 的消息正文，
+也不会输出 OpenCode 的对话/工具内容。
 
 监控还会读取 Linux 进程的会话 ID、进程组和终端前台进程组。若 Codex 仍残留在
 `/proc` 中，但其 TTY 已删除、终端前台进程组已失效，或者原终端会话 leader 已经不存
@@ -37,18 +43,37 @@ assistant 文本、工具输出或错误关键词推断状态。监控不会输�
 
 主状态只有三种：
 
-- `运行中`：已提交提示词，AI 正在思考、等待 API、执行 MCP、本地工具或其他操作；若
-  同一 Codex PID 已经通过 Hook 显示，Goal 自动续跑创建的新 session 即使没有再次触发
-  `UserPromptSubmit`，也可由准确 PID 打开的文件中的结构化 `task_started` 进入运行中。
+- `运行中`：已提交提示词，或准确 PID 打开的 session 文件在该进程启动后记录了结构化
+  `task_started`；AI 正在思考、等待 API、执行 MCP、本地工具或其他操作。这也覆盖进程
+  启动后直接进入 `/goal`，以及没有再次触发 `UserPromptSubmit` 的 Goal 自动续跑。
 - `成功`：已显示会话的最近一轮通过 `Stop` 或结构化终端事件完成成功。
 - `失败`：从运行中结束，且最近一轮出现 API/模型错误，或被手动 Ctrl+C 中断。
 
-新打开但尚未提交提示词的 Codex 进程不会显示；`SessionStart` 本身也不创建状态行。进程
-至少有过一次提交 Hook 后，后续无提交 Hook 的 Goal 自动续跑才可更新该进程已有的状态
-行。JSON 为兼容现有调用方仍保留 `inferred_status` 字段，但其中只使用
+新打开但尚未提交提示词、也没有进程启动后的准确 PID-open `task_started` 的 Codex 进程
+不会显示；`SessionStart` 本身也不创建状态行。直接 `/goal` 和后续无提交 Hook 的 Goal
+自动续跑都可通过这条结构化生命周期路径创建或更新状态行。JSON 为兼容现有调用方仍保留
+`inferred_status` 字段，但其中只使用
 `running_hook`、`running_terminal`、`success_hook`、`success_terminal` 和
 `failure_terminal` 这类确定来源说明，不再包含 CPU、网络或工具活动推断。表格和顶层
 `status` 只显示上面的三种主状态。
+
+### OpenCode 状态判定
+
+OpenCode 与 Codex CLI 共存显示，使用相同的三种主状态：
+
+- 只读打开 `~/.local/share/opencode/opencode.db`，把运行中的 `opencode` 进程绑定到
+  `session.directory` 与进程 `cwd` 相同的会话行。
+- 会话最后一条 `message` 的 `role=assistant` 且缺少 `time.completed`（仍在流式输出），
+  或最后一条 `part` 的 `state.status=running`（工具仍在执行）→ `运行中`。
+- 否则最后一条 assistant 消息 `finish=stop` → `成功`；`finish` 非 `stop`
+  （如 `error`、`interrupted`）→ `失败`。
+- 进程存活但会话已为终结状态 → 保持显示会话结果；进程退出后经短暂 TTL 清理消失。
+- 可选安装 OpenCode 生命周期 hook 后，监控可通过 hook marker 的 `session_id`/pid 精确
+  绑定进程与会话，并提供比数据库 flush 更及时的退出边缘。即使不安装 hook，SQLite
+  只读轮询本身仍可工作（更适合只想旁路观察的用户）。
+
+所有 OpenCode 会话在聚合层、采集快照和 Windows 前端中带 `cli_type=opencode` 标识，
+与 `cli_type=codex` 的会话并列显示。
 
 ## 使用方法
 
@@ -65,12 +90,12 @@ assistant 文本、工具输出或错误关键词推断状态。监控不会输�
 唯一 session 文件，仅增量尾读同一 `turn_id` 的结构化终端事件：非空
 `task_complete.error`/`turn_complete.error` 或 `TurnAborted` 置为 `失败`，无错误的完成事件
 置为 `成功`。Hook 状态按 PID 和 `session_id` 分开保存；同一 PID 下任何准确绑定的活动
-session 都优先于旧的已完成 session。对于已经提交过 Hook 的进程，监控还会检查该 PID
-实际打开的 session JSONL，并只用结构化 `task_started` 补足 Goal 自动续跑。自动续跑
+session 都优先于旧的已完成 session。监控还会检查每个准确 Codex PID 实际打开的 session
+JSONL，并只用进程启动后的结构化 `task_started` 识别直接 Goal 或补足 Goal 自动续跑。Goal
 文件使用有界生命周期前缀加有界增量尾部，因此长时间运行、文件超过尾读窗口或出现较大
 增量缺口后仍能恢复最初的运行标记。已知 ID 冲突绝不会由时间接近度覆盖，也不会按同目录
-文件的新旧程度猜测绑定。完全没有提交 Hook 的新进程仍不显示；进程消失时，即使没有
-终止 Hook，也会清理其状态行。
+文件的新旧程度猜测绑定。既没有提交 Hook、也没有合格结构化 Goal 启动事件的新进程仍
+不显示；进程消失时，即使没有终止 Hook，也会清理其状态行。
 
 直接在项目目录运行：
 
@@ -148,6 +173,65 @@ API 会返回每个 Codex 进程的主状态、目录和启动时间，示例字
 ```bash
 PYTHONPATH=src python3 -m codex_cli_monitor --codex-home ~/.codex
 ```
+
+### 监测 OpenCode CLI
+
+同一个二进制也会自动监测 OpenCode CLI。只要 `opencode` 进程在运行、且
+`~/.local/share/opencode/opencode.db` 存在，`codex-monitor --json` 和 HTTP API
+就会把 OpenCode 会话与 Codex 会话一同返回（带 `cli_type: "opencode"`）：
+
+```json
+{
+  "session_count": 1,
+  "sessions": [
+    {
+      "pid": 9876,
+      "status": "运行中",
+      "cli_type": "opencode",
+      "directory": "/work/project",
+      "started_at": 1782475200.0
+    }
+  ]
+}
+```
+
+运行 CLI 表格：
+
+```bash
+PYTHONPATH=src python3 -m codex_cli_monitor
+```
+
+表格会多出一列 `CLI`（`codex` 或 `opencode`）。
+
+#### （可选）为 OpenCode 安装生命周期 Hook
+
+SQLite 只读轮询是默认且最小侵入的方式，无需任何配置。若希望更精确的进程→会话
+绑定和退出边缘，可以安装 OpenCode 生命周期 hook（只在 opencode 配置里追加监控
+命令，不修改 OpenCode 本体）：
+
+```bash
+./bin/opencode-monitor-install-hooks
+```
+
+安装后检查：
+
+```bash
+./bin/opencode-monitor-install-hooks --check
+```
+
+卸载：
+
+```bash
+./bin/opencode-monitor-install-hooks --uninstall
+```
+
+OpenCode 的 hook 配置在其 `~/.config/opencode/opencode.json` 中，与 Codex 的
+`~/.codex/hooks.json` 完全独立，互不影响。监控命令是 fail-open 的：任何错误都不会
+阻塞或改变 OpenCode 的回合。hook 只写入有界 JSONL marker，不包含提示词、回复或
+工具内容。
+
+> 注意：OpenCode 的 hook 目前以 `UserPromptSubmit` / `Stop` 语义模型工作（与 Codex 对齐）。
+> 如果你的 OpenCode 版本不触发这些事件，监控仍会回退到 SQLite 只读轮询，功能不受影响。
 
 ## 多服务器部署
 
@@ -246,6 +330,7 @@ vim start-server.sh
 | `REMOTE_TTL` | 可选 | 远端采集器多久无更新后移除旧会话，默认 30 秒，可容忍短暂网络超时 |
 | `LOCAL_CACHE_SECONDS` | 可选 | VPS 本机扫描缓存，默认 0.25 秒 |
 | `INSTALL_HOOKS` | 可选 | `1` 表示自动安装本机 Hook，建议保持 `1` |
+| `INSTALL_OPENCODE_HOOKS` | 可选 | `1` 时在 VPS 为 OpenCode 安装生命周期 hook；默认 `0`（SQLite 只读轮询始终工作） |
 | `API_READ_TOKEN` | 必须修改 | Windows 和只读 API 使用的 Token |
 | `COLLECTOR_WRITE_TOKEN` | 必须修改 | 所有采集器上报使用的 Token |
 
@@ -351,6 +436,7 @@ vim start-collector.sh
 | `COLLECTOR_INTERVAL` | 可选 | 上报间隔，默认 0.5 秒 |
 | `LOCAL_CACHE_SECONDS` | 可选 | 本机扫描缓存，默认 0.25 秒 |
 | `INSTALL_HOOKS` | 可选 | `1` 表示自动安装本机 Hook，建议保持 `1` |
+| `INSTALL_OPENCODE_HOOKS` | 可选 | `1` 时为本机 OpenCode 安装生命周期 hook；默认 `0`（SQLite 只读轮询始终工作） |
 
 Tailscale 直连示例：
 
@@ -695,10 +781,11 @@ curl --noproxy '*' https://codex-monitor.aiof.top/healthz
 - 查看 `curl http://127.0.0.1:8765/healthz` 中的 `hooks.installation` 和 `hooks.runtime`。
 - 检查 Hook 日志是否更新；有活动 Codex 但长期无事件时，只能判断“可能未 trust 或被禁用”，不能据此断言具体原因。
 - 检查 `~/.codex` 是否属于正确用户。
-- 新进程在第一次 `UserPromptSubmit` 前按设计不会显示；只看到进程而没有 Hook 事件不是故障状态行。
-- 确认 Codex session 文件名包含 Hook 记录的 `session_id`。Goal 自动续跑没有提交 Hook
-  时，确认新 session 文件仍由同一 Codex PID 打开且包含结构化 `task_started`；终端读取
-  器不会用同目录时间接近度猜测其他文件。
+- 新进程在第一次 `UserPromptSubmit` 或进程启动后的准确 PID-open `task_started` 前按设计
+  不会显示；直接 `/goal` 应通过后一条路径显示。
+- 确认 Codex session 文件名包含 Hook 记录的 `session_id`，或 Goal session 文件仍由同一
+  Codex PID 打开且包含结构化 `task_started`；终端读取器不会用同目录时间接近度猜测其他
+  文件。
 - 如果移动过仓库，重新安装 Hook。
 
 #### SSH 已断开但 Codex 会话仍显示
@@ -756,7 +843,9 @@ Windows 前端在 `windows/CodexMonitorWidget`。它是一个轻量原生 Win32 
 桌面悬浮窗，同一 Windows 登录会话内只允许启动一个实例；如果已经运行，再次启动
 exe 会直接退出，不会打开第二个悬浮窗。它会轮询 `/api/sessions`，并按目录分组显示
 无表头表格：每行第一列是
-目录名，第二列是该目录下一个或多个带柔化边缘的 Codex 进程状态圆点。它不依赖
+目录名，第二列是该目录下一个或多个带柔化边缘的进程状态圆点。Codex 与 OpenCode
+会话会并列显示在同一张表里，圆点颜色语义相同（蓝色运行中 / 绿色成功 / 红色失败），
+悬停详情新增了 `CLI` 行（`codex` 或 `opencode`）以便区分。它不依赖
 .NET Runtime 或 Electron。
 
 纯英文目录名继续以小写 `o` 字形的实际黑框做视觉垂直居中；包含中文的目录名和中英
@@ -794,7 +883,7 @@ exe 会直接退出，不会打开第二个悬浮窗。它会轮询 `/api/sessio
 显示呼吸光晕。鼠标移入会动态展开并可打断正在进行的收纳动画，状态条同时恢复为圆
 点。完全收纳后，服务器彩条到首个状态条、相邻状态条之间、末个状态条到右边框的三
 处水平间距完全一致；取消勾选后不会自动收纳。鼠标移到状态标识上会
-显示 PID、状态、目录和启动时间。右键点击悬浮窗会打开菜单，可以调整显示大小、打开
+显示 CLI 类型、PID、状态、目录和启动时间。右键点击悬浮窗会打开菜单，可以调整显示大小、打开
 关于页面或退出程序。
 
 连接多服务器聚合服务时，悬浮窗按服务器和目录共同分组，通过每行左侧的彩色竖条区
@@ -826,7 +915,7 @@ x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
   "$resource_obj" \
   -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
   -mwindows -municode -Wl,--subsystem,windows \
-  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lwinmm
+  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lmsimg32
 cp windows/CodexMonitorWidget/CodexMonitorWidget.ini.example \
   dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.ini
 ```
@@ -875,6 +964,20 @@ ${XDG_STATE_HOME:-~/.local/state}/codex-cli-monitor/launches.jsonl
 
 ## 测试
 
+运行后端单元测试（包含 OpenCode SQLite 解析、OpenCode hook 日志与安装器测试）：
+
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+或使用 pytest（如已安装）：
+
+```bash
+PYTHONPATH=src pytest tests/ -q
+```
+
+Windows 前端的环境无关逻辑测试（C 语言）：
+
+```bash
+PYTHONPATH=src python3 tests/test_widget_animation.py
 ```

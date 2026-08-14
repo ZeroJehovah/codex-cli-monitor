@@ -41,6 +41,10 @@
 #define DOT_SIZE 14
 #define DOT_GAP 8
 #define DOT_EDGE_SAMPLES 4
+#define INDICATOR_BITMAP_CACHE_CAPACITY 128
+#define INDICATOR_PULSE_STEPS 64
+#define INDICATOR_BITMAP_SOFT 1
+#define INDICATOR_BITMAP_LUMINOUS 2
 #define STATIC_DOT_SOFT_EDGE 2
 #define RUNNING_SHADOW_SPREAD 6
 #define STATUS_BAR_WIDTH 5
@@ -74,6 +78,7 @@ typedef struct Session {
     char started_at_iso[64];
     char server_id[128];
     char server_name[128];
+    char cli_type[32];
 } Session;
 
 typedef struct FetchResult {
@@ -103,6 +108,32 @@ typedef struct ServerColorAssignment {
     char server_key[256];
     int color_index;
 } ServerColorAssignment;
+
+typedef struct IndicatorBitmapCacheEntry {
+    int valid;
+    int kind;
+    int width;
+    int height;
+    int spread;
+    int edge_blur;
+    int max_alpha;
+    COLORREF color;
+    int bitmap_width;
+    int bitmap_height;
+    HDC hdc;
+    HBITMAP bitmap;
+    HGDIOBJ old_bitmap;
+    void *bits;
+    ULONGLONG last_used;
+} IndicatorBitmapCacheEntry;
+
+typedef struct WidgetBuffer {
+    HDC hdc;
+    HBITMAP bitmap;
+    HGDIOBJ old_bitmap;
+    int width;
+    int height;
+} WidgetBuffer;
 
 typedef struct AppState {
     HWND hwnd;
@@ -146,6 +177,11 @@ typedef struct AppState {
     int fetch_completed;
     LONG fetching;
     char last_error[256];
+    IndicatorBitmapCacheEntry indicator_cache[INDICATOR_BITMAP_CACHE_CAPACITY];
+    ULONGLONG indicator_cache_clock;
+    WidgetBuffer static_buffer;
+    WidgetBuffer frame_buffer;
+    int static_buffer_dirty;
 } AppState;
 
 static const char STATUS_RUNNING[] = "\xe8\xbf\x90\xe8\xa1\x8c\xe4\xb8\xad";
@@ -185,6 +221,8 @@ static int rect_width(const RECT *rect);
 static void finish_drag_move(void);
 static void resume_edge_tuck_after_drag(void);
 static void settle_dragged_window(void);
+static void clear_indicator_bitmap_cache(void);
+static void release_widget_buffer(WidgetBuffer *buffer);
 
 static void utf8_to_wide(const char *source, wchar_t *target, int target_count) {
     if (target_count <= 0) {
@@ -1891,6 +1929,10 @@ static void parse_session_object(const char *start, const char *end, Session *se
     parse_json_string(find_top_level_key(start, end, "started_at_iso"), end, session->started_at_iso, sizeof(session->started_at_iso));
     parse_json_string(find_top_level_key(start, end, "server_id"), end, session->server_id, sizeof(session->server_id));
     parse_json_string(find_top_level_key(start, end, "server_name"), end, session->server_name, sizeof(session->server_name));
+    parse_json_string(find_top_level_key(start, end, "cli_type"), end, session->cli_type, sizeof(session->cli_type));
+    if (session->cli_type[0] == '\0') {
+        copy_ascii(session->cli_type, sizeof(session->cli_type), "codex");
+    }
 }
 
 static void parse_sessions_json(const char *json, FetchResult *result) {
@@ -2201,6 +2243,7 @@ static void advance_edge_tuck_animation(void) {
     if (g_app.edge_tuck_progress == 0 && target == 0) {
         g_app.edge_tuck_side = 0;
     }
+    g_app.static_buffer_dirty = 1;
     resize_panel();
     update_tool_rect();
 }
@@ -2299,6 +2342,7 @@ static void update_animation_timer(void) {
 }
 
 static void refresh_widget_view(void) {
+    g_app.static_buffer_dirty = 1;
     sync_edge_tuck_after_layout_change();
     resize_panel();
     update_tool_rect();
@@ -2402,6 +2446,7 @@ static void set_tooltip_for_hover(int index) {
     wchar_t directory[512];
     wchar_t started[128];
     wchar_t server[256];
+    wchar_t cli[32];
     if (index >= 0 && index < g_app.session_count) {
         Session *session = &g_app.sessions[index];
         utf8_to_wide(session->status, status, (int)(sizeof(status) / sizeof(status[0])));
@@ -2409,9 +2454,10 @@ static void set_tooltip_for_hover(int index) {
         utf8_to_wide(session->started_at_iso[0] ? session->started_at_iso : "-", started, (int)(sizeof(started) / sizeof(started[0])));
         utf8_to_wide(session->server_name[0] ? session->server_name : (session->server_id[0] ? session->server_id : "-"),
             server, (int)(sizeof(server) / sizeof(server[0])));
+        utf8_to_wide(session->cli_type[0] ? session->cli_type : "codex", cli, (int)(sizeof(cli) / sizeof(cli[0])));
         _snwprintf(g_app.tooltip_text, sizeof(g_app.tooltip_text) / sizeof(g_app.tooltip_text[0]) - 1,
-            L"Server: %ls\nPID: %d\nStatus: %ls\nDirectory: %ls\nStarted: %ls",
-            server, session->pid, status, directory, started);
+            L"Server: %ls\nCLI: %ls\nPID: %d\nStatus: %ls\nDirectory: %ls\nStarted: %ls",
+            server, cli, session->pid, status, directory, started);
     } else if (g_app.last_error[0] != '\0') {
         wchar_t error_text[512];
         utf8_to_wide(g_app.last_error, error_text, (int)(sizeof(error_text) / sizeof(error_text[0])));
@@ -2502,6 +2548,7 @@ static void apply_display_font_points(int points) {
     set_edge_tuck_target(0);
     g_app.display_font_points = points;
     update_display_font();
+    clear_indicator_bitmap_cache();
     update_directory_column_width();
     refresh_widget_view();
     save_widget_placement();
@@ -2629,7 +2676,366 @@ static int clamp_int(int value, int minimum, int maximum) {
     return value;
 }
 
-static void fill_soft_indicator(
+static void release_indicator_bitmap_cache_entry(IndicatorBitmapCacheEntry *entry) {
+    if (entry == NULL) {
+        return;
+    }
+    if (entry->hdc != NULL) {
+        if (entry->old_bitmap != NULL) {
+            SelectObject(entry->hdc, entry->old_bitmap);
+        }
+        DeleteDC(entry->hdc);
+    }
+    if (entry->bitmap != NULL) {
+        DeleteObject(entry->bitmap);
+    }
+    ZeroMemory(entry, sizeof(*entry));
+}
+
+static void clear_indicator_bitmap_cache(void) {
+    int index;
+    for (index = 0; index < INDICATOR_BITMAP_CACHE_CAPACITY; index++) {
+        release_indicator_bitmap_cache_entry(&g_app.indicator_cache[index]);
+    }
+    g_app.indicator_cache_clock = 0;
+}
+
+static void write_premultiplied_pixel(
+    IndicatorBitmapCacheEntry *entry,
+    int x,
+    int y,
+    COLORREF color,
+    int alpha
+) {
+    unsigned char *pixel;
+    if (entry == NULL || entry->bits == NULL ||
+        x < 0 || y < 0 || x >= entry->bitmap_width || y >= entry->bitmap_height) {
+        return;
+    }
+    alpha = clamp_int(alpha, 0, 255);
+    if (alpha <= 0) {
+        return;
+    }
+    pixel = (unsigned char *)entry->bits +
+        ((size_t)y * (size_t)entry->bitmap_width + (size_t)x) * 4U;
+    pixel[0] = (unsigned char)((GetBValue(color) * alpha + 127) / 255);
+    pixel[1] = (unsigned char)((GetGValue(color) * alpha + 127) / 255);
+    pixel[2] = (unsigned char)((GetRValue(color) * alpha + 127) / 255);
+    pixel[3] = (unsigned char)alpha;
+}
+
+static int render_indicator_bitmap(IndicatorBitmapCacheEntry *entry) {
+    int width;
+    int height;
+    int diameter;
+    double center_x;
+    double center_y;
+    double segment_start;
+    double segment_end;
+    double radius;
+    double outer_radius_squared;
+    double inner_radius;
+    double inner_radius_squared;
+    double fade_denominator;
+    int total_samples = DOT_EDGE_SAMPLES * DOT_EDGE_SAMPLES;
+    int x;
+    int y;
+
+    if (entry == NULL || entry->bits == NULL) {
+        return 0;
+    }
+    width = entry->width;
+    height = entry->height;
+    diameter = width < height ? width : height;
+    if (width <= 0 || height <= 0 || diameter <= 0 || entry->max_alpha <= 0) {
+        return 0;
+    }
+    ZeroMemory(entry->bits, (size_t)entry->bitmap_width * (size_t)entry->bitmap_height * 4U);
+    entry->max_alpha = clamp_int(entry->max_alpha, 0, 255);
+    center_x = width / 2.0;
+    center_y = height / 2.0;
+    radius = diameter / 2.0;
+    if (height >= width) {
+        segment_start = radius;
+        segment_end = height - radius;
+    } else {
+        segment_start = radius;
+        segment_end = width - radius;
+    }
+
+    if (entry->kind == INDICATOR_BITMAP_SOFT) {
+        int edge_blur = clamp_int(entry->edge_blur, 0, diameter);
+        inner_radius = radius - edge_blur;
+        if (inner_radius < 0.0) {
+            inner_radius = 0.0;
+        }
+        outer_radius_squared = radius * radius;
+        inner_radius_squared = inner_radius * inner_radius;
+        fade_denominator = outer_radius_squared - inner_radius_squared;
+        if (fade_denominator <= 0.0) {
+            fade_denominator = outer_radius_squared;
+        }
+        for (y = 0; y < height; y++) {
+            for (x = 0; x < width; x++) {
+                int alpha_sum = 0;
+                int sample_y;
+                for (sample_y = 0; sample_y < DOT_EDGE_SAMPLES; sample_y++) {
+                    int sample_x;
+                    double py = y + (sample_y + 0.5) / DOT_EDGE_SAMPLES;
+                    for (sample_x = 0; sample_x < DOT_EDGE_SAMPLES; sample_x++) {
+                        double px = x + (sample_x + 0.5) / DOT_EDGE_SAMPLES;
+                        double dx;
+                        double dy;
+                        double distance_squared;
+                        if (height >= width) {
+                            double nearest_y = py;
+                            if (nearest_y < segment_start) {
+                                nearest_y = segment_start;
+                            } else if (nearest_y > segment_end) {
+                                nearest_y = segment_end;
+                            }
+                            dx = px - center_x;
+                            dy = py - nearest_y;
+                        } else {
+                            double nearest_x = px;
+                            if (nearest_x < segment_start) {
+                                nearest_x = segment_start;
+                            } else if (nearest_x > segment_end) {
+                                nearest_x = segment_end;
+                            }
+                            dx = px - nearest_x;
+                            dy = py - center_y;
+                        }
+                        distance_squared = dx * dx + dy * dy;
+                        if (distance_squared <= inner_radius_squared) {
+                            alpha_sum += entry->max_alpha;
+                        } else if (distance_squared <= outer_radius_squared) {
+                            double fade = (outer_radius_squared - distance_squared) / fade_denominator;
+                            fade = fade * fade * (3.0 - 2.0 * fade);
+                            alpha_sum += (int)(entry->max_alpha * fade + 0.5);
+                        }
+                    }
+                }
+                if (alpha_sum > 0) {
+                    int alpha = (alpha_sum + total_samples / 2) / total_samples;
+                    write_premultiplied_pixel(entry, x, y, entry->color, alpha);
+                }
+            }
+        }
+        return 1;
+    }
+
+    if (entry->kind != INDICATOR_BITMAP_LUMINOUS || entry->spread <= 0) {
+        return 0;
+    }
+    outer_radius_squared = (radius + entry->spread) * (radius + entry->spread);
+    if (outer_radius_squared <= 0.0) {
+        return 0;
+    }
+    for (y = 0; y < entry->bitmap_height; y++) {
+        int sample_y;
+        for (x = 0; x < entry->bitmap_width; x++) {
+            int alpha_sum = 0;
+            double base_y = y - entry->spread;
+            double base_x = x - entry->spread;
+            for (sample_y = 0; sample_y < DOT_EDGE_SAMPLES; sample_y++) {
+                int sample_x;
+                double py = base_y + (sample_y + 0.5) / DOT_EDGE_SAMPLES;
+                for (sample_x = 0; sample_x < DOT_EDGE_SAMPLES; sample_x++) {
+                    double px = base_x + (sample_x + 0.5) / DOT_EDGE_SAMPLES;
+                    double dx;
+                    double dy;
+                    double distance_squared;
+                    if (height >= width) {
+                        double nearest_y = py;
+                        if (nearest_y < segment_start) {
+                            nearest_y = segment_start;
+                        } else if (nearest_y > segment_end) {
+                            nearest_y = segment_end;
+                        }
+                        dx = px - center_x;
+                        dy = py - nearest_y;
+                    } else {
+                        double nearest_x = px;
+                        if (nearest_x < segment_start) {
+                            nearest_x = segment_start;
+                        } else if (nearest_x > segment_end) {
+                            nearest_x = segment_end;
+                        }
+                        dx = px - nearest_x;
+                        dy = py - center_y;
+                    }
+                    distance_squared = dx * dx + dy * dy;
+                    if (distance_squared <= outer_radius_squared) {
+                        double fade =
+                            (outer_radius_squared - distance_squared) / outer_radius_squared;
+                        fade = fade * fade * (3.0 - 2.0 * fade);
+                        fade *= fade;
+                        alpha_sum += (int)(entry->max_alpha * fade + 0.5);
+                    }
+                }
+            }
+            if (alpha_sum > 0) {
+                int alpha = (alpha_sum + total_samples / 2) / total_samples;
+                write_premultiplied_pixel(entry, x, y, entry->color, alpha);
+            }
+        }
+    }
+    return 1;
+}
+
+static int indicator_bitmap_key_matches(
+    const IndicatorBitmapCacheEntry *entry,
+    int kind,
+    int width,
+    int height,
+    int spread,
+    COLORREF color,
+    int max_alpha,
+    int edge_blur
+) {
+    return entry->valid && entry->kind == kind && entry->width == width &&
+        entry->height == height && entry->spread == spread &&
+        entry->color == color && entry->max_alpha == max_alpha &&
+        entry->edge_blur == edge_blur;
+}
+
+static IndicatorBitmapCacheEntry *get_indicator_bitmap(
+    HDC reference_hdc,
+    int kind,
+    int width,
+    int height,
+    int spread,
+    COLORREF color,
+    int max_alpha,
+    int edge_blur
+) {
+    IndicatorBitmapCacheEntry *entry = NULL;
+    ULONGLONG oldest = (ULONGLONG)-1;
+    int index;
+
+    max_alpha = clamp_int(max_alpha, 0, 255);
+    if (width <= 0 || height <= 0 || max_alpha <= 0) {
+        return NULL;
+    }
+    for (index = 0; index < INDICATOR_BITMAP_CACHE_CAPACITY; index++) {
+        if (indicator_bitmap_key_matches(
+                &g_app.indicator_cache[index],
+                kind,
+                width,
+                height,
+                spread,
+                color,
+                max_alpha,
+                edge_blur)) {
+            g_app.indicator_cache[index].last_used = ++g_app.indicator_cache_clock;
+            return &g_app.indicator_cache[index];
+        }
+        if (!g_app.indicator_cache[index].valid) {
+            entry = &g_app.indicator_cache[index];
+            break;
+        }
+        if (g_app.indicator_cache[index].last_used < oldest) {
+            oldest = g_app.indicator_cache[index].last_used;
+            entry = &g_app.indicator_cache[index];
+        }
+    }
+    if (entry == NULL) {
+        return NULL;
+    }
+    release_indicator_bitmap_cache_entry(entry);
+    entry->kind = kind;
+    entry->width = width;
+    entry->height = height;
+    entry->spread = spread;
+    entry->edge_blur = edge_blur;
+    entry->max_alpha = max_alpha;
+    entry->color = color;
+    entry->bitmap_width = kind == INDICATOR_BITMAP_LUMINOUS ? width + spread * 2 : width;
+    entry->bitmap_height = kind == INDICATOR_BITMAP_LUMINOUS ? height + spread * 2 : height;
+    if (entry->bitmap_width <= 0 || entry->bitmap_height <= 0) {
+        release_indicator_bitmap_cache_entry(entry);
+        return NULL;
+    }
+    entry->hdc = CreateCompatibleDC(reference_hdc);
+    if (entry->hdc == NULL) {
+        release_indicator_bitmap_cache_entry(entry);
+        return NULL;
+    }
+    {
+        BITMAPINFO bitmap_info;
+        ZeroMemory(&bitmap_info, sizeof(bitmap_info));
+        bitmap_info.bmiHeader.biSize = sizeof(bitmap_info.bmiHeader);
+        bitmap_info.bmiHeader.biWidth = entry->bitmap_width;
+        bitmap_info.bmiHeader.biHeight = -entry->bitmap_height;
+        bitmap_info.bmiHeader.biPlanes = 1;
+        bitmap_info.bmiHeader.biBitCount = 32;
+        bitmap_info.bmiHeader.biCompression = BI_RGB;
+        entry->bitmap = CreateDIBSection(
+            entry->hdc,
+            &bitmap_info,
+            DIB_RGB_COLORS,
+            &entry->bits,
+            NULL,
+            0
+        );
+    }
+    if (entry->bitmap == NULL || entry->bits == NULL) {
+        release_indicator_bitmap_cache_entry(entry);
+        return NULL;
+    }
+    entry->old_bitmap = SelectObject(entry->hdc, entry->bitmap);
+    if (entry->old_bitmap == NULL || entry->old_bitmap == HGDI_ERROR ||
+        !render_indicator_bitmap(entry)) {
+        release_indicator_bitmap_cache_entry(entry);
+        return NULL;
+    }
+    entry->valid = 1;
+    entry->last_used = ++g_app.indicator_cache_clock;
+    return entry;
+}
+
+static int alpha_blend_indicator_bitmap(
+    HDC target_hdc,
+    const RECT *rect,
+    int spread,
+    IndicatorBitmapCacheEntry *entry
+) {
+    BLENDFUNCTION blend_function;
+    int destination_x;
+    int destination_y;
+    if (target_hdc == NULL || rect == NULL || entry == NULL || !entry->valid) {
+        return 0;
+    }
+    destination_x = rect->left - spread;
+    destination_y = rect->top - spread;
+    blend_function.BlendOp = AC_SRC_OVER;
+    blend_function.BlendFlags = 0;
+    blend_function.SourceConstantAlpha = 255;
+    blend_function.AlphaFormat = AC_SRC_ALPHA;
+    return AlphaBlend(
+        target_hdc,
+        destination_x,
+        destination_y,
+        entry->bitmap_width,
+        entry->bitmap_height,
+        entry->hdc,
+        0,
+        0,
+        entry->bitmap_width,
+        entry->bitmap_height,
+        blend_function
+    ) != 0;
+}
+
+static int quantized_pulse_level(int pulse) {
+    int index = clamp_int(pulse, 0, 100) * (INDICATOR_PULSE_STEPS - 1);
+    index = (index + 50) / 100;
+    return (index * 100 + (INDICATOR_PULSE_STEPS - 1) / 2) /
+        (INDICATOR_PULSE_STEPS - 1);
+}
+
+static void fill_soft_indicator_direct(
     HDC hdc,
     const RECT *rect,
     COLORREF color,
@@ -2737,7 +3143,7 @@ static void fill_soft_indicator(
     }
 }
 
-static void fill_luminous_indicator(
+static void fill_luminous_indicator_direct(
     HDC hdc,
     const RECT *rect,
     int spread,
@@ -2835,9 +3241,96 @@ static void fill_luminous_indicator(
     }
 }
 
+static void fill_soft_indicator(
+    HDC hdc,
+    const RECT *rect,
+    COLORREF color,
+    COLORREF fallback_background,
+    int max_alpha,
+    int edge_blur,
+    int composite_over_current
+) {
+    int width;
+    int height;
+    int diameter;
+    IndicatorBitmapCacheEntry *entry;
+    if (rect == NULL) {
+        return;
+    }
+    width = rect->right - rect->left;
+    height = rect->bottom - rect->top;
+    diameter = width < height ? width : height;
+    if (!composite_over_current && width > 0 && height > 0 && diameter > 0) {
+        edge_blur = clamp_int(edge_blur, 0, diameter);
+        entry = get_indicator_bitmap(
+            hdc,
+            INDICATOR_BITMAP_SOFT,
+            width,
+            height,
+            0,
+            color,
+            max_alpha,
+            edge_blur
+        );
+        if (entry != NULL && alpha_blend_indicator_bitmap(hdc, rect, 0, entry)) {
+            return;
+        }
+    }
+    fill_soft_indicator_direct(
+        hdc,
+        rect,
+        color,
+        fallback_background,
+        max_alpha,
+        edge_blur,
+        composite_over_current
+    );
+}
+
+static void fill_luminous_indicator(
+    HDC hdc,
+    const RECT *rect,
+    int spread,
+    COLORREF color,
+    COLORREF fallback_background,
+    int max_alpha
+) {
+    int width;
+    int height;
+    IndicatorBitmapCacheEntry *entry;
+    if (rect == NULL) {
+        return;
+    }
+    width = rect->right - rect->left;
+    height = rect->bottom - rect->top;
+    if (width > 0 && height > 0 && spread > 0) {
+        entry = get_indicator_bitmap(
+            hdc,
+            INDICATOR_BITMAP_LUMINOUS,
+            width,
+            height,
+            spread,
+            color,
+            max_alpha,
+            0
+        );
+        if (entry != NULL && alpha_blend_indicator_bitmap(hdc, rect, spread, entry)) {
+            return;
+        }
+    }
+    fill_luminous_indicator_direct(
+        hdc,
+        rect,
+        spread,
+        color,
+        fallback_background,
+        max_alpha
+    );
+}
+
 static void draw_status_indicator(HDC hdc, const RECT *rect, const char *status, COLORREF row_background) {
     if (is_running_status(status)) {
-        int pulse = running_pulse_level();
+        int pulse = quantized_pulse_level(running_pulse_level());
         int max_shadow_spread = current_running_shadow_spread();
         int min_shadow_spread = (max_shadow_spread * 3 + 2) / 4;
         int shadow_spread;
@@ -2873,7 +3366,7 @@ static void draw_status_indicator(HDC hdc, const RECT *rect, const char *status,
 static void draw_empty_state_indicator(HDC hdc, const RECT *rect, COLORREF row_background) {
     COLORREF color = empty_state_color();
     if (empty_state_is_connecting()) {
-        int pulse = running_pulse_level();
+        int pulse = quantized_pulse_level(running_pulse_level());
         int max_shadow_spread = current_running_shadow_spread() / 2;
         int min_shadow_spread;
         int shadow_spread;
@@ -2964,7 +3457,6 @@ static void draw_empty_state(HDC hdc, const RECT *client, const RECT *visible_cl
     RECT row_rect;
     RECT bar_rect;
     RECT text_rect;
-    RECT indicator_rect;
     HBRUSH brush;
     COLORREF row_color = RGB(31, 33, 37);
     COLORREF accent_color = empty_state_color();
@@ -3006,8 +3498,6 @@ static void draw_empty_state(HDC hdc, const RECT *client, const RECT *visible_cl
         );
     }
 
-    indicator_rect = status_indicator_rect(0, 0);
-    draw_empty_state_indicator(hdc, &indicator_rect, row_color);
 }
 
 static void draw_outer_border(HDC hdc, const RECT *visible_client) {
@@ -3036,7 +3526,7 @@ static void draw_outer_border(HDC hdc, const RECT *visible_client) {
     DeleteObject(brush);
 }
 
-static void paint_widget(HWND hwnd, HDC hdc) {
+static void paint_widget_static(HWND hwnd, HDC hdc) {
     RECT client;
     RECT visible_client;
     HBRUSH background;
@@ -3097,37 +3587,136 @@ static void paint_widget(HWND hwnd, HDC hdc) {
         for (indicator = 0; indicator < g_app.rows[row].session_count; indicator++) {
             int session_index = g_app.rows[row].session_indexes[indicator];
             RECT rect = status_indicator_rect(row, indicator);
-            draw_status_indicator(hdc, &rect, g_app.sessions[session_index].status, row_color);
+            if (!is_running_status(g_app.sessions[session_index].status)) {
+                draw_status_indicator(hdc, &rect, g_app.sessions[session_index].status, row_color);
+            }
         }
     }
     SelectObject(hdc, old_font);
     draw_outer_border(hdc, &visible_client);
 }
 
-static void paint_widget_buffered(HWND hwnd, HDC target_hdc) {
-    RECT client;
-    HDC memory_hdc;
+static void draw_widget_dynamic(HDC hdc) {
+    int row;
+    if (g_app.row_count <= 0) {
+        RECT indicator_rect = status_indicator_rect(0, 0);
+        draw_empty_state_indicator(hdc, &indicator_rect, RGB(31, 33, 37));
+    } else {
+        for (row = 0; row < g_app.row_count; row++) {
+            int indicator;
+            COLORREF row_color = row % 2 == 1 ? RGB(39, 39, 39) : RGB(34, 34, 34);
+            for (indicator = 0; indicator < g_app.rows[row].session_count; indicator++) {
+                int session_index = g_app.rows[row].session_indexes[indicator];
+                if (is_running_status(g_app.sessions[session_index].status)) {
+                    RECT rect = status_indicator_rect(row, indicator);
+                    draw_status_indicator(
+                        hdc,
+                        &rect,
+                        g_app.sessions[session_index].status,
+                        row_color
+                    );
+                }
+            }
+        }
+    }
+}
+
+static void release_widget_buffer(WidgetBuffer *buffer) {
+    if (buffer == NULL) {
+        return;
+    }
+    if (buffer->hdc != NULL) {
+        if (buffer->old_bitmap != NULL) {
+            SelectObject(buffer->hdc, buffer->old_bitmap);
+        }
+        DeleteDC(buffer->hdc);
+    }
+    if (buffer->bitmap != NULL) {
+        DeleteObject(buffer->bitmap);
+    }
+    ZeroMemory(buffer, sizeof(*buffer));
+}
+
+static int ensure_widget_buffer(
+    WidgetBuffer *buffer,
+    HDC reference_hdc,
+    int width,
+    int height
+) {
+    HDC hdc;
     HBITMAP bitmap;
     HGDIOBJ old_bitmap;
-    GetClientRect(hwnd, &client);
-    memory_hdc = CreateCompatibleDC(target_hdc);
-    if (memory_hdc == NULL) {
-        paint_widget(hwnd, target_hdc);
-        return;
+    if (buffer == NULL || reference_hdc == NULL || width <= 0 || height <= 0) {
+        return 0;
     }
-    bitmap = CreateCompatibleBitmap(target_hdc, client.right - client.left, client.bottom - client.top);
+    if (buffer->hdc != NULL && buffer->bitmap != NULL &&
+        buffer->width >= width && buffer->height >= height) {
+        return 1;
+    }
+    hdc = CreateCompatibleDC(reference_hdc);
+    if (hdc == NULL) {
+        return 0;
+    }
+    bitmap = CreateCompatibleBitmap(reference_hdc, width, height);
     if (bitmap == NULL) {
-        DeleteDC(memory_hdc);
-        paint_widget(hwnd, target_hdc);
+        DeleteDC(hdc);
+        return 0;
+    }
+    old_bitmap = SelectObject(hdc, bitmap);
+    if (old_bitmap == NULL || old_bitmap == HGDI_ERROR) {
+        DeleteObject(bitmap);
+        DeleteDC(hdc);
+        return 0;
+    }
+    release_widget_buffer(buffer);
+    buffer->hdc = hdc;
+    buffer->bitmap = bitmap;
+    buffer->old_bitmap = old_bitmap;
+    buffer->width = width;
+    buffer->height = height;
+    return 1;
+}
+
+static void paint_widget_buffered(HWND hwnd, HDC target_hdc) {
+    RECT client;
+    int width;
+    int height;
+    int static_buffer_needs_repaint;
+    GetClientRect(hwnd, &client);
+    width = client.right - client.left;
+    height = client.bottom - client.top;
+    if (width <= 0 || height <= 0) {
         return;
     }
-    old_bitmap = SelectObject(memory_hdc, bitmap);
-    paint_widget(hwnd, memory_hdc);
-    BitBlt(target_hdc, client.left, client.top, client.right - client.left, client.bottom - client.top,
-        memory_hdc, 0, 0, SRCCOPY);
-    SelectObject(memory_hdc, old_bitmap);
-    DeleteObject(bitmap);
-    DeleteDC(memory_hdc);
+    static_buffer_needs_repaint = g_app.static_buffer.hdc == NULL ||
+        g_app.static_buffer.width < width || g_app.static_buffer.height < height;
+    if (!ensure_widget_buffer(&g_app.static_buffer, target_hdc, width, height) ||
+        !ensure_widget_buffer(&g_app.frame_buffer, target_hdc, width, height)) {
+        paint_widget_static(hwnd, target_hdc);
+        draw_widget_dynamic(target_hdc);
+        return;
+    }
+    if (static_buffer_needs_repaint) {
+        g_app.static_buffer_dirty = 1;
+    }
+    if (g_app.static_buffer_dirty) {
+        paint_widget_static(hwnd, g_app.static_buffer.hdc);
+        g_app.static_buffer_dirty = 0;
+    }
+    BitBlt(
+        g_app.frame_buffer.hdc,
+        0,
+        0,
+        width,
+        height,
+        g_app.static_buffer.hdc,
+        0,
+        0,
+        SRCCOPY
+    );
+    draw_widget_dynamic(g_app.frame_buffer.hdc);
+    BitBlt(target_hdc, client.left, client.top, width, height,
+        g_app.frame_buffer.hdc, 0, 0, SRCCOPY);
 }
 
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -3135,6 +3724,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     case WM_CREATE:
         g_app.hwnd = hwnd;
         g_app.hovered_session = -1;
+        g_app.static_buffer_dirty = 1;
         init_tooltip(hwnd);
         update_directory_column_width();
         refresh_widget_view();
@@ -3308,6 +3898,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         }
         return DefWindowProcW(hwnd, message, wparam, lparam);
     case WM_SIZE:
+        g_app.static_buffer_dirty = 1;
         update_tool_rect();
         return 0;
     case WM_MOUSEWHEEL:
@@ -3320,6 +3911,9 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         KillTimer(hwnd, REFRESH_TIMER_ID);
         KillTimer(hwnd, ANIMATION_TIMER_ID);
         stop_animation_frame_timer(1);
+        clear_indicator_bitmap_cache();
+        release_widget_buffer(&g_app.static_buffer);
+        release_widget_buffer(&g_app.frame_buffer);
         if (g_app.font != NULL) {
             DeleteObject(g_app.font);
             g_app.font = NULL;

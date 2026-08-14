@@ -124,6 +124,16 @@ if [[ "$INSTALL_HOOKS" == "1" ]]; then
   fi
 fi
 
+# 可选：为 OpenCode 安装生命周期 hook（SQLite 只读轮询仍然工作；不安装时跳过）。
+INSTALL_OPENCODE_HOOKS="${INSTALL_OPENCODE_HOOKS:-0}"
+if [[ "$INSTALL_OPENCODE_HOOKS" == "1" ]]; then
+  if [[ "$SERVICE_USER" == "$(id -un)" ]]; then
+    HOME="$SERVICE_HOME" PYTHONPATH="$REPO_ROOT/src" "$PYTHON_BIN" -m codex_cli_monitor.install_opencode_hooks --config-dir "$SERVICE_HOME/.config/opencode" --repo-root "$REPO_ROOT" || true
+  else
+    "${SUDO[@]}" -u "$SERVICE_USER" env HOME="$SERVICE_HOME" PYTHONPATH="$REPO_ROOT/src" "$PYTHON_BIN" -m codex_cli_monitor.install_opencode_hooks --config-dir "$SERVICE_HOME/.config/opencode" --repo-root "$REPO_ROOT" || true
+  fi
+fi
+
 # 停止旧的自管 daemon，避免它占用同一个端口或 PID 文件。
 if [[ "$SERVICE_USER" == "$(id -un)" ]]; then
   HOME="$SERVICE_HOME" PYTHONPATH="$REPO_ROOT/src" "$PYTHON_BIN" -m codex_cli_monitor --stop || true

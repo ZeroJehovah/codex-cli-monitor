@@ -140,6 +140,56 @@ class TerminalStateTests(unittest.TestCase):
         self.assertTrue(completed[0].terminal_event)
         self.assertFalse(completed[0].failed_event)
 
+    def test_process_fd_completion_keeps_matching_task_start_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "codex-home"
+            proc = root / "proc"
+            fd_dir = proc / "100" / "fd"
+            fd_dir.mkdir(parents=True)
+            session_id = "019fb176-333f-7071-aa87-1d1837579794"
+            path = _path(home, session_id)
+            path.parent.mkdir(parents=True)
+            _append_terminal(path, "turn-goal", "task_started")
+            (fd_dir / "14").symlink_to(path)
+            started_at = scan_process_terminal_activities(
+                100,
+                proc_root=proc,
+                codex_home=home,
+            )[0].turn_started_at
+            _append_terminal(path, "turn-goal", "task_complete", error=None)
+
+            completed = scan_process_terminal_activities(
+                100,
+                proc_root=proc,
+                codex_home=home,
+            )
+
+        self.assertEqual(completed[0].turn_started_at, started_at)
+        self.assertTrue(completed[0].terminal_event)
+
+    def test_process_fd_terminal_without_matching_start_has_no_start_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "codex-home"
+            proc = root / "proc"
+            fd_dir = proc / "100" / "fd"
+            fd_dir.mkdir(parents=True)
+            session_id = "019fb176-333f-7071-aa87-1d1837579794"
+            path = _path(home, session_id)
+            path.parent.mkdir(parents=True)
+            _append_terminal(path, "turn-other", "task_started")
+            _append_terminal(path, "turn-goal", "task_complete", error=None)
+            (fd_dir / "14").symlink_to(path)
+
+            completed = scan_process_terminal_activities(
+                100,
+                proc_root=proc,
+                codex_home=home,
+            )
+
+        self.assertIsNone(completed[0].turn_started_at)
+
     def test_large_open_session_recovers_active_turn_from_bounded_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -50,7 +50,7 @@ class AggregationTests(unittest.TestCase):
 
         self.assertEqual(
             set(snapshot["sessions"][0]),
-            {"pid", "status", "directory", "started_at"},
+            {"pid", "status", "cli_type", "directory", "started_at"},
         )
 
         store.ingest(snapshot, received_at=100.0)

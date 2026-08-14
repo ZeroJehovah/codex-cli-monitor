@@ -53,7 +53,7 @@ class WidgetAnimationTests(unittest.TestCase):
 
     def test_running_glow_uses_one_continuous_luminous_field(self) -> None:
         glow_match = re.search(
-            r"static void fill_luminous_indicator\((?P<body>.*?)\n\}\n\n"
+            r"static void fill_luminous_indicator_direct\((?P<body>.*?)\n\}\n\n"
             r"static void draw_status_indicator",
             self.source,
             re.DOTALL,
@@ -84,6 +84,22 @@ class WidgetAnimationTests(unittest.TestCase):
         running_body = running_match.group("body")
         self.assertEqual(running_body.count("fill_luminous_indicator("), 1)
         self.assertNotIn("fill_soft_indicator(", running_body)
+
+    def test_widget_caches_indicator_bitmaps_and_reuses_buffers(self) -> None:
+        self.assertIn("INDICATOR_BITMAP_CACHE_CAPACITY", self.source)
+        self.assertIn("CreateDIBSection", self.source)
+        self.assertIn("AlphaBlend", self.source)
+        self.assertIn("clear_indicator_bitmap_cache();", self.source)
+        buffer_match = re.search(
+            r"static void paint_widget_buffered\(.*?\n\}",
+            self.source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(buffer_match)
+        buffer_body = buffer_match.group(0)
+        self.assertIn("ensure_widget_buffer", buffer_body)
+        self.assertNotIn("CreateCompatibleBitmap", buffer_body)
+        self.assertNotIn("DeleteObject(bitmap)", buffer_body)
 
 
 if __name__ == "__main__":

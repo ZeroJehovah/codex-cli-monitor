@@ -185,9 +185,56 @@ class MonitorTests(unittest.TestCase):
         self.assertIsNone(sessions[0].hook_state)
         self.assertEqual(sessions[0].binding_method, "process_fd_session_id")
 
-    def test_task_started_fd_does_not_display_process_without_any_prompt_hook(self) -> None:
+    def test_direct_goal_task_started_displays_without_prompt_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _root, proc, home, hook_log = _runtime(tmp)
+            session_id = "019fb176-333f-7071-aa87-1d1837579794"
+            path = _write_terminal(home, session_id, "turn-auto", "task_started")
+            _bind_open_session(proc, 100, path, 14)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertEqual(sessions[0].inference.status, "running_terminal")
+        self.assertIsNone(sessions[0].hook_state)
+        self.assertEqual(sessions[0].binding_method, "process_fd_session_id")
+
+    def test_direct_goal_completion_remains_displayed_without_prompt_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            session_id = "019fb176-333f-7071-aa87-1d1837579794"
+            path = _write_terminal(home, session_id, "turn-auto", "task_started")
+            _append_terminal(path, "turn-auto", "task_complete", error=None)
+            _bind_open_session(proc, 100, path, 14)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertEqual(sessions[0].inference.status, "success_terminal")
+
+    def test_process_does_not_inherit_goal_started_before_process_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            session_id = "019fb176-333f-7071-aa87-1d1837579794"
+            path = _write_terminal(
+                home,
+                session_id,
+                "turn-old",
+                "task_started",
+                timestamp=time.time() - 300,
+            )
+            _bind_open_session(proc, 100, path, 14)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(sessions, ())
+
+    def test_direct_goal_requires_known_process_start_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            (proc / "uptime").unlink()
             session_id = "019fb176-333f-7071-aa87-1d1837579794"
             path = _write_terminal(home, session_id, "turn-auto", "task_started")
             _bind_open_session(proc, 100, path, 14)
@@ -324,6 +371,7 @@ def _write_terminal(
     event_type: str,
     *,
     error: object = "absent",
+    timestamp: float | None = None,
 ) -> Path:
     payload: dict[str, object] = {"type": event_type, "turn_id": turn_id}
     if error != "absent":
@@ -331,7 +379,12 @@ def _write_terminal(
     path = _session_path(home, session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "timestamp": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(timestamp),
+        )
+        if timestamp is not None
+        else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "type": "event_msg",
         "payload": payload,
     }
@@ -339,6 +392,27 @@ def _write_terminal(
 
     path.write_text(json.dumps(record) + "\n", encoding="utf-8")
     return path
+
+
+def _append_terminal(
+    path: Path,
+    turn_id: str,
+    event_type: str,
+    *,
+    error: object = "absent",
+) -> None:
+    payload: dict[str, object] = {"type": event_type, "turn_id": turn_id}
+    if error != "absent":
+        payload["error"] = error
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "type": "event_msg",
+        "payload": payload,
+    }
+    import json
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
 
 
 def _session_path(home: Path, session_id: str) -> Path:

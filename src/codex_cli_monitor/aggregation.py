@@ -237,6 +237,7 @@ def _local_session_payload(
         "pid": root.pid,
         "ppid": root.ppid,
         "status": session.display_status,
+        "cli_type": getattr(session, "cli_type", "codex"),
         "directory": root.cwd,
         "started_at": root.started_at,
         "started_at_iso": _timestamp_iso(root.started_at),
@@ -263,6 +264,7 @@ def _collector_session_payload(session: CodexSession) -> dict:
     return {
         "pid": root.pid,
         "status": session.display_status,
+        "cli_type": getattr(session, "cli_type", "codex"),
         "directory": root.cwd,
         "started_at": root.started_at,
     }
@@ -287,6 +289,9 @@ def _remote_session_payload(
         4096,
     )
     started_at = _optional_float(item.get("started_at"))
+    cli_type = _optional_limited_str(item.get("cli_type"), "session cli_type", 32)
+    if cli_type not in {"codex", "opencode"}:
+        cli_type = "codex"
     return {
         "server_id": identity.server_id,
         "server_name": identity.server_name,
@@ -296,6 +301,7 @@ def _remote_session_payload(
         "pid": pid,
         "ppid": _optional_int(item.get("ppid")),
         "status": status,
+        "cli_type": cli_type,
         "directory": directory,
         "started_at": started_at,
         "started_at_iso": _timestamp_iso(started_at),
