@@ -98,6 +98,7 @@ def discover_sessions(
                 hook_states=hook_states_by_pid[root.pid],
                 proc_root=proc_root,
                 codex_home=state_home,
+                allow_preexisting_fd_lifecycle=_is_tmux_hosted(root, processes),
             )
             if not candidates:
                 continue
@@ -239,6 +240,7 @@ def _lifecycle_candidates_for_root(
     hook_states: tuple[HookSessionState, ...],
     proc_root: Path,
     codex_home: Path,
+    allow_preexisting_fd_lifecycle: bool = False,
 ) -> tuple[_LifecycleCandidate, ...]:
     displayable_hook_states = tuple(
         state for state in hook_states if state.has_turn_activity
@@ -254,8 +256,25 @@ def _lifecycle_candidates_for_root(
         codex_home=codex_home,
         cwd=root.cwd,
     ):
-        if not _is_new_fd_lifecycle(activity, displayable_hook_states, root):
+        if not _is_new_fd_lifecycle(
+            activity,
+            displayable_hook_states,
+            root,
+            allow_preexisting=allow_preexisting_fd_lifecycle,
+        ):
             continue
+        binding_evidence = [
+            "session file bound by an open file descriptor on the Codex PID",
+            "lifecycle event bound by the file session_id and structured turn_id",
+        ]
+        if (
+            allow_preexisting_fd_lifecycle
+            and activity.turn_started_at is not None
+            and _is_before_process_start(activity.turn_started_at, root)
+        ):
+            binding_evidence.append(
+                "live tmux ancestry permits the exact open resumed lifecycle"
+            )
         candidates.append(
             _LifecycleCandidate(
                 hook_state=None,
@@ -264,10 +283,7 @@ def _lifecycle_candidates_for_root(
                 updated_at=activity.last_record_at or 0.0,
                 binding_method="process_fd_session_id",
                 binding_confidence=1.0,
-                binding_evidence=(
-                    "session file bound by an open file descriptor on the Codex PID",
-                    "lifecycle event bound by the file session_id and structured turn_id",
-                ),
+                binding_evidence=tuple(binding_evidence),
             )
         )
     return tuple(candidates)
@@ -311,12 +327,24 @@ def _is_new_fd_lifecycle(
     activity: SessionActivity,
     hook_states: tuple[HookSessionState, ...],
     root: ProcessInfo,
+    *,
+    allow_preexisting: bool = False,
 ) -> bool:
-    turn_started_at = activity.turn_started_at
+    lifecycle_at = activity.turn_started_at
+    if allow_preexisting and activity.terminal_event:
+        lifecycle_at = activity.terminal_event_at
+    preexisting_active = (
+        allow_preexisting
+        and activity.turn_active
+        and activity.turn_started_at is not None
+    )
     if (
-        turn_started_at is None
+        lifecycle_at is None
         or root.started_at is None
-        or _is_before_process_start(turn_started_at, root)
+        or (
+            not preexisting_active
+            and _is_before_process_start(lifecycle_at, root)
+        )
     ):
         return False
     same_session = tuple(
@@ -329,7 +357,7 @@ def _is_new_fd_lifecycle(
         for state in same_session
     ):
         return False
-    return turn_started_at > max(state.updated_at for state in same_session)
+    return lifecycle_at > max(state.updated_at for state in same_session)
 
 
 def _select_lifecycle_candidate(
@@ -435,6 +463,29 @@ def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, .
         if processes[pid].ppid not in visible_codex_pids
     )
     return tuple(sorted(roots, key=lambda process: process.pid))
+
+
+def _is_tmux_hosted(
+    process: ProcessInfo,
+    processes: dict[int, ProcessInfo],
+) -> bool:
+    visited: set[int] = set()
+    pid = process.ppid
+    while pid is not None and pid > 0 and pid not in visited:
+        visited.add(pid)
+        ancestor = processes.get(pid)
+        if ancestor is None:
+            return False
+        if _is_tmux_process(ancestor):
+            return True
+        pid = ancestor.ppid
+    return False
+
+
+def _is_tmux_process(process: ProcessInfo) -> bool:
+    command = process.command_name.lower()
+    comm = (process.comm or "").lower()
+    return command in {"tmux", "tmux.exe"} or comm.startswith("tmux:")
 
 
 def _find_opencode_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, ...]:

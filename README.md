@@ -20,6 +20,10 @@
 
 - `/proc` 里的进程、父子关系、命令行、TTY、当前工作目录、进程启动时间，以及由准确
   Codex PID 持有的 session JSONL 文件描述符。
+- 对确认运行在活跃 tmux 进程树内的原生 Codex，准确 PID 打开的 session 文件可以用既有
+  的结构化生命周期恢复状态，即使恢复任务的 `task_started` 早于当前 Codex 进程启动。
+  tmux 外仍要求直接 Goal 的启动事件晚于进程启动；没有准确 session 文件和结构化生命
+  周期的进程不会仅因位于 tmux 中而显示。
 - Codex hooks 默认只写入 `UserPromptSubmit` 和 `Stop` 两个低频生命周期事件。
 - `$CODEX_HOME/sessions` 中与 Hook `session_id` 精确对应、或由准确 Codex PID 直接持有
   的 session JSONL；读取器增量读取有上限的文件尾。对于 PID 精确绑定的直接 Goal 或续跑

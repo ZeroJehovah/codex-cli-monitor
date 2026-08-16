@@ -97,6 +97,67 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].display_status, "运行中")
 
+    def test_tmux_resumed_goal_started_before_process_launch_is_displayed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _tmux_runtime(tmp)
+            session_id = "019fb176-333f-7071-aa87-1d1837579794"
+            path = _write_terminal(
+                home,
+                session_id,
+                "turn-resumed",
+                "task_started",
+                timestamp=time.time() - 300,
+            )
+            _bind_open_session(proc, 102, path, 35)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].root.pid, 102)
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertEqual(sessions[0].inference.status, "running_terminal")
+        self.assertEqual(sessions[0].binding_method, "process_fd_session_id")
+        self.assertIn("tmux", " ".join(sessions[0].binding_evidence))
+
+    def test_tmux_terminal_event_after_launch_keeps_resumed_goal_displayed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _tmux_runtime(tmp)
+            session_id = "019fb176-333f-7071-aa87-1d1837579794"
+            path = _write_terminal(
+                home,
+                session_id,
+                "turn-resumed",
+                "task_started",
+                timestamp=time.time() - 300,
+            )
+            _append_terminal(path, "turn-completed", "task_complete", error=None)
+            _bind_open_session(proc, 102, path, 35)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].root.pid, 102)
+        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertEqual(sessions[0].inference.status, "success_terminal")
+
+    def test_tmux_terminal_event_before_launch_does_not_create_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _tmux_runtime(tmp)
+            session_id = "019fb176-333f-7071-aa87-1d1837579794"
+            path = _write_terminal(
+                home,
+                session_id,
+                "turn-old",
+                "task_complete",
+                error=None,
+                timestamp=time.time() - 300,
+            )
+            _bind_open_session(proc, 102, path, 35)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(sessions, ())
+
     def test_turn_complete_error_displays_failure_without_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _root, proc, home, hook_log = _runtime(tmp)
@@ -378,6 +439,37 @@ def _runtime(tmp: str) -> tuple[Path, Path, Path, Path]:
     home.mkdir()
     _write_common_proc(proc)
     _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+    return root, proc, home, hook_log
+
+
+def _tmux_runtime(tmp: str) -> tuple[Path, Path, Path, Path]:
+    root = Path(tmp)
+    proc = root / "proc"
+    home = root / "codex-home"
+    hook_log = root / "hooks.jsonl"
+    proc.mkdir()
+    home.mkdir()
+    _write_common_proc(proc)
+    _write_process(
+        proc,
+        90,
+        "tmux: server",
+        "S",
+        1,
+        ["tmux", "new", "-s", "codex"],
+        "/work/a",
+    )
+    _write_process(proc, 100, "bash", "S", 90, ["bash"], "/work/a")
+    _write_process(proc, 101, "node", "S", 100, ["node", "codex"], "/work/a")
+    _write_process(
+        proc,
+        102,
+        "codex",
+        "S",
+        101,
+        ["/opt/codex/vendor/aarch64-unknown-linux-musl/bin/codex"],
+        "/work/a",
+    )
     return root, proc, home, hook_log
 
 
