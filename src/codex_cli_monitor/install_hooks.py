@@ -420,7 +420,7 @@ def _hook_command(repo_root: Path, event: str) -> str:
     return (
         f"{MONITOR_MARKER} PYTHONPATH={_shell_quote(str(module_path))} "
         f"python3 -S -m codex_cli_monitor.hooks {_shell_quote(event)} "
-        '--ppid "$PPID"'
+        '--ppid "$PPID" || true'
     )
 
 

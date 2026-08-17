@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -13,6 +14,7 @@ from unittest.mock import patch
 from codex_cli_monitor.install_hooks import (
     DEFAULT_HOOK_EVENTS,
     HooksConfigError,
+    _hook_command,
     _hook_command_windows,
     check_hooks,
     install_hooks,
@@ -75,6 +77,22 @@ class InstallHooksTests(unittest.TestCase):
         self.assertEqual(sum("CODEX_CLI_MONITOR_HOOK=1" in item for item in stop_commands), 1)
         monitor_command = next(item for item in stop_commands if "CODEX_CLI_MONITOR_HOOK=1" in item)
         self.assertIn('--ppid "$PPID"', monitor_command)
+        self.assertTrue(monitor_command.endswith(" || true"))
+
+    def test_generated_command_fails_open_before_hook_module_starts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            command = _hook_command(Path(tmp) / "missing-repo", "user_prompt_submit")
+            completed = subprocess.run(
+                command,
+                shell=True,
+                input=b'{"hook_event_name":"UserPromptSubmit"}\n',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn(b"codex_cli_monitor", completed.stderr)
 
     def test_tool_events_require_explicit_option(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
