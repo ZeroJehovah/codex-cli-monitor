@@ -290,7 +290,7 @@ def _remote_session_payload(
     )
     started_at = _optional_float(item.get("started_at"))
     cli_type = _optional_limited_str(item.get("cli_type"), "session cli_type", 32)
-    if cli_type not in {"codex", "opencode"}:
+    if cli_type not in {"codex", "opencode", "claude"}:
         cli_type = "codex"
     return {
         "server_id": identity.server_id,

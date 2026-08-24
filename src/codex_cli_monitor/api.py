@@ -26,6 +26,7 @@ from .hook_state import hook_log_health
 from .install_hooks import check_hooks
 from .models import CodexSession
 from .monitor import discover_sessions
+from .claude_state import claude_state_health
 from .opencode_hook_state import opencode_hook_log_health
 from .opencode_state import opencode_db_path
 
@@ -199,6 +200,7 @@ def make_api_handler(
                     "server": identity.to_dict(),
                     "hooks": build_hook_health(config.codex_home, config.hook_log),
                     "opencode_hooks": _opencode_hook_health(config),
+                    "claude_state": claude_state_health(),
                 }
                 if collector_status_provider is not None:
                     payload["collector"] = collector_status_provider()

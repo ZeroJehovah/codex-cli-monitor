@@ -241,6 +241,16 @@ def is_opencode_process(process: ProcessInfo) -> bool:
     return bool(_process_names(process).intersection({"opencode", "opencode.exe"}))
 
 
+def is_claude_process(process: ProcessInfo) -> bool:
+    """True for a native Claude Code CLI process (``claude``).
+
+    The installed binary is named ``claude.exe`` on every platform, so the
+    executable name is matched alongside the ``claude`` command and comm
+    values.
+    """
+    return bool(_process_names(process).intersection({"claude", "claude.exe"}))
+
+
 def _process_names(process: ProcessInfo) -> set[str]:
     names = {
         _clean_process_name(Path(value).name)

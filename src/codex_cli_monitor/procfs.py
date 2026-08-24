@@ -126,6 +126,7 @@ def _read_process(
         process_group_id=process_group_id,
         session_id=session_id,
         foreground_process_group_id=foreground_process_group_id,
+        start_ticks=start_ticks,
     )
 
 

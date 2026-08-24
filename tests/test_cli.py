@@ -120,7 +120,11 @@ class CliTests(unittest.TestCase):
 
         text = stdout.getvalue()
         self.assertEqual(result, 0)
-        self.assertIn("Open Codex sessions: 0", text)
+        self.assertIn("Open CLI sessions: 0", text)
+        self.assertIn(
+            "No open Codex, OpenCode, or Claude Code CLI sessions found.",
+            text,
+        )
 
     def test_text_output_uses_display_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

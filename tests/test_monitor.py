@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+import json
+import os
 import tempfile
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+from codex_cli_monitor.claude_state import (
+    encode_project_dir,
+    reset_caches as reset_claude_caches,
+)
 from codex_cli_monitor.hook_state import append_hook_event
 from codex_cli_monitor.monitor import discover_sessions, inspect_runtime
 from codex_cli_monitor.terminal_state import MAX_INITIAL_TAIL_BYTES
+
+
+CLAUDE_SESSION_ID = "c578535a-e73e-4f74-86dd-af2273c5375b"
+CLAUDE_CWD = "/work/claude"
 
 
 class MonitorTests(unittest.TestCase):
@@ -428,6 +439,154 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual(len(sessions), 1)
         self.assertEqual(summary.codex_home, str(home))
+
+
+class ClaudeMonitorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_claude_caches()
+
+    def test_unregistered_claude_process_is_not_displayed(self) -> None:
+        with _claude_runtime() as (proc, claude_home):
+            (claude_home / "sessions").mkdir(parents=True)
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(sessions, ())
+
+    def test_busy_claude_session_displays_running(self) -> None:
+        with _claude_runtime() as (proc, claude_home):
+            _write_claude_registration(claude_home, status="busy")
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        session = sessions[0]
+        self.assertEqual(session.root.pid, 300)
+        self.assertEqual(session.cli_type, "claude")
+        self.assertEqual(session.display_status, "运行中")
+        self.assertEqual(session.inference.status, "running_terminal")
+        self.assertEqual(session.binding_method, "claude_session_registration")
+        self.assertEqual(session.binding_confidence, 1.0)
+        self.assertFalse(session.binding_ambiguous)
+        self.assertEqual(session.inference.evidence[0].signal, "claude_session")
+
+    def test_idle_claude_session_without_a_turn_is_not_displayed(self) -> None:
+        with _claude_runtime() as (proc, claude_home):
+            _write_claude_registration(claude_home, status="idle")
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(sessions, ())
+
+    def test_completed_claude_turn_displays_success(self) -> None:
+        with _claude_runtime() as (proc, claude_home):
+            _write_claude_registration(claude_home, status="idle")
+            _write_claude_transcript(
+                claude_home,
+                [
+                    {"type": "user", "origin": {"kind": "human"}},
+                    {"type": "assistant"},
+                ],
+            )
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertEqual(sessions[0].inference.status, "success_terminal")
+        self.assertEqual(
+            sessions[0].inference.evidence[0].signal,
+            "claude_transcript",
+        )
+
+    def test_failed_claude_turn_displays_failure(self) -> None:
+        with _claude_runtime() as (proc, claude_home):
+            _write_claude_registration(claude_home, status="idle")
+            _write_claude_transcript(
+                claude_home,
+                [
+                    {"type": "user", "origin": {"kind": "human"}},
+                    {"type": "assistant", "isApiErrorMessage": True},
+                ],
+            )
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "失败")
+        self.assertEqual(sessions[0].inference.status, "failure_terminal")
+
+    def test_reused_pid_registration_is_not_displayed(self) -> None:
+        with _claude_runtime() as (proc, claude_home):
+            _write_claude_registration(claude_home, status="busy", proc_start=999999)
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(sessions, ())
+
+    def test_claude_and_codex_sessions_coexist(self) -> None:
+        with _claude_runtime() as (proc, claude_home):
+            hook_log = claude_home.parent / "hooks.jsonl"
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            _hook(hook_log, "user_prompt_submit", "session-a", "turn-a")
+            _write_claude_registration(claude_home, status="busy")
+
+            sessions = discover_sessions(proc, hook_log=hook_log)
+
+        self.assertEqual([session.root.pid for session in sessions], [100, 300])
+        self.assertEqual(
+            [session.cli_type for session in sessions],
+            ["codex", "claude"],
+        )
+
+
+@contextmanager
+def _claude_runtime():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        proc = root / "proc"
+        claude_home = root / "claude-home"
+        proc.mkdir()
+        _write_common_proc(proc)
+        _write_process(proc, 300, "claude", "S", 1, ["claude"], CLAUDE_CWD)
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude_home)}):
+            yield proc, claude_home
+
+
+def _write_claude_registration(
+    claude_home: Path,
+    status: str,
+    pid: int = 300,
+    proc_start: int = 100,
+) -> None:
+    sessions = claude_home / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / f"{pid}.json").write_text(
+        json.dumps(
+            {
+                "pid": pid,
+                "procStart": proc_start,
+                "sessionId": CLAUDE_SESSION_ID,
+                "cwd": CLAUDE_CWD,
+                "kind": "interactive",
+                "entrypoint": "cli",
+                "status": status,
+                "startedAt": 1_700_000_000_000,
+                "updatedAt": 1_700_000_050_000,
+                "statusUpdatedAt": 1_700_000_050_000,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_claude_transcript(claude_home: Path, records: list[dict]) -> None:
+    directory = claude_home / "projects" / encode_project_dir(CLAUDE_CWD)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{CLAUDE_SESSION_ID}.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
 
 
 def _runtime(tmp: str) -> tuple[Path, Path, Path, Path]:

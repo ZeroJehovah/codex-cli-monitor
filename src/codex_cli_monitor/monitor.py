@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Callable
 
 from .classify import (
+    is_claude_process,
     is_codex_exec_process,
     is_native_codex_process,
     is_opencode_process,
 )
+from .claude_state import ClaudeSessionState, claude_session_state
 from .codex_state import default_codex_home
 from .hook_state import HookSessionState, load_hook_events, summarize_hook_events
 from .models import (
@@ -80,7 +82,8 @@ def discover_sessions(
     processes = read_processes(proc_root)
     codex_roots = _find_codex_roots(processes)
     opencode_roots = _find_opencode_roots(processes)
-    if not codex_roots and not opencode_roots:
+    claude_roots = _find_claude_roots(processes)
+    if not codex_roots and not opencode_roots and not claude_roots:
         return ()
 
     sessions: list[CodexSession] = []
@@ -129,7 +132,82 @@ def discover_sessions(
         sessions.extend(
             _discover_opencode_sessions(opencode_roots, processes)
         )
+    if claude_roots:
+        sessions.extend(_discover_claude_sessions(claude_roots, processes))
     return tuple(sorted(sessions, key=lambda session: session.root.pid))
+
+
+def _discover_claude_sessions(
+    roots: tuple[ProcessInfo, ...],
+    processes: dict[int, ProcessInfo],
+) -> tuple[CodexSession, ...]:
+    sessions: list[CodexSession] = []
+    for root in roots:
+        state = claude_session_state(root)
+        if state is None:
+            continue
+        sessions.append(
+            CodexSession(
+                root=root,
+                descendants=tuple(_collect_descendants(root.pid, processes)),
+                connections=(),
+                inference=_claude_inference(state),
+                state_activity=None,
+                hook_state=None,
+                launch_record=None,
+                display_status=state.status,
+                binding_method="claude_session_registration",
+                binding_confidence=1.0,
+                binding_ambiguous=False,
+                binding_candidate_count=1,
+                binding_evidence=(
+                    "process bound by the Claude Code PID registration and its "
+                    "recorded process start time",
+                    "lifecycle status read read-only from the registration and "
+                    "the bound session transcript",
+                ),
+                cli_type="claude",
+            )
+        )
+    return tuple(sessions)
+
+
+def _claude_inference(state: ClaudeSessionState) -> Inference:
+    if state.status == "运行中":
+        return Inference(
+            status="running_terminal",
+            confidence=1.0,
+            evidence=(
+                Evidence(
+                    "claude_session",
+                    f"Claude Code session {state.session_id} reported status "
+                    f"{state.registered_status!r} with an open turn.",
+                ),
+            ),
+        )
+    if state.status == "失败":
+        return Inference(
+            status="failure_terminal",
+            confidence=1.0,
+            evidence=(
+                Evidence(
+                    "claude_transcript",
+                    f"Claude Code session {state.session_id} ended its last turn "
+                    "with a structured API error or mid-stream abort.",
+                ),
+            ),
+        )
+    return Inference(
+        status="success_terminal",
+        confidence=1.0,
+        evidence=(
+            Evidence(
+                "claude_transcript",
+                f"Claude Code session {state.session_id} completed its last turn; "
+                f"last activity {_age_description(state.last_activity_at)}.",
+            ),
+        ),
+    )
 
 
 def _discover_opencode_sessions(
@@ -502,6 +580,24 @@ def _find_opencode_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo
         processes[pid]
         for pid in visible_opencode_pids
         if processes[pid].ppid not in visible_opencode_pids
+    )
+    return tuple(sorted(roots, key=lambda process: process.pid))
+
+
+def _find_claude_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, ...]:
+    claude_pids = {
+        pid for pid, process in processes.items() if is_claude_process(process)
+    }
+    visible_claude_pids = {
+        pid
+        for pid in claude_pids
+        if processes[pid].state not in INACTIVE_ROOT_STATES
+        and not _is_confirmed_detached_terminal_root(processes[pid], processes)
+    }
+    roots = (
+        processes[pid]
+        for pid in visible_claude_pids
+        if processes[pid].ppid not in visible_claude_pids
     )
     return tuple(sorted(roots, key=lambda process: process.pid))
 

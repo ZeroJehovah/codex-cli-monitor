@@ -66,6 +66,27 @@ class AggregationTests(unittest.TestCase):
         with self.assertRaises(SnapshotValidationError):
             RemoteSnapshotStore().ingest(snapshot, received_at=11.0)
 
+    def test_remote_snapshot_preserves_known_cli_types(self) -> None:
+        identity = ServerIdentity("server-a", "Server A", "boot-a")
+        for cli_type in ("codex", "opencode", "claude"):
+            with self.subTest(cli_type=cli_type):
+                snapshot = build_collector_snapshot(
+                    (_session(100, cli_type=cli_type),),
+                    identity,
+                    observed_at=10.0,
+                )
+                ingested = RemoteSnapshotStore().ingest(snapshot, received_at=11.0)
+                self.assertEqual(ingested.sessions[0]["cli_type"], cli_type)
+
+    def test_remote_snapshot_falls_back_to_codex_for_unknown_cli_types(self) -> None:
+        identity = ServerIdentity("server-a", "Server A", "boot-a")
+        snapshot = build_collector_snapshot((_session(100),), identity, observed_at=10.0)
+        snapshot["sessions"][0]["cli_type"] = "some-future-cli"
+
+        ingested = RemoteSnapshotStore().ingest(snapshot, received_at=11.0)
+
+        self.assertEqual(ingested.sessions[0]["cli_type"], "codex")
+
     def test_combined_payload_keeps_same_pid_separate_by_server(self) -> None:
         local_identity = ServerIdentity("local", "Local", "boot-local")
         remote_identity = ServerIdentity("remote", "Remote", "boot-remote")
@@ -283,6 +304,16 @@ class AggregationTests(unittest.TestCase):
         self.assertIn("installation", payload["hooks"])
         self.assertIn("signal_state", payload["hooks"])
         self.assertEqual(payload["hooks"]["installation"]["trust_state"], "unknown")
+        self.assertEqual(
+            set(payload["claude_state"]),
+            {
+                "home",
+                "home_exists",
+                "sessions_dir_exists",
+                "projects_dir_exists",
+                "registered_sessions",
+            },
+        )
         self.assertNotIn("token", json.dumps(payload).lower())
 
     def test_collector_logs_timestamped_failure_and_recovery(self) -> None:
@@ -312,16 +343,16 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual(status["consecutive_failures"], 0)
 
 
-def _session(pid: int) -> CodexSession:
+def _session(pid: int, cli_type: str = "codex") -> CodexSession:
     return CodexSession(
         root=ProcessInfo(
             pid=pid,
             ppid=1,
-            comm="codex",
+            comm=cli_type,
             state="S",
-            cmdline=("codex",),
+            cmdline=(cli_type,),
             cwd="/work/project",
-            exe="/usr/bin/codex",
+            exe=f"/usr/bin/{cli_type}",
             tty="/dev/pts/1",
             tty_nr=1,
             elapsed_seconds=5.0,
@@ -332,6 +363,7 @@ def _session(pid: int) -> CodexSession:
         connections=(),
         inference=Inference("waiting_user_likely", 0.9, ()),
         display_status="成功",
+        cli_type=cli_type,
     )
 
 

@@ -521,9 +521,9 @@ def _is_monitor_api_process(pid: int) -> bool | None:
 
 def _print_table(sessions: tuple, codex_state) -> None:
     _print_codex_state(codex_state)
-    print(f"Open Codex sessions: {len(sessions)}")
+    print(f"Open CLI sessions: {len(sessions)}")
     if not sessions:
-        print("No open Codex CLI sessions found.")
+        print("No open Codex, OpenCode, or Claude Code CLI sessions found.")
         return
 
     rows = []

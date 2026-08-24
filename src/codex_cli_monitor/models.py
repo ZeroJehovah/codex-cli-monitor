@@ -157,6 +157,7 @@ class ProcessInfo:
     foreground_process_group_id: int | None = None
     cpu_delta_seconds: float | None = None
     children: tuple[int, ...] = field(default_factory=tuple)
+    start_ticks: int | None = None
 
     @property
     def command_name(self) -> str:
@@ -185,6 +186,7 @@ class ProcessInfo:
             "foreground_process_group_id": self.foreground_process_group_id,
             "cpu_delta_seconds": self.cpu_delta_seconds,
             "children": list(self.children),
+            "start_ticks": self.start_ticks,
         }
 
 

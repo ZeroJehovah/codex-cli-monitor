@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from codex_cli_monitor.classify import infer_status, is_codex_process
+from codex_cli_monitor.classify import (
+    infer_status,
+    is_claude_process,
+    is_codex_process,
+)
 from codex_cli_monitor.hook_state import HookSessionState
 from codex_cli_monitor.models import NetworkConnection, ProcessInfo, SessionActivity
 
@@ -219,6 +223,23 @@ class ClassifyTests(unittest.TestCase):
         )
 
         self.assertTrue(is_codex_process(process))
+
+    def test_claude_cli_process_is_recognized(self) -> None:
+        self.assertTrue(is_claude_process(_process(100, "claude", tty="/dev/pts/1")))
+
+    def test_claude_exe_suffix_is_recognized(self) -> None:
+        process = _process(
+            100,
+            "claude",
+            cmdline=("/home/user/.local/bin/claude.exe", "--continue"),
+            tty="/dev/pts/1",
+        )
+
+        self.assertTrue(is_claude_process(process))
+
+    def test_unrelated_process_is_not_claude(self) -> None:
+        self.assertFalse(is_claude_process(_process(100, "node", tty="/dev/pts/1")))
+        self.assertFalse(is_claude_process(_process(101, "codex", tty="/dev/pts/1")))
 
 
 def _process(
