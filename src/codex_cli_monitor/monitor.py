@@ -15,10 +15,22 @@ from .claude_state import ClaudeSessionState, claude_session_state
 from .codex_state import default_codex_home
 from .hook_state import HookSessionState, load_hook_events, summarize_hook_events
 from .models import (
+    OPEN_TURN_STATUSES,
+    STATUS_FAILURE,
+    STATUS_RUNNING,
+    STATUS_SUCCESS,
+    STATUS_WAITING,
     Evidence,
     Inference,
     ProcessInfo,
     SessionActivity,
+    normalize_waiting_reason,
+)
+from .opencode_decisions import (
+    PendingDecision,
+    default_opencode_decision_log_path,
+    find_pending_decision,
+    pending_decisions,
 )
 from .opencode_state import (
     OpenCodeSessionState,
@@ -34,6 +46,9 @@ from .models import CodexSession, CodexStateSummary
 
 
 INACTIVE_ROOT_STATES = {"T", "t", "Z", "X", "x"}
+
+# Label used when Codex reports an approval prompt without naming the tool.
+DEFAULT_CODEX_WAITING_REASON = "approval prompt"
 
 
 @dataclass(frozen=True)
@@ -126,6 +141,7 @@ def discover_sessions(
                     binding_candidate_count=len(candidates),
                     binding_evidence=selected.binding_evidence,
                     cli_type="codex",
+                    waiting_reason=_codex_waiting_reason(selected),
                 )
             )
     if opencode_roots:
@@ -167,13 +183,31 @@ def _discover_claude_sessions(
                     "the bound session transcript",
                 ),
                 cli_type="claude",
+                waiting_reason=state.waiting_for,
             )
         )
     return tuple(sessions)
 
 
 def _claude_inference(state: ClaudeSessionState) -> Inference:
-    if state.status == "运行中":
+    if state.status == STATUS_WAITING:
+        return Inference(
+            status="waiting_decision_registration",
+            confidence=1.0,
+            evidence=(
+                Evidence(
+                    "claude_session",
+                    f"Claude Code session {state.session_id} reported status "
+                    f"{state.registered_status!r}: the turn is open but blocked "
+                    f"on {state.waiting_for or 'a user decision'}.",
+                ),
+            ),
+            limitations=(
+                "the session cannot advance until the prompt is answered in the "
+                "Claude Code terminal",
+            ),
+        )
+    if state.status == STATUS_RUNNING:
         return Inference(
             status="running_terminal",
             confidence=1.0,
@@ -185,7 +219,7 @@ def _claude_inference(state: ClaudeSessionState) -> Inference:
                 ),
             ),
         )
-    if state.status == "失败":
+    if state.status == STATUS_FAILURE:
         return Inference(
             status="failure_terminal",
             confidence=1.0,
@@ -227,6 +261,7 @@ def _discover_opencode_sessions(
         by_id[state.session_id] = state
 
     hook_events = opencode_hook_events(default_opencode_hook_log_path())
+    decisions = pending_decisions(default_opencode_decision_log_path())
     sessions: list[CodexSession] = []
     for root in roots:
         state = _opencode_state_for_root(root, by_cwd, by_id, hook_events)
@@ -235,39 +270,92 @@ def _discover_opencode_sessions(
         binding_method = "opencode_hook_session_id" if _opencode_hook_confirms_root(
             root, hook_events
         ) else "opencode_sqlite_cwd"
+        decision = _opencode_pending_decision(state, root, decisions)
+        display_status = STATUS_WAITING if decision is not None else state.status
+        binding_evidence = [
+            "OpenCode process bound to session by current working directory",
+            "lifecycle status read read-only from the OpenCode SQLite database",
+        ]
+        if decision is not None:
+            binding_evidence.append(
+                "open prompt reported by the OpenCode decision plugin"
+            )
         sessions.append(
             CodexSession(
                 root=root,
                 descendants=tuple(_collect_descendants(root.pid, processes)),
                 connections=(),
-                inference=Inference(
-                    status=_opencode_inference_status(state.status),
-                    confidence=1.0,
-                    evidence=(
-                        Evidence(
-                            "opencode_sqlite",
-                            f"OpenCode session {state.session_id} "
-                            f"({state.status}); last activity "
-                            f"{_age_description(state.last_activity_at)}.",
-                        ),
-                    ),
-                ),
+                inference=_opencode_inference(state, decision),
                 state_activity=None,
                 hook_state=None,
                 launch_record=None,
-                display_status=state.status,
+                display_status=display_status,
                 binding_method=binding_method,
                 binding_confidence=1.0,
                 binding_ambiguous=False,
                 binding_candidate_count=1,
-                binding_evidence=(
-                    "OpenCode process bound to session by current working directory",
-                    "lifecycle status read read-only from the OpenCode SQLite database",
-                ),
+                binding_evidence=tuple(binding_evidence),
                 cli_type="opencode",
+                waiting_reason=decision.reason if decision is not None else None,
             )
         )
     return tuple(sessions)
+
+
+def _opencode_pending_decision(
+    state: OpenCodeSessionState,
+    root: ProcessInfo,
+    decisions: tuple[PendingDecision, ...],
+) -> PendingDecision | None:
+    """Return the open prompt blocking this OpenCode row, if there is one.
+
+    The overlay only ever relabels a turn the database already reports as open.
+    A decision marker left behind by a session that was killed at its prompt can
+    therefore never resurrect a finished row, and the monitor can never invent an
+    open turn that OpenCode does not have.
+    """
+    if not decisions or state.status != STATUS_RUNNING:
+        return None
+    return find_pending_decision(
+        decisions,
+        session_id=state.session_id,
+        directory=state.cwd or root.cwd,
+    )
+
+
+def _opencode_inference(
+    state: OpenCodeSessionState,
+    decision: PendingDecision | None,
+) -> Inference:
+    if decision is not None:
+        return Inference(
+            status="waiting_decision_plugin",
+            confidence=1.0,
+            evidence=(
+                Evidence(
+                    "opencode_decision_plugin",
+                    f"OpenCode session {state.session_id} opened a "
+                    f"{decision.kind} prompt ({decision.reason}) "
+                    f"{_age_description(decision.asked_at)} and it is unanswered.",
+                ),
+            ),
+            limitations=(
+                "the session cannot advance until the prompt is answered in the "
+                "OpenCode terminal",
+            ),
+        )
+    return Inference(
+        status=_opencode_inference_status(state.status),
+        confidence=1.0,
+        evidence=(
+            Evidence(
+                "opencode_sqlite",
+                f"OpenCode session {state.session_id} "
+                f"({state.status}); last activity "
+                f"{_age_description(state.last_activity_at)}.",
+            ),
+        ),
+    )
 
 
 def _opencode_state_for_root(
@@ -298,9 +386,9 @@ def _opencode_hook_confirms_root(
 
 
 def _opencode_inference_status(status: str) -> str:
-    if status == "运行中":
+    if status == STATUS_RUNNING:
         return "running_terminal"
-    if status == "失败":
+    if status == STATUS_FAILURE:
         return "failure_terminal"
     return "success_terminal"
 
@@ -441,10 +529,24 @@ def _is_new_fd_lifecycle(
 def _select_lifecycle_candidate(
     candidates: tuple[_LifecycleCandidate, ...],
 ) -> _LifecycleCandidate:
-    running = tuple(
-        candidate for candidate in candidates if candidate.display_status == "运行中"
+    # An open turn always wins over a finished one, whether it is advancing on
+    # its own or blocked on an approval prompt.  Among open turns the blocked one
+    # wins: this PID cannot finish until the user answers, and showing the
+    # neighbouring running session instead would hide exactly that.
+    open_turns = tuple(
+        candidate
+        for candidate in candidates
+        if candidate.display_status in OPEN_TURN_STATUSES
     )
-    return max(running or candidates, key=lambda candidate: candidate.updated_at)
+    waiting = tuple(
+        candidate
+        for candidate in open_turns
+        if candidate.display_status == STATUS_WAITING
+    )
+    return max(
+        waiting or open_turns or candidates,
+        key=lambda candidate: candidate.updated_at,
+    )
 
 
 def _lifecycle_display_status(
@@ -452,12 +554,48 @@ def _lifecycle_display_status(
     state_activity: SessionActivity | None,
 ) -> str:
     if state_activity is not None and state_activity.terminal_event:
-        return "失败" if state_activity.failed_event else "成功"
+        return STATUS_FAILURE if state_activity.failed_event else STATUS_SUCCESS
     if hook_state is not None:
-        return "运行中" if hook_state.in_turn else "成功"
+        if not hook_state.in_turn:
+            return STATUS_SUCCESS
+        return (
+            STATUS_WAITING
+            if _codex_awaiting_decision(hook_state, state_activity)
+            else STATUS_RUNNING
+        )
     if state_activity is not None and state_activity.turn_active:
-        return "运行中"
-    return "成功"
+        return STATUS_RUNNING
+    return STATUS_SUCCESS
+
+
+def _codex_awaiting_decision(
+    hook_state: HookSessionState,
+    state_activity: SessionActivity | None,
+) -> bool:
+    """True when Codex stopped at an approval prompt and has not moved on.
+
+    ``PermissionRequest`` is the only signal that Codex is waiting: the rollout
+    file writes the tool call before asking and its output only after the tool
+    finishes, so nothing there separates "waiting for approval" from "running".
+    A rollout record written *after* the prompt opened proves Codex resumed,
+    which releases the row even when the approved command runs long enough that
+    its ``PostToolUse`` edge is still pending.
+    """
+    pending_at = hook_state.permission_pending_at
+    if not hook_state.awaiting_decision or pending_at is None:
+        return False
+    if state_activity is None or state_activity.last_record_at is None:
+        return True
+    return state_activity.last_record_at <= pending_at
+
+
+def _codex_waiting_reason(candidate: _LifecycleCandidate) -> str | None:
+    if candidate.display_status != STATUS_WAITING or candidate.hook_state is None:
+        return None
+    return (
+        normalize_waiting_reason(candidate.hook_state.permission_tool)
+        or DEFAULT_CODEX_WAITING_REASON
+    )
 
 
 def _lifecycle_inference(
@@ -465,7 +603,7 @@ def _lifecycle_inference(
     hook_state: HookSessionState | None,
     state_activity: SessionActivity | None,
 ) -> Inference:
-    if display_status == "失败":
+    if display_status == STATUS_FAILURE:
         event_type = (
             state_activity.last_payload_type if state_activity is not None else "terminal"
         )
@@ -479,7 +617,24 @@ def _lifecycle_inference(
                 ),
             ),
         )
-    if display_status == "运行中":
+    if display_status == STATUS_WAITING:
+        tool = hook_state.permission_tool if hook_state is not None else None
+        return Inference(
+            status="waiting_decision_hook",
+            confidence=1.0,
+            evidence=(
+                Evidence(
+                    "codex_hook",
+                    "PermissionRequest opened an approval prompt for "
+                    f"{tool or 'a tool call'} and no later activity was recorded.",
+                ),
+            ),
+            limitations=(
+                "the turn cannot advance until the prompt is answered in the "
+                "Codex terminal",
+            ),
+        )
+    if display_status == STATUS_RUNNING:
         if hook_state is None:
             event_type = (
                 state_activity.last_payload_type

@@ -6,9 +6,11 @@ import unittest
 from pathlib import Path
 
 from codex_cli_monitor.claude_state import (
+    DEFAULT_WAITING_REASON,
     STATUS_FAILURE,
     STATUS_RUNNING,
     STATUS_SUCCESS,
+    STATUS_WAITING,
     TRANSCRIPT_TAIL_BYTES,
     claude_session_state,
     claude_state_health,
@@ -20,7 +22,7 @@ from codex_cli_monitor.claude_state import (
     reset_caches,
     resolve_transcript_path,
 )
-from codex_cli_monitor.models import ProcessInfo
+from codex_cli_monitor.models import MAX_WAITING_REASON_LENGTH, ProcessInfo
 
 
 SESSION_ID = "c578535a-e73e-4f74-86dd-af2273c5375b"
@@ -371,16 +373,66 @@ class ClaudeSessionStateTests(unittest.TestCase):
         self.assertEqual(state.session_id, SESSION_ID)
         self.assertEqual(state.cwd, CWD)
 
-    def test_shell_and_waiting_statuses_are_running(self) -> None:
-        for status in ("shell", "waiting"):
-            with self.subTest(status=status):
-                reset_caches()
-                with tempfile.TemporaryDirectory() as tmp:
-                    home = Path(tmp)
-                    _write_registration(home, _registration(status=status))
-                    state = claude_session_state(_process(), home)
-                assert state is not None
-                self.assertEqual(state.status, STATUS_RUNNING)
+    def test_shell_status_is_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_registration(home, _registration(status="shell"))
+            state = claude_session_state(_process(), home)
+        assert state is not None
+        self.assertEqual(state.status, STATUS_RUNNING)
+        self.assertTrue(state.turn_active)
+        self.assertIsNone(state.waiting_for)
+
+    def test_waiting_status_is_reported_as_a_pending_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_registration(
+                home,
+                _registration(status="waiting", waitingFor="goal proposal"),
+            )
+            state = claude_session_state(_process(), home)
+        assert state is not None
+        # The turn is open, but it is blocked on the user rather than advancing.
+        self.assertEqual(state.status, STATUS_WAITING)
+        self.assertTrue(state.turn_active)
+        self.assertEqual(state.waiting_for, "goal proposal")
+        self.assertEqual(state.to_dict()["waiting_for"], "goal proposal")
+
+    def test_waiting_status_without_a_label_uses_the_default_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_registration(home, _registration(status="waiting"))
+            state = claude_session_state(_process(), home)
+        assert state is not None
+        self.assertEqual(state.status, STATUS_WAITING)
+        self.assertEqual(state.waiting_for, DEFAULT_WAITING_REASON)
+
+    def test_waiting_label_is_clamped_and_stripped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_registration(
+                home,
+                _registration(status="waiting", waitingFor="  a\x07" + "b" * 200),
+            )
+            state = claude_session_state(_process(), home)
+        assert state is not None
+        assert state.waiting_for is not None
+        self.assertEqual(len(state.waiting_for), MAX_WAITING_REASON_LENGTH)
+        self.assertNotIn("\x07", state.waiting_for)
+        self.assertTrue(state.waiting_for.startswith("ab"))
+
+    def test_health_counts_registrations_blocked_on_a_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_registration(home, _registration(status="waiting"))
+            _write_registration(
+                home,
+                _registration(pid=4322, status="busy"),
+                pid=4322,
+            )
+            health = claude_state_health(home)
+        self.assertEqual(health["registered_sessions"], 2)
+        self.assertEqual(health["waiting_sessions"], 1)
 
     def test_unknown_status_falls_back_to_the_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

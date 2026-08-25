@@ -12,12 +12,18 @@ and carries exactly the minimal structural facts this monitor needs:
   ``entrypoint``.
 * ``status``, one of ``busy``/``shell``/``waiting``/``idle``, rewritten by
   Claude Code on every transition together with ``statusUpdatedAt``.
+* ``waitingFor``, a short label Claude Code persists alongside a ``waiting``
+  status naming the kind of decision it is blocked on (for example
+  ``permission prompt``, ``input needed``, ``dialog open``, ``goal proposal``).
 
-The registration alone decides ``运行中``: a session whose status is ``busy``
-(model or tool work in flight), ``shell`` (a shell command is running), or
-``waiting`` (an opened turn is blocked on a user decision) still has an open
-turn.  ``idle`` means no turn is in flight, so the outcome of the most recent
-turn is read from the bound transcript instead.
+The registration alone decides the open-turn status.  ``busy`` (model or tool
+work in flight) and ``shell`` (a shell command is running) mean the turn is
+advancing on its own, so they map to ``运行中``.  ``waiting`` means the turn is
+open but Claude Code has stopped and is blocked on a human decision - a plan or
+option choice, a permission prompt, an authorization request - so it maps to
+``待确认`` instead: reporting it as ``运行中`` would hide that the session needs
+manual action to continue.  ``idle`` means no turn is in flight, so the outcome
+of the most recent turn is read from the bound transcript instead.
 
 The transcript lives at
 ``~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl``.  Only a bounded tail is
@@ -42,21 +48,53 @@ from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
-from .models import ProcessInfo
+from .models import (
+    STATUS_FAILURE,
+    STATUS_RUNNING,
+    STATUS_SUCCESS,
+    STATUS_WAITING,
+    ProcessInfo,
+    normalize_waiting_reason,
+)
 
 CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 CLAUDE_SESSIONS_DIR = "sessions"
 CLAUDE_PROJECTS_DIR = "projects"
 
-STATUS_RUNNING = "运行中"
-STATUS_SUCCESS = "成功"
-STATUS_FAILURE = "失败"
+__all__ = [
+    "STATUS_FAILURE",
+    "STATUS_RUNNING",
+    "STATUS_SUCCESS",
+    "STATUS_WAITING",
+    "ClaudeSessionState",
+    "TranscriptOutcome",
+    "claude_session_state",
+    "claude_state_health",
+    "default_claude_home",
+    "read_session_registration",
+    "reset_caches",
+    "resolve_transcript_path",
+]
+
+# Status values Claude Code writes while a submitted turn is still open and is
+# advancing on its own.
+RUNNING_STATUSES = frozenset({"busy", "shell"})
+
+# Status value Claude Code writes while an opened turn is blocked on a human
+# decision.  The turn is still open, but nothing progresses until the user
+# answers, so it is surfaced as ``待确认`` rather than ``运行中``.
+WAITING_STATUSES = frozenset({"waiting"})
 
 # Status values Claude Code writes while a submitted turn is still open.  Any
 # other value (``idle`` or an unrecognized future status) falls back to the
-# structured transcript outcome so an unknown status can never pin a row to
-# ``运行中`` forever.
-WORKING_STATUSES = frozenset({"busy", "shell", "waiting"})
+# structured transcript outcome so an unknown status can never pin a row to an
+# open-turn status forever.
+WORKING_STATUSES = RUNNING_STATUSES | WAITING_STATUSES
+
+# Fallback label used when Claude Code reports ``waiting`` without a
+# ``waitingFor`` value; Claude Code itself defaults this case to a permission
+# prompt.
+DEFAULT_WAITING_REASON = "permission prompt"
 
 # Only interactive sessions represent a user Codex-style session.  Background,
 # daemon, and daemon-worker registrations are maintenance or automation
@@ -112,6 +150,7 @@ class ClaudeSessionState:
     failed_event: bool
     status: str
     transcript_path: str | None
+    waiting_for: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -131,6 +170,7 @@ class ClaudeSessionState:
             "failed_event": self.failed_event,
             "status": self.status,
             "transcript_path": self.transcript_path,
+            "waiting_for": self.waiting_for,
         }
 
 
@@ -231,6 +271,7 @@ def claude_session_state(
     transcript = resolve_transcript_path(session_id, cwd, home)
 
     if registered_status in WORKING_STATUSES:
+        blocked = registered_status in WAITING_STATUSES
         return ClaudeSessionState(
             pid=process.pid,
             session_id=session_id,
@@ -246,8 +287,9 @@ def claude_session_state(
             turn_active=True,
             terminal_event=False,
             failed_event=False,
-            status=STATUS_RUNNING,
+            status=STATUS_WAITING if blocked else STATUS_RUNNING,
             transcript_path=str(transcript) if transcript is not None else None,
+            waiting_for=_waiting_reason(data) if blocked else None,
         )
 
     outcome = read_transcript_outcome(transcript)
@@ -273,6 +315,20 @@ def claude_session_state(
         failed_event=outcome.failed_event,
         status=STATUS_FAILURE if outcome.failed_event else STATUS_SUCCESS,
         transcript_path=str(transcript) if transcript is not None else None,
+    )
+
+
+def _waiting_reason(data: Mapping) -> str:
+    """Return the short label naming what a blocked session is waiting for.
+
+    Claude Code writes ``waitingFor`` next to a ``waiting`` status.  Only that
+    single short label is read; it names the kind of decision (a permission
+    prompt, an option choice, a dialog) and never carries prompt, tool-input,
+    or tool-output text.
+    """
+    return (
+        normalize_waiting_reason(data.get("waitingFor"))
+        or DEFAULT_WAITING_REASON
     )
 
 
@@ -450,20 +506,27 @@ def claude_state_health(home: Path | None = None) -> dict[str, object]:
     sessions = claude_sessions_dir(home)
     projects = claude_projects_dir(home)
     registrations = 0
+    waiting = 0
     try:
         for index, entry in enumerate(sessions.iterdir()):
             if index >= MAX_REGISTRATION_FILES:
                 break
-            if entry.name.endswith(".json") and entry.name[:-5].isdecimal():
-                registrations += 1
+            if not (entry.name.endswith(".json") and entry.name[:-5].isdecimal()):
+                continue
+            registrations += 1
+            data = read_session_registration(int(entry.name[:-5]), home)
+            if data is not None and data.get("status") in WAITING_STATUSES:
+                waiting += 1
     except OSError:
         registrations = 0
+        waiting = 0
     return {
         "home": str(home),
         "home_exists": home.is_dir(),
         "sessions_dir_exists": sessions.is_dir(),
         "projects_dir_exists": projects.is_dir(),
         "registered_sessions": registrations,
+        "waiting_sessions": waiting,
     }
 
 

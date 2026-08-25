@@ -535,6 +535,7 @@ def _print_table(sessions: tuple, codex_state) -> None:
                 "PID": str(root.pid),
                 "CLI": session.cli_type,
                 "STATUS": session.display_status,
+                "WAITING FOR": session.waiting_reason or "-",
                 "CONF": f"{inference.confidence:.2f}",
                 "ELAPSED": _format_duration(root.elapsed_seconds),
                 "TTY": root.tty or "-",
@@ -543,7 +544,17 @@ def _print_table(sessions: tuple, codex_state) -> None:
             }
         )
 
-    headers = ["PID", "CLI", "STATUS", "CONF", "ELAPSED", "TTY", "CWD", "EVIDENCE"]
+    headers = [
+        "PID",
+        "CLI",
+        "STATUS",
+        "WAITING FOR",
+        "CONF",
+        "ELAPSED",
+        "TTY",
+        "CWD",
+        "EVIDENCE",
+    ]
     widths = {
         header: max(len(header), *(len(row[header]) for row in rows))
         for header in headers

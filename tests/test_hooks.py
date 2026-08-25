@@ -110,6 +110,45 @@ class HooksTests(unittest.TestCase):
             payload = json.loads(log_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["timestamp"], 42.5)
 
+    def test_permission_request_records_only_the_tool_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "hooks.jsonl"
+            incoming = {
+                "hook_event_name": "PermissionRequest",
+                "session_id": "session-1",
+                "turn_id": "turn-1",
+                "tool_name": "Bash",
+                "tool_use_id": "tool-1",
+                "cwd": "/work/a",
+                "tool_input": {"command": "rm -rf /secret"},
+                "permission_request": {"reason": "do not store"},
+            }
+            stdout = StringIO()
+            with patch.dict(os.environ, {"CODEX_MONITOR_HOOK_LOG": str(log_path)}), patch(
+                "sys.stdin", _stdin(json.dumps(incoming).encode())
+            ):
+                with redirect_stdout(stdout):
+                    self.assertEqual(hooks.main(["permission_request"]), 0)
+            payload = json.loads(log_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["event"], "permission_request")
+        self.assertEqual(payload["tool_name"], "Bash")
+        serialized = json.dumps(payload)
+        self.assertNotIn("do not store", serialized)
+        self.assertNotIn("rm -rf", serialized)
+        # Empty stdout is how Codex reads "no decision", so the approval prompt
+        # is left exactly as it would be without the hook installed.
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_permission_request_name_mismatch_is_dropped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "hooks.jsonl"
+            with patch.dict(os.environ, {"CODEX_MONITOR_HOOK_LOG": str(log_path)}), patch(
+                "sys.stdin", _stdin(b'{"hook_event_name":"PreToolUse"}')
+            ):
+                self.assertEqual(hooks.main(["permission_request"]), 0)
+            self.assertFalse(log_path.exists())
+
     def test_low_frequency_hook_handler_p95_is_under_twenty_milliseconds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "hooks.jsonl"

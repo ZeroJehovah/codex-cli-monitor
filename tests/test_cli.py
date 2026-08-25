@@ -171,6 +171,54 @@ class CliTests(unittest.TestCase):
         self.assertIn("成功", text)
         self.assertNotIn("waiting_user_likely", text)
 
+    def test_text_output_names_what_a_waiting_session_needs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "codex-home"
+            proc.mkdir()
+            home.mkdir()
+            hook_log = root / "hooks.jsonl"
+            _write_common_proc(proc)
+            _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
+            payload = {"session_id": "session-a", "turn_id": "turn-a"}
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                path=hook_log,
+                hook_payload=payload,
+            )
+            append_hook_event(
+                "permission_request",
+                tool="Bash",
+                cwd="/work/a",
+                ppid=100,
+                path=hook_log,
+                hook_payload=payload,
+            )
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                result = main(
+                    [
+                        "--sample-window",
+                        "0",
+                        "--proc-root",
+                        str(proc),
+                        "--codex-home",
+                        str(home),
+                        "--hook-log",
+                        str(hook_log),
+                    ]
+                )
+
+        text = stdout.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("WAITING FOR", text)
+        self.assertIn("待确认", text)
+        self.assertIn("Bash", text)
+
 
 def _write_common_proc(proc: Path) -> None:
     (proc / "uptime").write_text("200.00 0.00\n", encoding="utf-8")

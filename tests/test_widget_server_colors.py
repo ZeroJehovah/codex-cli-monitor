@@ -100,6 +100,79 @@ class WidgetServerColorTests(unittest.TestCase):
                 f"palette color {index} is too dim for a thin bar on the dark row",
             )
 
+    def test_status_colors_stay_distinguishable_from_server_bars(self) -> None:
+        # In the tucked layout the server bar sits one gap away from the status
+        # indicator, so the amber added for 待确认 must not read as a server bar.
+        palette_match = re.search(
+            r"SERVER_COLORS\[SERVER_COLOR_COUNT\]\s*=\s*\{(?P<body>.*?)\};",
+            self.source,
+            re.DOTALL,
+        )
+        status_match = re.search(
+            r"static COLORREF status_color\(const char \*status\) \{(?P<body>.*?)\n\}",
+            self.source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(palette_match)
+        self.assertIsNotNone(status_match)
+
+        def colors(body: str) -> list[tuple[int, ...]]:
+            return [
+                tuple(map(int, values))
+                for values in re.findall(r"RGB\((\d+),\s*(\d+),\s*(\d+)\)", body)
+            ]
+
+        palette = colors(palette_match.group("body"))
+        # The trailing fallback repeats the success color, so compare distinct ones.
+        status_colors = list(dict.fromkeys(colors(status_match.group("body"))))
+        self.assertEqual(len(status_colors), 4, "each status needs its own color")
+
+        def distance_squared(left: tuple[int, ...], right: tuple[int, ...]) -> int:
+            return sum((one - other) ** 2 for one, other in zip(left, right))
+
+        # 115 is the tightest pair the shipped design already tolerated
+        # (magenta server bar against the red failure indicator).
+        floor = 115 * 115
+        for status in status_colors:
+            for index, color in enumerate(palette):
+                self.assertGreaterEqual(
+                    distance_squared(status, color),
+                    floor,
+                    f"status {status} is too close to palette color {index}",
+                )
+        for index, left in enumerate(status_colors):
+            for right in status_colors[index + 1 :]:
+                self.assertGreaterEqual(
+                    distance_squared(left, right),
+                    floor,
+                    f"status colors {left} and {right} are too close",
+                )
+
+    def test_waiting_status_has_its_own_indicator_color(self) -> None:
+        self.assertIn(
+            'static const char STATUS_WAITING[] = "\\xe5\\xbe\\x85\\xe7\\xa1\\xae\\xe8\\xae\\xa4";',
+            self.source,
+        )
+        status_match = re.search(
+            r"static COLORREF status_color\(const char \*status\) \{(?P<body>.*?)\n\}",
+            self.source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(status_match)
+        body = status_match.group("body")
+        self.assertIn("is_waiting_status(status)", body)
+        # Amber: warm, high red, no blue, so it cannot be confused with the
+        # blue running glow even at a glance.
+        amber_match = re.search(
+            r"if \(is_waiting_status\(status\)\) \{\s*return RGB\((\d+), (\d+), (\d+)\);",
+            body,
+        )
+        self.assertIsNotNone(amber_match)
+        red, green, blue = (int(value) for value in amber_match.groups())
+        self.assertGreater(red, 200)
+        self.assertGreater(red, green)
+        self.assertLess(blue, 60)
+
     def test_color_reconciliation_runs_after_server_sorting(self) -> None:
         rebuild_match = re.search(
             r"static void rebuild_directory_rows\(void\) \{(?P<body>.*?)\n\}",

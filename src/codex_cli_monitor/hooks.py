@@ -9,6 +9,7 @@ from .hook_state import append_hook_event, default_hook_log_path, read_hook_payl
 OFFICIAL_EVENT_NAMES = {
     "session_start": "SessionStart",
     "user_prompt_submit": "UserPromptSubmit",
+    "permission_request": "PermissionRequest",
     "pre_tool_use": "PreToolUse",
     "post_tool_use": "PostToolUse",
     "stop": "Stop",
@@ -21,6 +22,9 @@ def main(argv: list[str] | None = None) -> int:
     except BaseException:
         # Monitoring must never change the Codex hook result.
         return 0
+    # Nothing is ever written to stdout.  For PermissionRequest in particular,
+    # an empty result means "no decision", so Codex still asks the user exactly
+    # as it would without this hook installed.
     return 0
 
 

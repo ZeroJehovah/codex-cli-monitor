@@ -10,11 +10,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
 
-from .models import CodexSession
+from .models import (
+    DISPLAY_STATUSES,
+    MAX_WAITING_REASON_LENGTH,
+    CodexSession,
+    normalize_waiting_reason,
+)
 
 
 SNAPSHOT_SCHEMA_VERSION = 1
-VALID_DISPLAY_STATUSES = {"运行中", "成功", "失败"}
+# An unknown status rejects the whole snapshot, so every status a collector can
+# emit has to be listed here.  Adding ``待确认`` is backward compatible: the
+# optional ``waiting_reason`` field needs no schema bump, and a collector that
+# never emits the status keeps validating unchanged.
+VALID_DISPLAY_STATUSES = set(DISPLAY_STATUSES)
 MAX_REMOTE_SESSIONS = 1024
 SERVER_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
@@ -237,6 +246,7 @@ def _local_session_payload(
         "pid": root.pid,
         "ppid": root.ppid,
         "status": session.display_status,
+        "waiting_reason": getattr(session, "waiting_reason", None),
         "cli_type": getattr(session, "cli_type", "codex"),
         "directory": root.cwd,
         "started_at": root.started_at,
@@ -264,6 +274,7 @@ def _collector_session_payload(session: CodexSession) -> dict:
     return {
         "pid": root.pid,
         "status": session.display_status,
+        "waiting_reason": getattr(session, "waiting_reason", None),
         "cli_type": getattr(session, "cli_type", "codex"),
         "directory": root.cwd,
         "started_at": root.started_at,
@@ -292,6 +303,16 @@ def _remote_session_payload(
     cli_type = _optional_limited_str(item.get("cli_type"), "session cli_type", 32)
     if cli_type not in {"codex", "opencode", "claude"}:
         cli_type = "codex"
+    # The waiting reason is a short CLI-authored label, so it is clamped at the
+    # source: an oversized one is rejected here rather than silently truncated,
+    # and what remains is stripped again instead of being trusted from the wire.
+    waiting_reason = normalize_waiting_reason(
+        _optional_limited_str(
+            item.get("waiting_reason"),
+            "session waiting_reason",
+            MAX_WAITING_REASON_LENGTH,
+        )
+    )
     return {
         "server_id": identity.server_id,
         "server_name": identity.server_name,
@@ -301,6 +322,7 @@ def _remote_session_payload(
         "pid": pid,
         "ppid": _optional_int(item.get("ppid")),
         "status": status,
+        "waiting_reason": waiting_reason,
         "cli_type": cli_type,
         "directory": directory,
         "started_at": started_at,

@@ -50,7 +50,14 @@ class AggregationTests(unittest.TestCase):
 
         self.assertEqual(
             set(snapshot["sessions"][0]),
-            {"pid", "status", "cli_type", "directory", "started_at"},
+            {
+                "pid",
+                "status",
+                "waiting_reason",
+                "cli_type",
+                "directory",
+                "started_at",
+            },
         )
 
         store.ingest(snapshot, received_at=100.0)
@@ -86,6 +93,70 @@ class AggregationTests(unittest.TestCase):
         ingested = RemoteSnapshotStore().ingest(snapshot, received_at=11.0)
 
         self.assertEqual(ingested.sessions[0]["cli_type"], "codex")
+
+    def test_waiting_status_and_reason_survive_a_collector_round_trip(self) -> None:
+        identity = ServerIdentity("server-a", "Server A", "boot-a")
+        snapshot = build_collector_snapshot(
+            (_session(100, display_status="待确认", waiting_reason="goal proposal"),),
+            identity,
+            observed_at=10.0,
+        )
+
+        self.assertEqual(snapshot["sessions"][0]["status"], "待确认")
+        self.assertEqual(snapshot["sessions"][0]["waiting_reason"], "goal proposal")
+
+        ingested = RemoteSnapshotStore().ingest(snapshot, received_at=11.0)
+
+        self.assertEqual(ingested.sessions[0]["status"], "待确认")
+        self.assertEqual(ingested.sessions[0]["waiting_reason"], "goal proposal")
+
+    def test_local_payload_exposes_the_waiting_reason(self) -> None:
+        identity = ServerIdentity("local", "Local", "boot-local")
+
+        payload = build_sessions_payload(
+            (_session(100, display_status="待确认", waiting_reason="Bash"),),
+            identity,
+            (),
+            observed_at=20.0,
+        )
+
+        self.assertEqual(payload["sessions"][0]["status"], "待确认")
+        self.assertEqual(payload["sessions"][0]["waiting_reason"], "Bash")
+
+    def test_running_sessions_carry_no_waiting_reason(self) -> None:
+        identity = ServerIdentity("server-a", "Server A", "boot-a")
+        snapshot = build_collector_snapshot(
+            (_session(100, display_status="运行中"),),
+            identity,
+            observed_at=10.0,
+        )
+        ingested = RemoteSnapshotStore().ingest(snapshot, received_at=11.0)
+
+        self.assertIsNone(ingested.sessions[0]["waiting_reason"])
+
+    def test_ingested_waiting_reason_is_stripped_of_control_characters(self) -> None:
+        identity = ServerIdentity("server-a", "Server A", "boot-a")
+        snapshot = build_collector_snapshot((_session(100),), identity, observed_at=10.0)
+        snapshot["sessions"][0]["status"] = "待确认"
+        snapshot["sessions"][0]["waiting_reason"] = "  edit\r\n\x1b[31mfile  "
+
+        ingested = RemoteSnapshotStore().ingest(snapshot, received_at=11.0)
+        reason = ingested.sessions[0]["waiting_reason"]
+
+        # The widget draws this label directly, so no control byte may reach it.
+        self.assertNotIn("\x1b", reason)
+        self.assertNotIn("\r", reason)
+        self.assertNotIn("\n", reason)
+        self.assertTrue(reason.startswith("edit"))
+
+    def test_oversized_waiting_reason_is_rejected(self) -> None:
+        identity = ServerIdentity("server-a", "Server A", "boot-a")
+        snapshot = build_collector_snapshot((_session(100),), identity, observed_at=10.0)
+        snapshot["sessions"][0]["status"] = "待确认"
+        snapshot["sessions"][0]["waiting_reason"] = "x" * 4096
+
+        with self.assertRaises(SnapshotValidationError):
+            RemoteSnapshotStore().ingest(snapshot, received_at=11.0)
 
     def test_combined_payload_keeps_same_pid_separate_by_server(self) -> None:
         local_identity = ServerIdentity("local", "Local", "boot-local")
@@ -312,6 +383,7 @@ class AggregationTests(unittest.TestCase):
                 "sessions_dir_exists",
                 "projects_dir_exists",
                 "registered_sessions",
+                "waiting_sessions",
             },
         )
         self.assertNotIn("token", json.dumps(payload).lower())
@@ -343,7 +415,12 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual(status["consecutive_failures"], 0)
 
 
-def _session(pid: int, cli_type: str = "codex") -> CodexSession:
+def _session(
+    pid: int,
+    cli_type: str = "codex",
+    display_status: str = "成功",
+    waiting_reason: str | None = None,
+) -> CodexSession:
     return CodexSession(
         root=ProcessInfo(
             pid=pid,
@@ -362,8 +439,9 @@ def _session(pid: int, cli_type: str = "codex") -> CodexSession:
         descendants=(),
         connections=(),
         inference=Inference("waiting_user_likely", 0.9, ()),
-        display_status="成功",
+        display_status=display_status,
         cli_type=cli_type,
+        waiting_reason=waiting_reason,
     )
 
 

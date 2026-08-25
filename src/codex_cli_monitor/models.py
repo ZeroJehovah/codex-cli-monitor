@@ -7,6 +7,48 @@ from typing import Any
 from .hook_state import HookSessionState
 
 
+# The four user-facing status values.  ``待确认`` means a turn is open but the
+# CLI has stopped and is blocked on a human decision (a plan or option choice,
+# a permission prompt, an authorization request), so it is deliberately not
+# reported as ``运行中``: nothing progresses until the user acts.
+STATUS_RUNNING = "运行中"
+STATUS_WAITING = "待确认"
+STATUS_SUCCESS = "成功"
+STATUS_FAILURE = "失败"
+DISPLAY_STATUSES = (
+    STATUS_RUNNING,
+    STATUS_WAITING,
+    STATUS_SUCCESS,
+    STATUS_FAILURE,
+)
+
+# Statuses that mean a submitted turn has not finished yet.  ``待确认`` belongs
+# here because the turn is still open; only the reason it is not advancing
+# differs.
+OPEN_TURN_STATUSES = (STATUS_RUNNING, STATUS_WAITING)
+
+MAX_WAITING_REASON_LENGTH = 48
+
+
+def normalize_waiting_reason(value: object) -> str | None:
+    """Reduce a waiting reason to a short, body-free, printable label.
+
+    Waiting reasons come from CLI-authored labels (Claude Code's ``waitingFor``,
+    a Codex hook tool name, an OpenCode permission category).  They are clamped
+    and stripped of control characters so a hostile or oversized value can never
+    reach the API payload, and they are never allowed to carry prompt, tool
+    input, or tool output bodies.
+    """
+    if not isinstance(value, str):
+        return None
+    text = "".join(
+        character for character in value.strip() if character.isprintable()
+    )
+    if not text:
+        return None
+    return text[:MAX_WAITING_REASON_LENGTH]
+
+
 @dataclass(frozen=True)
 class Evidence:
     signal: str
@@ -237,18 +279,20 @@ class CodexSession:
     state_activity: SessionActivity | None = None
     hook_state: HookSessionState | None = None
     launch_record: LaunchRecord | None = None
-    display_status: str = "成功"
+    display_status: str = STATUS_SUCCESS
     binding_method: str | None = None
     binding_confidence: float | None = None
     binding_ambiguous: bool = False
     binding_candidate_count: int = 0
     binding_evidence: tuple[str, ...] = field(default_factory=tuple)
     cli_type: str = "codex"
+    waiting_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.display_status,
             "cli_type": self.cli_type,
+            "waiting_reason": self.waiting_reason,
             "inferred_status": self.inference.to_dict(),
             "root": self.root.to_dict(),
             "descendants": [process.to_dict() for process in self.descendants],

@@ -28,6 +28,7 @@
 #define ANIMATION_INTERVAL_MS 16
 #define ANIMATION_FRAME_INTERVAL_MS 8
 #define RUNNING_PULSE_PERIOD_MS 1200
+#define WAITING_PULSE_PERIOD_MS 1800
 #define EDGE_TUCK_ANIMATION_DURATION_MS 260
 #define EDGE_TUCK_PROGRESS_MAX 1000
 #define EDGE_TUCK_ATTACH_TOLERANCE 1
@@ -41,7 +42,9 @@
 #define DOT_SIZE 14
 #define DOT_GAP 8
 #define DOT_EDGE_SAMPLES 4
-#define INDICATOR_BITMAP_CACHE_CAPACITY 128
+/* Blue and amber each quantize their pulse into INDICATOR_PULSE_STEPS
+ * distinct (color, alpha) bitmaps, so the cache has to hold both families. */
+#define INDICATOR_BITMAP_CACHE_CAPACITY 256
 #define INDICATOR_PULSE_STEPS 64
 #define INDICATOR_BITMAP_SOFT 1
 #define INDICATOR_BITMAP_LUMINOUS 2
@@ -74,6 +77,7 @@ typedef struct Session {
     int pid;
     double started_at;
     char status[32];
+    char waiting_reason[128];
     char directory[512];
     char started_at_iso[64];
     char server_id[128];
@@ -185,18 +189,24 @@ typedef struct AppState {
 } AppState;
 
 static const char STATUS_RUNNING[] = "\xe8\xbf\x90\xe8\xa1\x8c\xe4\xb8\xad";
+static const char STATUS_WAITING[] = "\xe5\xbe\x85\xe7\xa1\xae\xe8\xae\xa4";
 static const char STATUS_SUCCESS[] = "\xe6\x88\x90\xe5\x8a\x9f";
 static const char STATUS_FAILED[] = "\xe5\xa4\xb1\xe8\xb4\xa5";
 static const wchar_t EMPTY_TEXT_CONNECTING[] = L"\x6b63\x5728\x8fde\x63a5";
 static const wchar_t EMPTY_TEXT_IDLE[] = L"\x6682\x65e0\x4f1a\x8bdd";
 static const wchar_t EMPTY_TEXT_FAILED[] = L"\x8fde\x63a5\x5931\x8d25";
 static const int DISPLAY_FONT_SIZES[] = {8, 9, 10, 11, 12, 14, 16};
+/* Server identification stays inside the cool half of the wheel: the status
+ * indicators own blue, amber, green and red, and the amber added for
+ * "\xe5\xbe\x85\xe7\xa1\xae\xe8\xae\xa4" leaves no room for a warm server bar
+ * next to it in the tucked layout. Teal is the high-contrast hub every other
+ * entry pairs with. */
 static const COLORREF SERVER_COLORS[SERVER_COLOR_COUNT] = {
     RGB(247, 247, 242),
     RGB(240, 58, 200),
-    RGB(255, 196, 0),
-    RGB(157, 92, 255),
-    RGB(216, 180, 254),
+    RGB(0, 216, 200),
+    RGB(200, 50, 255),
+    RGB(230, 150, 255),
 };
 
 static AppState g_app;
@@ -1723,10 +1733,20 @@ static int is_running_status(const char *status) {
     return strcmp(status, STATUS_RUNNING) == 0;
 }
 
-static int has_running_sessions(void) {
+static int is_waiting_status(const char *status) {
+    return strcmp(status, STATUS_WAITING) == 0;
+}
+
+/* Both open-turn statuses glow, so both keep the frame timer alive and both
+ * belong to the dynamic paint layer. */
+static int is_animated_status(const char *status) {
+    return is_running_status(status) || is_waiting_status(status);
+}
+
+static int has_animated_sessions(void) {
     int index;
     for (index = 0; index < g_app.session_count; index++) {
-        if (is_running_status(g_app.sessions[index].status)) {
+        if (is_animated_status(g_app.sessions[index].status)) {
             return 1;
         }
     }
@@ -1736,6 +1756,9 @@ static int has_running_sessions(void) {
 static COLORREF status_color(const char *status) {
     if (is_running_status(status)) {
         return RGB(37, 99, 235);
+    }
+    if (is_waiting_status(status)) {
+        return RGB(250, 174, 0);
     }
     if (strcmp(status, STATUS_SUCCESS) == 0) {
         return RGB(132, 204, 22);
@@ -1756,14 +1779,14 @@ static COLORREF empty_state_color(void) {
     return RGB(143, 149, 160);
 }
 
-static int running_pulse_level(void) {
+static int pulse_level(int period_ms) {
     LARGE_INTEGER now;
     LONGLONG period;
     LONGLONG elapsed;
     LONGLONG half_period;
     int raw;
     QueryPerformanceCounter(&now);
-    period = g_app.performance_frequency.QuadPart * RUNNING_PULSE_PERIOD_MS / 1000;
+    period = g_app.performance_frequency.QuadPart * period_ms / 1000;
     if (period <= 0) {
         return 0;
     }
@@ -1774,6 +1797,16 @@ static int running_pulse_level(void) {
     }
     raw = (int)(elapsed * 100 / half_period);
     return (raw * raw * (300 - 2 * raw) + 5000) / 10000;
+}
+
+static int running_pulse_level(void) {
+    return pulse_level(RUNNING_PULSE_PERIOD_MS);
+}
+
+/* A slower breath than the running pulse: the rhythm, not just the hue, has to
+ * say "this one stopped for you". */
+static int waiting_pulse_level(void) {
+    return pulse_level(WAITING_PULSE_PERIOD_MS);
 }
 
 static const char *skip_space(const char *p, const char *end) {
@@ -1925,6 +1958,7 @@ static void parse_session_object(const char *start, const char *end, Session *se
     session->pid = parse_json_int(find_top_level_key(start, end, "pid"), end);
     session->started_at = parse_json_double(find_top_level_key(start, end, "started_at"), end);
     parse_json_string(find_top_level_key(start, end, "status"), end, session->status, sizeof(session->status));
+    parse_json_string(find_top_level_key(start, end, "waiting_reason"), end, session->waiting_reason, sizeof(session->waiting_reason));
     parse_json_string(find_top_level_key(start, end, "directory"), end, session->directory, sizeof(session->directory));
     parse_json_string(find_top_level_key(start, end, "started_at_iso"), end, session->started_at_iso, sizeof(session->started_at_iso));
     parse_json_string(find_top_level_key(start, end, "server_id"), end, session->server_id, sizeof(session->server_id));
@@ -2322,7 +2356,7 @@ static void update_animation_timer(void) {
         }
         return;
     }
-    high_refresh_needed = edge_tuck_animating() || has_running_sessions() ||
+    high_refresh_needed = edge_tuck_animating() || has_animated_sessions() ||
         empty_state_is_connecting();
     if (high_refresh_needed) {
         high_refresh_started = start_animation_frame_timer();
@@ -2442,14 +2476,26 @@ static void resume_edge_tuck_after_drag(void) {
 }
 
 static void set_tooltip_for_hover(int index) {
-    wchar_t status[64];
+    wchar_t status[224];
     wchar_t directory[512];
     wchar_t started[128];
     wchar_t server[256];
     wchar_t cli[32];
+    int status_capacity = (int)(sizeof(status) / sizeof(status[0]));
     if (index >= 0 && index < g_app.session_count) {
         Session *session = &g_app.sessions[index];
-        utf8_to_wide(session->status, status, (int)(sizeof(status) / sizeof(status[0])));
+        utf8_to_wide(session->status, status, status_capacity);
+        if (session->waiting_reason[0] != '\0') {
+            /* The reason is the whole point of the amber row: say what the
+             * session is asking for without opening the terminal. */
+            wchar_t reason[160];
+            int used = (int)wcslen(status);
+            utf8_to_wide(session->waiting_reason, reason, (int)(sizeof(reason) / sizeof(reason[0])));
+            if (used < status_capacity - 1) {
+                _snwprintf(status + used, status_capacity - used - 1, L" (%ls)", reason);
+                status[status_capacity - 1] = L'\0';
+            }
+        }
         utf8_to_wide(session->directory[0] ? session->directory : "-", directory, (int)(sizeof(directory) / sizeof(directory[0])));
         utf8_to_wide(session->started_at_iso[0] ? session->started_at_iso : "-", started, (int)(sizeof(started) / sizeof(started[0])));
         utf8_to_wide(session->server_name[0] ? session->server_name : (session->server_id[0] ? session->server_id : "-"),
@@ -3360,6 +3406,39 @@ static void draw_status_indicator(HDC hdc, const RECT *rect, const char *status,
         }
         return;
     }
+    if (is_waiting_status(status)) {
+        int pulse = quantized_pulse_level(waiting_pulse_level());
+        int max_shadow_spread = current_running_shadow_spread();
+        int min_shadow_spread = (max_shadow_spread + 1) / 2;
+        int shadow_spread;
+        int field_alpha = 140 + pulse * 115 / 100;
+        int field_brightness = 32 + pulse * 150 / 100;
+        COLORREF waiting_amber = RGB(250, 174, 0);
+        COLORREF bright_amber = RGB(253, 224, 120);
+        COLORREF field_color = blend_color(
+            bright_amber,
+            waiting_amber,
+            field_brightness
+        );
+        if (min_shadow_spread < 1) {
+            min_shadow_spread = 1;
+        }
+        /* A deeper swing than the running glow, so a row that needs an answer
+         * still stands out when the panel is full of working rows. */
+        shadow_spread = min_shadow_spread +
+            (pulse * (max_shadow_spread - min_shadow_spread) + 50) / 100;
+        if (shadow_spread > 0) {
+            fill_luminous_indicator(
+                hdc,
+                rect,
+                shadow_spread,
+                field_color,
+                row_background,
+                field_alpha
+            );
+        }
+        return;
+    }
     fill_soft_indicator(hdc, rect, status_color(status), row_background, 255, current_status_soft_edge(), 0);
 }
 
@@ -3587,7 +3666,7 @@ static void paint_widget_static(HWND hwnd, HDC hdc) {
         for (indicator = 0; indicator < g_app.rows[row].session_count; indicator++) {
             int session_index = g_app.rows[row].session_indexes[indicator];
             RECT rect = status_indicator_rect(row, indicator);
-            if (!is_running_status(g_app.sessions[session_index].status)) {
+            if (!is_animated_status(g_app.sessions[session_index].status)) {
                 draw_status_indicator(hdc, &rect, g_app.sessions[session_index].status, row_color);
             }
         }
@@ -3607,7 +3686,7 @@ static void draw_widget_dynamic(HDC hdc) {
             COLORREF row_color = row % 2 == 1 ? RGB(39, 39, 39) : RGB(34, 34, 34);
             for (indicator = 0; indicator < g_app.rows[row].session_count; indicator++) {
                 int session_index = g_app.rows[row].session_indexes[indicator];
-                if (is_running_status(g_app.sessions[session_index].status)) {
+                if (is_animated_status(g_app.sessions[session_index].status)) {
                     RECT rect = status_indicator_rect(row, indicator);
                     draw_status_indicator(
                         hdc,

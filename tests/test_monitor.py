@@ -540,6 +540,389 @@ class ClaudeMonitorTests(unittest.TestCase):
         )
 
 
+class WaitingDecisionTests(unittest.TestCase):
+    """待确认: turns that stopped and cannot advance without the user."""
+
+    def setUp(self) -> None:
+        reset_claude_caches()
+
+    def test_codex_permission_request_displays_waiting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            now = time.time()
+            _hook(hook_log, "user_prompt_submit", "session-a", "turn-a", timestamp=now - 60)
+            append_hook_event(
+                "permission_request",
+                tool="Bash",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=now - 30,
+                path=hook_log,
+                hook_payload={"session_id": "session-a", "turn_id": "turn-a"},
+            )
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(len(sessions), 1)
+        session = sessions[0]
+        self.assertEqual(session.display_status, "待确认")
+        self.assertEqual(session.waiting_reason, "Bash")
+        self.assertEqual(session.inference.status, "waiting_decision_hook")
+        self.assertTrue(session.inference.limitations)
+
+    def test_codex_waiting_reason_falls_back_when_no_tool_is_known(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            now = time.time()
+            _hook(hook_log, "user_prompt_submit", "session-a", "turn-a", timestamp=now - 60)
+            append_hook_event(
+                "permission_request",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=now - 30,
+                path=hook_log,
+                hook_payload={"session_id": "session-a", "turn_id": "turn-a"},
+            )
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(sessions[0].display_status, "待确认")
+        self.assertEqual(sessions[0].waiting_reason, "approval prompt")
+
+    def test_codex_answered_prompt_returns_to_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            now = time.time()
+            _hook(hook_log, "user_prompt_submit", "session-a", "turn-a", timestamp=now - 60)
+            append_hook_event(
+                "permission_request",
+                tool="Bash",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=now - 30,
+                path=hook_log,
+                hook_payload={"session_id": "session-a", "turn_id": "turn-a"},
+            )
+            append_hook_event(
+                "post_tool_use",
+                tool="Bash",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=now - 10,
+                path=hook_log,
+                hook_payload={"session_id": "session-a", "turn_id": "turn-a"},
+            )
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertIsNone(sessions[0].waiting_reason)
+
+    def test_codex_rollout_activity_after_the_prompt_releases_waiting(self) -> None:
+        # An approved long-running command keeps PostToolUse pending, but any
+        # rollout record written after the prompt proves Codex moved on.
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            session_id = "019fb176-333f-7071-aa87-1d1837579794"
+            now = time.time()
+            _hook(
+                hook_log,
+                "user_prompt_submit",
+                session_id,
+                "turn-a",
+                timestamp=now - 90,
+            )
+            append_hook_event(
+                "permission_request",
+                tool="Bash",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=now - 60,
+                path=hook_log,
+                hook_payload={"session_id": session_id, "turn_id": "turn-a"},
+            )
+            _write_terminal(
+                home,
+                session_id,
+                "turn-a",
+                "task_started",
+                timestamp=now - 20,
+            )
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertIsNone(sessions[0].waiting_reason)
+
+    def test_codex_stop_clears_waiting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            now = time.time()
+            _hook(hook_log, "user_prompt_submit", "session-a", "turn-a", timestamp=now - 60)
+            append_hook_event(
+                "permission_request",
+                tool="Bash",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=now - 30,
+                path=hook_log,
+                hook_payload={"session_id": "session-a", "turn_id": "turn-a"},
+            )
+            _hook(hook_log, "stop", "session-a", "turn-a", timestamp=now - 5)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertIsNone(sessions[0].waiting_reason)
+
+    def test_waiting_turn_beats_a_newer_finished_session(self) -> None:
+        # A row must never be reported as finished while another session on the
+        # same process is still holding an unanswered prompt.
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            now = time.time()
+            _hook(hook_log, "user_prompt_submit", "session-a", "turn-a", timestamp=now - 90)
+            append_hook_event(
+                "permission_request",
+                tool="Bash",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=now - 80,
+                path=hook_log,
+                hook_payload={"session_id": "session-a", "turn_id": "turn-a"},
+            )
+            _hook(hook_log, "user_prompt_submit", "session-b", "turn-b", timestamp=now - 40)
+            _hook(hook_log, "stop", "session-b", "turn-b", timestamp=now - 20)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "待确认")
+
+    def test_waiting_turn_beats_a_newer_running_session(self) -> None:
+        # Both sessions have an open turn, so recency alone would pick the newer
+        # running one and hide the prompt that is actually blocking the process.
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            now = time.time()
+            _hook(hook_log, "user_prompt_submit", "session-a", "turn-a", timestamp=now - 90)
+            append_hook_event(
+                "permission_request",
+                tool="Bash",
+                cwd="/work/a",
+                ppid=100,
+                timestamp=now - 80,
+                path=hook_log,
+                hook_payload={"session_id": "session-a", "turn_id": "turn-a"},
+            )
+            _hook(hook_log, "user_prompt_submit", "session-b", "turn-b", timestamp=now - 20)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "待确认")
+        self.assertEqual(sessions[0].waiting_reason, "Bash")
+
+    def test_claude_waiting_registration_displays_waiting(self) -> None:
+        with _claude_runtime() as (proc, claude_home):
+            _write_claude_registration(
+                claude_home,
+                status="waiting",
+                waiting_for="goal proposal",
+            )
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        session = sessions[0]
+        self.assertEqual(session.cli_type, "claude")
+        self.assertEqual(session.display_status, "待确认")
+        self.assertEqual(session.waiting_reason, "goal proposal")
+        self.assertEqual(session.inference.status, "waiting_decision_registration")
+        self.assertTrue(session.inference.limitations)
+
+    def test_claude_waiting_without_a_label_still_displays_waiting(self) -> None:
+        with _claude_runtime() as (proc, claude_home):
+            _write_claude_registration(claude_home, status="waiting")
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(sessions[0].display_status, "待确认")
+        self.assertEqual(sessions[0].waiting_reason, "permission prompt")
+
+    def test_opencode_pending_prompt_displays_waiting(self) -> None:
+        with _opencode_runtime(status="running") as (proc, decision_log):
+            _write_decision_log(decision_log, [_opencode_ask(category="bash")])
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        session = sessions[0]
+        self.assertEqual(session.cli_type, "opencode")
+        self.assertEqual(session.display_status, "待确认")
+        self.assertEqual(session.waiting_reason, "bash")
+        self.assertEqual(session.inference.status, "waiting_decision_plugin")
+        self.assertIn(
+            "open prompt reported by the OpenCode decision plugin",
+            session.binding_evidence,
+        )
+
+    def test_opencode_answered_prompt_stays_running(self) -> None:
+        with _opencode_runtime(status="running") as (proc, decision_log):
+            _write_decision_log(
+                decision_log,
+                [_opencode_ask(), _opencode_reply()],
+            )
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertIsNone(sessions[0].waiting_reason)
+
+    def test_opencode_marker_cannot_resurrect_a_finished_session(self) -> None:
+        # A prompt abandoned by killing OpenCode leaves an unanswered marker
+        # behind; the database status is the only thing that may open a turn.
+        with _opencode_runtime(status="success") as (proc, decision_log):
+            _write_decision_log(decision_log, [_opencode_ask()])
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertIsNone(sessions[0].waiting_reason)
+
+    def test_opencode_without_the_plugin_keeps_the_database_status(self) -> None:
+        with _opencode_runtime(status="running") as (proc, _decision_log):
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertEqual(sessions[0].inference.status, "running_terminal")
+
+
+OPENCODE_CWD = "/work/opencode"
+OPENCODE_SESSION_ID = "ses_monitor_waiting"
+
+
+@contextmanager
+def _opencode_runtime(status: str):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        proc = root / "proc"
+        data_dir = root / "opencode-data"
+        decision_log = root / "decisions.jsonl"
+        proc.mkdir()
+        data_dir.mkdir()
+        _write_common_proc(proc)
+        _write_process(proc, 400, "opencode", "S", 1, ["opencode"], OPENCODE_CWD)
+        _write_opencode_db(data_dir / "opencode.db", status)
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCODE_DATA": str(data_dir),
+                "OPENCODE_MONITOR_DECISION_LOG": str(decision_log),
+            },
+        ):
+            yield proc, decision_log
+
+
+def _write_opencode_db(path: Path, status: str) -> None:
+    import sqlite3
+
+    now_ms = int(time.time() * 1000)
+    assistant: dict[str, object] = {
+        "role": "assistant",
+        "time": {"created": now_ms - 50_000},
+    }
+    if status == "success":
+        assistant["time"] = {"created": now_ms - 50_000, "completed": now_ms - 10_000}
+        assistant["finish"] = "stop"
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.execute(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, "
+            "slug TEXT, directory TEXT, title TEXT, version TEXT, "
+            "time_created INTEGER, time_updated INTEGER)"
+        )
+        connection.execute(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, "
+            "time_created INTEGER, time_updated INTEGER, data TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, "
+            "session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO session VALUES (?,?,?,?,?,?,?,?)",
+            (
+                OPENCODE_SESSION_ID,
+                "global",
+                "s",
+                OPENCODE_CWD,
+                "t",
+                "1.0.0",
+                now_ms - 120_000,
+                now_ms - 1_000,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO message VALUES (?,?,?,?,?)",
+            (
+                "m1",
+                OPENCODE_SESSION_ID,
+                now_ms - 120_000,
+                now_ms - 120_000,
+                json.dumps({"role": "user", "time": {"created": now_ms - 120_000}}),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO message VALUES (?,?,?,?,?)",
+            (
+                "m2",
+                OPENCODE_SESSION_ID,
+                now_ms - 50_000,
+                now_ms - 1_000,
+                json.dumps(assistant),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _opencode_ask(category: str | None = None) -> dict:
+    return {
+        "schema_version": 1,
+        "event": "permission.asked",
+        "kind": "permission",
+        "timestamp": time.time() - 20.0,
+        "pid": 400,
+        "directory": OPENCODE_CWD,
+        "session_id": OPENCODE_SESSION_ID,
+        "request_id": "per_1",
+        "category": category,
+    }
+
+
+def _opencode_reply() -> dict:
+    return {
+        "schema_version": 1,
+        "event": "permission.replied",
+        "kind": None,
+        "timestamp": time.time() - 5.0,
+        "pid": 400,
+        "directory": OPENCODE_CWD,
+        "session_id": OPENCODE_SESSION_ID,
+        "request_id": "per_1",
+        "category": None,
+    }
+
+
+def _write_decision_log(path: Path, records: list[dict]) -> None:
+    path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+
 @contextmanager
 def _claude_runtime():
     with tempfile.TemporaryDirectory() as tmp:
@@ -558,24 +941,26 @@ def _write_claude_registration(
     status: str,
     pid: int = 300,
     proc_start: int = 100,
+    waiting_for: str | None = None,
 ) -> None:
     sessions = claude_home / "sessions"
     sessions.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "pid": pid,
+        "procStart": proc_start,
+        "sessionId": CLAUDE_SESSION_ID,
+        "cwd": CLAUDE_CWD,
+        "kind": "interactive",
+        "entrypoint": "cli",
+        "status": status,
+        "startedAt": 1_700_000_000_000,
+        "updatedAt": 1_700_000_050_000,
+        "statusUpdatedAt": 1_700_000_050_000,
+    }
+    if waiting_for is not None:
+        payload["waitingFor"] = waiting_for
     (sessions / f"{pid}.json").write_text(
-        json.dumps(
-            {
-                "pid": pid,
-                "procStart": proc_start,
-                "sessionId": CLAUDE_SESSION_ID,
-                "cwd": CLAUDE_CWD,
-                "kind": "interactive",
-                "entrypoint": "cli",
-                "status": status,
-                "startedAt": 1_700_000_000_000,
-                "updatedAt": 1_700_000_050_000,
-                "statusUpdatedAt": 1_700_000_050_000,
-            }
-        ),
+        json.dumps(payload),
         encoding="utf-8",
     )
 

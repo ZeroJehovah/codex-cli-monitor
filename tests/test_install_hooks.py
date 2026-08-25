@@ -94,6 +94,44 @@ class InstallHooksTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertIn(b"codex_cli_monitor", completed.stderr)
 
+    def test_default_install_includes_the_permission_request_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hooks_path = root / "hooks.json"
+            repo_root = root / "repo"
+            (repo_root / "src").mkdir(parents=True)
+            install_hooks(hooks_path, repo_root)
+            payload = json.loads(hooks_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            set(payload["hooks"]),
+            {"UserPromptSubmit", "PermissionRequest", "Stop"},
+        )
+        command = payload["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
+        self.assertIn("permission_request", command)
+        self.assertIn("CODEX_CLI_MONITOR_HOOK=1", command)
+        # No matcher: approval prompts are not tool-scoped the way PreToolUse is.
+        self.assertNotIn("matcher", payload["hooks"]["PermissionRequest"][0])
+
+    def test_check_reports_a_missing_permission_request_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hooks_path = root / "hooks.json"
+            repo_root = root / "repo"
+            (repo_root / "src" / "codex_cli_monitor").mkdir(parents=True)
+            (repo_root / "src" / "codex_cli_monitor" / "hooks.py").write_text(
+                "", encoding="utf-8"
+            )
+            install_hooks(hooks_path, repo_root)
+            payload = json.loads(hooks_path.read_text(encoding="utf-8"))
+            payload["hooks"].pop("PermissionRequest")
+            hooks_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            result = check_hooks(hooks_path, repo_root)
+
+        self.assertFalse(result.current)
+        self.assertEqual(result.missing_events, ("PermissionRequest",))
+
     def test_tool_events_require_explicit_option(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -27,6 +27,7 @@ from .install_hooks import check_hooks
 from .models import CodexSession
 from .monitor import discover_sessions
 from .claude_state import claude_state_health
+from .opencode_decisions import opencode_decision_log_health
 from .opencode_hook_state import opencode_hook_log_health
 from .opencode_state import opencode_db_path
 
@@ -117,6 +118,9 @@ def _opencode_hook_health(config: ApiConfig) -> dict[str, object]:
     db = opencode_db_path()
     hooks = opencode_hook_log_health(None)
     hooks["db_exists"] = db.is_file()
+    # The decision plugin is the only source for OpenCode ``待确认`` rows, so
+    # whether it is installed and being written to is worth reporting.
+    hooks["decisions"] = opencode_decision_log_health(None)
     return hooks
 
 

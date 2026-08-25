@@ -17,6 +17,12 @@ from typing import Any
 MONITOR_MARKER = "CODEX_CLI_MONITOR_HOOK=1"
 DEFAULT_HOOK_EVENTS = {
     "UserPromptSubmit": {"command": "user_prompt_submit"},
+    # PermissionRequest is the only signal that tells a resident observer Codex
+    # has stopped and is waiting for the user to approve something; the rollout
+    # file cannot distinguish an approval prompt from a running command.  The
+    # hook writes nothing to stdout, which Codex reads as "no decision", so the
+    # approval prompt behaves exactly as it would without the hook installed.
+    "PermissionRequest": {"command": "permission_request"},
     "Stop": {"command": "stop"},
 }
 LEGACY_HOOK_EVENTS = {

@@ -35,14 +35,55 @@ class WidgetAnimationTests(unittest.TestCase):
         )
         self.assertIsNotNone(update_match)
         update_body = update_match.group("body")
-        self.assertIn("edge_tuck_animating() || has_running_sessions()", update_body)
+        self.assertIn("edge_tuck_animating() || has_animated_sessions()", update_body)
         self.assertIn("empty_state_is_connecting()", update_body)
         self.assertIn("stop_animation_frame_timer(0);", update_body)
         self.assertIn("high_refresh_needed && !high_refresh_started", update_body)
 
+    def test_high_refresh_timer_covers_waiting_sessions(self) -> None:
+        # A 待确认 row glows too, so it has to keep the frame timer alive and
+        # be painted on the dynamic layer instead of the cached bitmap.
+        animated_match = re.search(
+            r"static int is_animated_status\(const char \*status\) \{(?P<body>.*?)\n\}",
+            self.source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(animated_match)
+        self.assertIn(
+            "is_running_status(status) || is_waiting_status(status)",
+            animated_match.group("body"),
+        )
+        sessions_match = re.search(
+            r"static int has_animated_sessions\(void\) \{(?P<body>.*?)\n\}",
+            self.source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(sessions_match)
+        self.assertIn("is_animated_status(", sessions_match.group("body"))
+        static_match = re.search(
+            r"static void paint_widget_static\(.*?\n\}",
+            self.source,
+            re.DOTALL,
+        )
+        dynamic_match = re.search(
+            r"static void draw_widget_dynamic\(.*?\n\}\n",
+            self.source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(static_match)
+        self.assertIsNotNone(dynamic_match)
+        self.assertIn(
+            "if (!is_animated_status(g_app.sessions[session_index].status))",
+            static_match.group(0),
+        )
+        self.assertIn(
+            "if (is_animated_status(g_app.sessions[session_index].status))",
+            dynamic_match.group(0),
+        )
+
     def test_running_pulse_uses_high_resolution_clock(self) -> None:
         pulse_match = re.search(
-            r"static int running_pulse_level\(void\) \{(?P<body>.*?)\n\}",
+            r"static int pulse_level\(int period_ms\) \{(?P<body>.*?)\n\}",
             self.source,
             re.DOTALL,
         )
@@ -50,6 +91,37 @@ class WidgetAnimationTests(unittest.TestCase):
         pulse_body = pulse_match.group("body")
         self.assertIn("QueryPerformanceCounter", pulse_body)
         self.assertNotIn("GetTickCount", pulse_body)
+        self.assertIn(
+            "return pulse_level(RUNNING_PULSE_PERIOD_MS);",
+            self.source,
+        )
+
+    def test_waiting_pulse_breathes_slower_than_the_running_pulse(self) -> None:
+        # Hue alone would not survive a colour-blind glance, so the two open-turn
+        # states also differ in rhythm.
+        running = re.search(r"#define RUNNING_PULSE_PERIOD_MS (\d+)", self.source)
+        waiting = re.search(r"#define WAITING_PULSE_PERIOD_MS (\d+)", self.source)
+        self.assertIsNotNone(running)
+        self.assertIsNotNone(waiting)
+        self.assertGreater(int(waiting.group(1)), int(running.group(1)))
+        self.assertIn(
+            "return pulse_level(WAITING_PULSE_PERIOD_MS);",
+            self.source,
+        )
+
+    def test_waiting_glow_is_a_single_amber_field(self) -> None:
+        waiting_match = re.search(
+            r"static void draw_status_indicator\(.*?"
+            r"if \(is_waiting_status\(status\)\) \{(?P<body>.*?)"
+            r"\n\s*return;\n\s*\}",
+            self.source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(waiting_match)
+        waiting_body = waiting_match.group("body")
+        self.assertIn("waiting_pulse_level()", waiting_body)
+        self.assertEqual(waiting_body.count("fill_luminous_indicator("), 1)
+        self.assertNotIn("fill_soft_indicator(", waiting_body)
 
     def test_running_glow_uses_one_continuous_luminous_field(self) -> None:
         glow_match = re.search(

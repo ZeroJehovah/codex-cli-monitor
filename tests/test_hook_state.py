@@ -417,6 +417,117 @@ class HookStateTests(unittest.TestCase):
         self.assertEqual(state.last_event, "stop")
         self.assertEqual(state.session_id, "019f-turn")
 
+    def test_permission_request_opens_a_pending_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.jsonl"
+            append_hook_event("user_prompt_submit", cwd="/work/a", path=path)
+            append_hook_event(
+                "permission_request",
+                tool="Bash",
+                cwd="/work/a",
+                path=path,
+            )
+
+            states = summarize_hook_events(load_hook_events(path))
+
+        state = states[str(Path("/work/a").resolve())][0]
+        self.assertTrue(state.in_turn)
+        self.assertTrue(state.awaiting_decision)
+        self.assertEqual(state.permission_tool, "Bash")
+        self.assertIsNotNone(state.permission_pending_at)
+        self.assertTrue(state.to_dict()["awaiting_decision"])
+
+    def test_permission_request_alone_opens_a_displayable_turn(self) -> None:
+        # A resumed session can reach an approval prompt without this monitor
+        # ever seeing the UserPromptSubmit that opened the turn.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.jsonl"
+            append_hook_event(
+                "permission_request",
+                tool="Bash",
+                cwd="/work/a",
+                path=path,
+            )
+
+            states = summarize_hook_events(load_hook_events(path))
+
+        state = states[str(Path("/work/a").resolve())][0]
+        self.assertTrue(state.has_turn_activity)
+        self.assertTrue(state.awaiting_decision)
+        self.assertIsNotNone(state.turn_started_at)
+
+    def test_post_tool_use_answers_a_pending_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.jsonl"
+            append_hook_event("user_prompt_submit", cwd="/work/a", path=path)
+            append_hook_event(
+                "permission_request",
+                tool="Bash",
+                cwd="/work/a",
+                path=path,
+            )
+            append_hook_event("post_tool_use", tool="Bash", cwd="/work/a", path=path)
+
+            states = summarize_hook_events(load_hook_events(path))
+
+        state = states[str(Path("/work/a").resolve())][0]
+        self.assertTrue(state.in_turn)
+        self.assertFalse(state.awaiting_decision)
+        self.assertIsNone(state.permission_pending_at)
+
+    def test_stop_and_new_prompt_clear_a_pending_decision(self) -> None:
+        for closing_event in ("stop", "user_prompt_submit"):
+            with self.subTest(event=closing_event):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "hooks.jsonl"
+                    append_hook_event("user_prompt_submit", cwd="/work/a", path=path)
+                    append_hook_event(
+                        "permission_request",
+                        tool="Bash",
+                        cwd="/work/a",
+                        path=path,
+                    )
+                    append_hook_event(closing_event, cwd="/work/a", path=path)
+
+                    states = summarize_hook_events(load_hook_events(path))
+
+                state = states[str(Path("/work/a").resolve())][0]
+                self.assertFalse(state.awaiting_decision)
+                self.assertIsNone(state.permission_pending_at)
+                self.assertIsNone(state.permission_tool)
+
+    def test_mismatched_turn_stop_keeps_a_live_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hooks.jsonl"
+            append_hook_event(
+                "user_prompt_submit",
+                cwd="/work/a",
+                ppid=100,
+                path=path,
+                hook_payload={"session_id": "s-a", "turn_id": "turn-2"},
+            )
+            append_hook_event(
+                "permission_request",
+                tool="Bash",
+                cwd="/work/a",
+                ppid=100,
+                path=path,
+                hook_payload={"session_id": "s-a", "turn_id": "turn-2"},
+            )
+            append_hook_event(
+                "stop",
+                cwd="/work/a",
+                ppid=100,
+                path=path,
+                hook_payload={"session_id": "s-a", "turn_id": "turn-1"},
+            )
+
+            states = summarize_hook_events(load_hook_events(path))
+
+        state = states[str(Path("/work/a").resolve())][0]
+        self.assertTrue(state.in_turn)
+        self.assertTrue(state.awaiting_decision)
+
 
 if __name__ == "__main__":
     unittest.main()

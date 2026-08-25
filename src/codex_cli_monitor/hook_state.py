@@ -77,6 +77,19 @@ class HookSessionState:
     last_tool: str | None = None
     codex_pid: int | None = None
     source: str | None = None
+    permission_pending_at: float | None = None
+    permission_tool: str | None = None
+
+    @property
+    def awaiting_decision(self) -> bool:
+        """True when Codex asked the user to approve something and has not moved on.
+
+        ``PermissionRequest`` fires while Codex is blocked on an approval
+        prompt.  The flag is cleared by the next lifecycle edge for the same
+        session (a tool completing, the turn stopping, or a new prompt), so a
+        granted approval can never leave the state pinned here.
+        """
+        return self.in_turn and self.permission_pending_at is not None
 
     def to_dict(self) -> dict:
         return {
@@ -98,6 +111,9 @@ class HookSessionState:
             "last_tool": self.last_tool,
             "codex_pid": self.codex_pid,
             "source": self.source,
+            "permission_pending_at": self.permission_pending_at,
+            "permission_tool": self.permission_tool,
+            "awaiting_decision": self.awaiting_decision,
         }
 
 
@@ -322,6 +338,8 @@ def summarize_hook_events(
         last_stopped_turn_id = previous.last_stopped_turn_id
         session_started_at = previous.session_started_at
         session_start_source = previous.session_start_source
+        permission_pending_at = previous.permission_pending_at
+        permission_tool = previous.permission_tool
         tools = active_tool_ids.setdefault(key, set())
         anonymous = anonymous_tools.get(key, 0)
 
@@ -334,8 +352,21 @@ def summarize_hook_events(
             turn_id = event.turn_id or turn_id
             turn_started_at = event.timestamp
             last_stopped_at = None
+            permission_pending_at = None
+            permission_tool = None
             tools.clear()
             anonymous = 0
+        elif event.event == "permission_request":
+            # Codex is blocked on an approval prompt.  The turn is open but no
+            # work advances until the user answers, so this opens the pending
+            # decision instead of ordinary running activity.
+            in_turn = True
+            has_turn_activity = True
+            turn_id = event.turn_id or turn_id
+            permission_pending_at = event.timestamp
+            permission_tool = event.tool or permission_tool
+            if turn_started_at is None:
+                turn_started_at = event.timestamp
         elif event.event == "pre_tool_use":
             in_turn = True
             turn_id = event.turn_id or turn_id
@@ -348,6 +379,9 @@ def summarize_hook_events(
         elif event.event == "post_tool_use":
             in_turn = True
             turn_id = event.turn_id or turn_id
+            # The approved tool ran to completion, so the decision is answered.
+            permission_pending_at = None
+            permission_tool = None
             if event.tool_use_id:
                 tools.discard(event.tool_use_id)
             else:
@@ -361,6 +395,8 @@ def summarize_hook_events(
             if not (event.turn_id and turn_id and event.turn_id != turn_id):
                 in_turn = False
                 turn_id = event.turn_id or turn_id
+                permission_pending_at = None
+                permission_tool = None
                 tools.clear()
                 anonymous = 0
 
@@ -381,6 +417,8 @@ def summarize_hook_events(
             active_tool_count=len(tools) + anonymous,
             active_tool_use_ids=tuple(sorted(tools)),
             last_tool=event.tool or previous.last_tool,
+            permission_pending_at=permission_pending_at,
+            permission_tool=permission_tool,
             codex_pid=event.ppid,
             source=event.source,
         )

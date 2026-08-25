@@ -5,10 +5,12 @@
 ## 功能
 
 - 扫描当前系统里的 Codex CLI、OpenCode CLI 和 Claude Code CLI 进程，显示会话数量、PID、TTY、工作目录、运行时长等信息。
-- 使用 Codex 低频 hooks 驱动三态流转，并用最小化结构化终端事件补足失败结果。
-- 对 OpenCode 会话通过只读 SQLite 旁路读取 `~/.local/share/opencode/opencode.db` 推理状态（运行中/成功/失败），可选安装生命周期 hook 增强绑定。
+- 使用 Codex 低频 hooks 驱动状态流转，并用最小化结构化终端事件补足失败结果。
+- 把「回合已停下、必须由人回答才能继续」（方案选择、权限授权、确认提示）单独显示为
+  `待确认`，而不是继续显示 `运行中`，避免漏掉需要手动操作的会话。
+- 对 OpenCode 会话通过只读 SQLite 旁路读取 `~/.local/share/opencode/opencode.db` 推理状态（运行中/成功/失败），可选安装生命周期 hook 增强绑定，可选安装决策插件识别 `待确认`（OpenCode 只把待回答的提示留在内存里）。
 - 对 Claude Code 会话通过只读读取 `~/.claude/sessions/<PID>.json` 注册文件和绑定的会话
-  transcript 推理状态（运行中/成功/失败），零配置、不安装任何 hook。
+  transcript 推理状态（运行中/待确认/成功/失败），零配置、不安装任何 hook。
 - 保留轻量进程存活检查，用于清理未触发 Hook 就意外退出的会话。
 - 支持 JSON 输出，方便接入脚本或面板。
 - 支持常驻后台 HTTP API，供桌面前端轮询当前会话状态。
@@ -53,25 +55,52 @@ assistant 文本、工具输出或错误关键词推断状态。监控不会输�
 在，则该进程被视为已确认脱离的终端孤儿，不计入打开的 Codex 会话。仅仅长时间没有输
 入或网络流量不是断线证据，正常闲置等待输入的 SSH Codex 仍会显示。
 
-主状态只有三种：
+主状态只有四种：
 
 - `运行中`：已提交提示词，或准确 PID 打开的 session 文件在该进程启动后记录了结构化
   `task_started`；AI 正在思考、等待 API、执行 MCP、本地工具或其他操作。这也覆盖进程
   启动后直接进入 `/goal`，以及没有再次触发 `UserPromptSubmit` 的 Goal 自动续跑。
+- `待确认`：回合仍然开着，但已经停在一个必须由人回答的请求上（权限授权、方案选择、
+  确认提示），不回答就不会自己往下走。只有明确的结构化信号才会产生这个状态，且一定
+  带上一句有界的请求说明（表格里的 `WAITING FOR` 列、JSON 里的 `waiting_reason`、前
+  端悬浮提示）。信号缺失时一律退回 `运行中`，绝不靠沉默、耗时或进程层面猜测得出。
 - `成功`：已显示会话的最近一轮通过 `Stop` 或结构化终端事件完成成功。
 - `失败`：从运行中结束，且最近一轮出现 API/模型错误，或被手动 Ctrl+C 中断。
+
+三种 CLI 共用同一条规则：一个已经停下、没有人回答就无法继续的回合显示为 `待确认`。
+它的正向信号分别是 Codex 的 `PermissionRequest` hook、Claude Code 注册文件里的
+`waiting` 状态，以及 OpenCode 决策插件写下的 ask/answer 标记。
 
 新打开但尚未提交提示词、也没有进程启动后的准确 PID-open `task_started` 的 Codex 进程
 不会显示；`SessionStart` 本身也不创建状态行。直接 `/goal` 和后续无提交 Hook 的 Goal
 自动续跑都可通过这条结构化生命周期路径创建或更新状态行。JSON 为兼容现有调用方仍保留
 `inferred_status` 字段，但其中只使用
-`running_hook`、`running_terminal`、`success_hook`、`success_terminal` 和
-`failure_terminal` 这类确定来源说明，不再包含 CPU、网络或工具活动推断。表格和顶层
-`status` 只显示上面的三种主状态。
+`running_hook`、`running_terminal`、`success_hook`、`success_terminal`、
+`failure_terminal`、`waiting_decision_hook`、`waiting_decision_registration` 和
+`waiting_decision_plugin` 这类确定来源说明，不再包含 CPU、网络或工具活动推断。表格和
+顶层 `status` 只显示上面的四种主状态。
+
+### Codex 待确认判定
+
+Codex 只有 `PermissionRequest` 这一个正向信号能说明「已经停在审批提示上」：rollout 文
+件在提问之前就写下了工具调用，而调用输出要等工具跑完才写，所以文件里没有任何记录能把
+「等待授权」和「正在执行」分开。因此监控只用这个 hook：
+
+- `PermissionRequest` 触发后，同一 session 置为 `待确认`，`waiting_reason` 用请求的工具
+  名（hook 只记录事件和工具名，stdout 恒为空，Codex 不会从监控读到任何决策）。
+- 同一 session 的下一个生命周期边缘清除该标记：`Stop`（回合结束）、新的
+  `UserPromptSubmit`，以及启用了工具事件时的 `PostToolUse`。因此批准后不可能一直粘在
+  `待确认`。
+- 提示打开之后 rollout 里出现任何新记录，也说明 Codex 已经继续，同样释放该行——即使被
+  批准的命令跑得很久、`PostToolUse` 边缘还没到。
+- 已知取舍：若被批准的命令既跑得久、又在结束前不写任何 rollout 记录，这一行会保持
+  `待确认` 直到工具完成。宁可晚一点回到 `运行中`，也不要漏掉真正需要人操作的会话。
+
+同一个进程上，正在等待决策的开启回合优先于仅仅在运行的回合。
 
 ### OpenCode 状态判定
 
-OpenCode 与 Codex CLI 共存显示，使用相同的三种主状态：
+OpenCode 与 Codex CLI 共存显示，使用相同的四种主状态：
 
 - 只读打开 `~/.local/share/opencode/opencode.db`，把运行中的 `opencode` 进程绑定到
   `session.directory` 与进程 `cwd` 相同的会话行。
@@ -83,13 +112,42 @@ OpenCode 与 Codex CLI 共存显示，使用相同的三种主状态：
 - 可选安装 OpenCode 生命周期 hook 后，监控可通过 hook marker 的 `session_id`/pid 精确
   绑定进程与会话，并提供比数据库 flush 更及时的退出边缘。即使不安装 hook，SQLite
   只读轮询本身仍可工作（更适合只想旁路观察的用户）。
+- OpenCode 把待回答的权限/提问提示只保存在内存里：`permission` 表只记录已经授予的授权，
+  持久化事件表里也没有权限事件，磁盘上没有任何东西能把「模型在干活」和「停下来等人选」
+  分开。因此 `待确认` 需要额外安装可选的决策插件（见下文）；不安装时，卡在提示上的
+  OpenCode 会话仍然显示 `运行中`，与插件出现之前的行为一致。
 
 所有 OpenCode 会话在聚合层、采集快照和 Windows 前端中带 `cli_type=opencode` 标识，
 与 `cli_type=codex` 的会话并列显示。
 
+#### 可选：OpenCode 决策插件
+
+OpenCode 会自动发现 `~/.config/opencode/plugin/*.js`。安装器只放进去一个文件
+`codex-monitor-decisions.js`，它订阅 OpenCode 的观察性 `event` 事件流，在提示打开和被回
+答时各追加一条极小的 JSONL 标记：
+
+```bash
+./bin/opencode-monitor-install-plugin            # 安装或更新
+./bin/opencode-monitor-install-plugin --check    # 只检查状态
+./bin/opencode-monitor-install-plugin --uninstall  # 只删除监控自己的插件文件
+```
+
+- 插件只挂观察性的 `event` 流，绝不实现 `permission.ask` 之类能左右 OpenCode 决策的钩子。
+- 只记录「提示打开/被回答」这一状态跃迁、结构性标识（request id、session id）、进程与目
+  录，以及短的权限类别；绝不记录 `patterns`、`metadata`、命令原文、提问正文或工具输出。
+- 日志按其他监控日志的同一规则读取：有界尾读、一代轮转、坏行跳过。超过 6 小时的标记直接
+  忽略，这样在提示上被杀掉的会话不会把某个目录永久钉在 `待确认`。
+- 覆盖是纯建议性的：只有 SQLite 已经判定为 `运行中` 的行才会被改写成 `待确认`，所以插件
+  既不能让已结束的行「复活」，也不能凭空造出 OpenCode 并不存在的开启回合。
+- 一次回答会同时清掉同 session 下所有未回答的标记（ask 用 `id`、reply 用 `requestID`，标
+  识对不齐时不能把一行钉住整轮）。代价是同一 session 同时开两个提示时，第一个回答会一起
+  释放——只会少报 `待确认`，不会多报。
+- 安装/更新走同目录临时文件原子替换，靠 marker 识别自己的文件，绝不覆盖非监控文件，卸载
+  只删自己那一个文件。
+
 ### Claude Code 状态判定
 
-Claude Code 与 Codex/OpenCode 共存显示，使用相同的三种主状态。这条路径完全零配置：
+Claude Code 与 Codex/OpenCode 共存显示，使用相同的四种主状态。这条路径完全零配置：
 不安装 hook、不修改 `~/.claude/settings.json`、不修改 Claude Code 本体，只读取它自己
 写出的结构化文件。
 
@@ -100,9 +158,11 @@ Claude Code 与 Codex/OpenCode 共存显示，使用相同的三种主状态。�
 - 只显示 `kind=interactive` 的注册。`bg`、`daemon`、`daemon-worker` 属于后台维护进程
   树，保持隐藏（与排除 `codex exec` 的取舍一致）。`claude -p` 等一次性非交互调用根本
   不写注册文件，天然自我排除。
-- 注册文件里的 `status` 为 `busy`（模型或工具执行中）、`shell`（正在跑 shell 命令）或
-  `waiting`（回合已开启、正等待用户决策）→ `运行中`。这一条路径完全不读 transcript，
-  所以最热的分支开销最低。
+- 注册文件里的 `status` 为 `busy`（模型或工具执行中）或 `shell`（正在跑 shell 命令）→
+  `运行中`。这一条路径完全不读 transcript，所以最热的分支开销最低。
+- `status=waiting` 表示回合已开启、正停在等待用户决策的提示上（选方案、批准权限）→
+  `待确认`，并把注册文件自己写下的 `waitingFor` 标签（有界长度）作为请求说明带出来。
+  这个判定同样只读注册文件：绝不去抓终端、读 transcript 或猜测任何在途工具状态。
 - `status=idle`（或任何未知的将来状态）时，回退读取绑定 transcript 的有界尾部，倒序找
   出最近一轮的结局：
   - 最近的主线 `assistant` 记录带 `isApiErrorMessage` 或 `isAbortedMidStream` → `失败`。
@@ -121,7 +181,7 @@ Claude Code 与 Codex/OpenCode 共存显示，使用相同的三种主状态。�
 
 ## 使用方法
 
-先安装低侵入 hooks。默认只记录 `UserPromptSubmit` 和 `Stop`：
+先安装低侵入 hooks。默认只记录 `UserPromptSubmit`、`PermissionRequest` 和 `Stop`：
 
 ```bash
 ./bin/codex-monitor-install-hooks
@@ -129,8 +189,11 @@ Claude Code 与 Codex/OpenCode 共存显示，使用相同的三种主状态。�
 
 安装后，在每个正在运行或新打开的 Codex CLI 里执行 `/hooks`，按提示 review/trust 新 hook。这个步骤是 Codex 的安全机制。
 
-信任后，`UserPromptSubmit` 把进程置为 `运行中`，`Stop` 把同一 `turn_id` 置为
-`成功`。Codex 的错误和 Ctrl+C 分支不会触发 `Stop`，因此监控还会按 `session_id` 定位
+信任后，`UserPromptSubmit` 把进程置为 `运行中`，`PermissionRequest` 把同一 session 置为
+`待确认`，`Stop` 把同一 `turn_id` 置为
+`成功`。`PermissionRequest` 是 `待确认` 的唯一来源，因此属于状态需求而不是可选增强；它
+和其他 hook 一样必须 fail-open、stdout 恒为空（Codex 绝不会从监控读到任何决策），并且只
+记录事件本身和被请求的工具名。Codex 的错误和 Ctrl+C 分支不会触发 `Stop`，因此监控还会按 `session_id` 定位
 唯一 session 文件，仅增量尾读同一 `turn_id` 的结构化终端事件：非空
 `task_complete.error`/`turn_complete.error` 或 `TurnAborted` 置为 `失败`，无错误的完成事件
 置为 `成功`。Hook 状态按 PID 和 `session_id` 分开保存；同一 PID 下任何准确绑定的活动
@@ -195,7 +258,8 @@ PYTHONPATH=src python3 -m codex_cli_monitor --serve --host 127.0.0.1 --port 8765
 curl http://127.0.0.1:8765/api/sessions
 ```
 
-API 会返回每个 Codex 进程的主状态、目录和启动时间，示例字段如下：
+API 会返回每个 Codex 进程的主状态、目录和启动时间，示例字段如下（`waiting_reason` 只在
+`status` 为 `待确认` 时非空，其余状态为 `null`）：
 
 ```json
 {
@@ -203,7 +267,8 @@ API 会返回每个 Codex 进程的主状态、目录和启动时间，示例字
   "sessions": [
     {
       "pid": 1234,
-      "status": "运行中",
+      "status": "待确认",
+      "waiting_reason": "shell",
       "directory": "/work/project",
       "started_at": 1782475200.0,
       "started_at_iso": "2026-06-26T12:00:00Z"
@@ -245,7 +310,20 @@ PYTHONPATH=src python3 -m codex_cli_monitor --codex-home ~/.codex
 PYTHONPATH=src python3 -m codex_cli_monitor
 ```
 
-表格会多出一列 `CLI`（`codex`、`opencode` 或 `claude`）。
+表格会多出一列 `CLI`（`codex`、`opencode` 或 `claude`）和一列 `WAITING FOR`：只有
+`待确认` 的行会在这里显示它在等什么，其余行显示 `-`。
+
+#### （可选）为 OpenCode 安装决策插件
+
+只有装了这个插件，卡在权限或提问提示上的 OpenCode 会话才会显示 `待确认`；否则它们仍显示
+`运行中`。安装方式与行为约束见上文「可选：OpenCode 决策插件」：
+
+```bash
+./bin/opencode-monitor-install-plugin
+```
+
+它与下面的生命周期 hook 相互独立：hook 提升绑定精度，插件提供 `待确认` 信号，装一个、装
+两个或都不装都可以。
 
 #### （可选）为 OpenCode 安装生命周期 Hook
 
@@ -289,7 +367,8 @@ OpenCode 的 hook 配置在其 `~/.config/opencode/opencode.json` 中，与 Code
   "sessions": [
     {
       "pid": 2665929,
-      "status": "运行中",
+      "status": "待确认",
+      "waiting_reason": "plan approval",
       "cli_type": "claude",
       "directory": "/opt/dev/projects/personal/codex-cli-monitor",
       "started_at": 1782475200.0
@@ -316,7 +395,8 @@ CLAUDE_CONFIG_DIR=/custom/claude PYTHONPATH=src python3 -m codex_cli_monitor
 ```
 
 `/healthz` 中的 `claude_state` 字段用于排查这条路径，包含解析出的 home 路径、
-`sessions`/`projects` 目录是否存在，以及当前注册文件数量（不含任何会话内容）：
+`sessions`/`projects` 目录是否存在、当前注册文件数量，以及其中有多少个正报告等待用户决策
+（`waiting_sessions`）——不含任何会话内容：
 
 ```bash
 curl -s http://127.0.0.1:8765/healthz | python3 -m json.tool | grep -A 6 claude_state
@@ -606,10 +686,14 @@ Monitor marker 的 command handler，同一 matcher group 内的第三方 handle
 
 ```text
 UserPromptSubmit
+PermissionRequest
 Stop
 ```
 
-`SessionStart`、`PreToolUse` 和 `PostToolUse` 都不是三态正确性的依赖。旧版 Monitor
+`PermissionRequest` 是 `待确认` 的唯一信号来源，因此和另外两个一样属于状态正确性的依赖，
+不是可选的诊断增强。
+
+`SessionStart`、`PreToolUse` 和 `PostToolUse` 都不是状态正确性的依赖。旧版 Monitor
 安装的 `SessionStart` 会在下次运行安装器时移除。仅在排查工具生命周期时临时启用后两者：
 
 ```bash
@@ -692,6 +776,10 @@ tail -f ~/.local/state/codex-cli-monitor/hooks.jsonl
 轮转代数、事件模式以及非敏感的 stdin/写入错误计数和最近诊断。CLI `--json` 的
 `hook_health` 字段提供相同信息。它们不包含消息正文、Token 或 transcript 路径。
 
+OpenCode 侧的 `opencode_hooks.decisions` 用来排查 `待确认`：给出决策日志路径、是否存在、
+大小、轮转代数、最近事件时间、有效记录数，以及当前仍未被回答的提示数量
+（`pending_decisions`）。同样不含类别之外的任何提示内容。
+
 如果移动了仓库目录，必须重新运行对应安装脚本或 `codex-monitor-install-hooks`，因为 Hook 命令中记录了仓库的绝对路径。随后运行 `--check` 并重新 `/hooks` trust。
 
 同一台机器如果有多个 Linux 用户分别运行 Codex，需要为每个用户分别安装 Hook 和采集服务，并使用不同的 systemd unit 名称、PID 文件和本机 API 端口；默认模板针对一个 Codex 用户设计。
@@ -765,6 +853,10 @@ sudo systemctl disable codex-monitor-collector.service
 ### 8. 更新代码
 
 systemd 服务直接使用 clone 仓库中的 `src`。更新代码后必须重启对应服务：
+
+> 升级顺序：先升级并重启 VPS 聚合服务，再升级采集器。聚合端会校验快照里的状态值，遇到
+> 自己不认识的状态会拒收整份快照；引入 `待确认` 这类新状态时，如果先升级采集器，旧聚合
+> 端会把该采集器的全部会话一起丢掉，直到聚合端也升级完成。
 
 VPS：
 
@@ -896,6 +988,24 @@ Claude Code 这条路径不涉及 hook，排查顺序如下：
 - `claude_state.registered_sessions` 为 0 但确有交互式会话在跑，说明监控读到的是另一个
   home 目录。
 
+#### 会话卡在提示上，但仍显示 `运行中`
+
+`待确认` 只来自明确的结构化信号，缺信号时按设计退回 `运行中`。按 CLI 分别检查：
+
+- Codex：`./bin/codex-monitor-install-hooks --check` 确认 `PermissionRequest` 已安装，并在
+  Codex 内执行 `/hooks` 重新 review/trust（新增事件会使旧的 trust hash 失效）。
+- OpenCode：`./bin/opencode-monitor-install-plugin --check` 确认决策插件已安装；插件是
+  OpenCode 唯一的 `待确认` 来源，没装就只会显示 `运行中`。安装后需要重启 OpenCode 才会
+  加载插件。`/healthz` 的 `opencode_hooks.decisions.record_count` 保持为 0，说明插件没被
+  加载或没有收到事件。
+- Claude Code：无需任何安装。`/healthz` 的 `claude_state.waiting_sessions` 为 0 但确有会话
+  停在选择提示上时，通常是监控读到了另一个 home 目录（对比 `claude_state.home`），或该版
+  本的 Claude Code 还不会把 `status` 写成 `waiting`。
+
+反过来，某一行长时间停在 `待确认`：Codex 侧最可能是被批准的命令跑得很久且期间不写
+rollout 记录（见「Codex 待确认判定」的已知取舍）；OpenCode 侧的遗留标记会在 6 小时后
+自动过期。
+
 #### SSH 已断开但 Codex 会话仍显示
 
 监控会自动忽略 TTY 已删除、终端前台进程组失效或会话 leader 消失的已确认终端孤儿。
@@ -952,8 +1062,8 @@ Windows 前端在 `windows/CodexMonitorWidget`。它是一个轻量原生 Win32 
 exe 会直接退出，不会打开第二个悬浮窗。它会轮询 `/api/sessions`，并按目录分组显示
 无表头表格：每行第一列是
 目录名，第二列是该目录下一个或多个带柔化边缘的进程状态圆点。Codex、OpenCode 与
-Claude Code 会话会并列显示在同一张表里，圆点颜色语义相同（蓝色运行中 / 绿色成功 /
-红色失败），悬停详情的 `CLI` 行（`codex`、`opencode` 或 `claude`）用于区分。前端按
+Claude Code 会话会并列显示在同一张表里，圆点颜色语义相同（蓝色运行中 / 琥珀色待确认 /
+绿色成功 / 红色失败），悬停详情的 `CLI` 行（`codex`、`opencode` 或 `claude`）用于区分。前端按
 `cli_type` 字段透传显示，新增 CLI 类型无需重新编译 exe。它不依赖
 .NET Runtime 或 Electron。
 
@@ -963,8 +1073,10 @@ Claude Code 会话会并列显示在同一张表里，圆点颜色语义相同�
 在收展和呼吸动画的每一帧重复测量。
 
 每行最左侧使用彩色竖条区分服务器，目录名前不再添加服务器名前缀。颜色从象牙白、洋
-红、琥珀金、亮紫和淡薰衣草色组成的高分离度预设色板中选择，避开状态标识使用的蓝色、
-绿色、红色及相近颜色。色板中允许保留彼此接近的候选色，但按服务器名称和 ID 排序后，
+红、青绿、亮紫和淡兰花紫组成的高分离度预设色板中选择，避开状态标识使用的蓝色、琥珀
+色、绿色、红色及相近颜色。四种状态圆点已经占掉了蓝、琥珀、绿、红，因此服务器色板只
+留在剩下的冷色与浅彩范围内；收纳布局会把服务器彩条放在状态圆点旁边仅一个间距处，所
+以任何预设都不能看起来像状态色。色板中允许保留彼此接近的候选色，但按服务器名称和 ID 排序后，
 相邻服务器的 RGB 距离至少为 240，适合区分深色背景上的 3 像素细彩条；普通刷新期间颜
 色保持稳定，只有新增、移除服务器造成新的相邻低对比组合时才会重选必要的颜色。该服
 务器的全部会话消失后会释放颜色，之后重新出现时可以获得新的随机颜色。悬浮窗不再绘
@@ -973,7 +1085,7 @@ Claude Code 会话会并列显示在同一张表里，圆点颜色语义相同�
 
 尚未收到首次后端响应、后端确认返回空会话列表，或者请求失败且当前没有可显示会话时，
 悬浮窗会显示独立的单行空状态，而不是只剩三条边框的空矩形。三种情况分别显示“正在连
-接”“暂无会话”和“连接失败”，并使用不占用蓝、绿、红会话状态色的中性左侧强调条与
+接”“暂无会话”和“连接失败”，并使用不占用蓝、琥珀、绿、红会话状态色的中性左侧强调条与
 柔化指示点。空状态同样支持左右贴边收纳：文字渐隐，指示点平滑变为窄竖向胶囊，左侧
 强调条始终保留。已有会话可见时，悬浮窗需要连续收到 6 次成功空响应才会清空；请求
 失败或重新收到非空响应会重置计数，避免远端 TTL 短暂抖动造成整台服务器闪消。
@@ -981,15 +1093,22 @@ Claude Code 会话会并列显示在同一张表里，圆点颜色语义相同�
 圆点颜色：
 
 - 带呼吸光晕的蓝色：`运行中`
+- 带呼吸光晕的琥珀色：`待确认`
 - 绿色：`成功`
 - 红色：`失败`
+
+`待确认` 与 `运行中` 使用同一种连续柔光场，只是换成琥珀色，并且呼吸周期更慢、明暗与
+光晕范围的起伏更大：仅靠色相在快速一瞥或色觉障碍下不足以区分，节奏也要说明「这一个
+是停下来等你的」。两种发光状态都走动态绘制层和高分辨率帧计时器，静态层只缓存不发光
+的行。鼠标悬停时，状态一行会在状态名后面括注它在等什么（例如 `待确认 (shell)`），不用
+打开终端也知道要回答什么。
 
 悬浮窗始终置顶，会按目录名宽度、目录行数和每行圆点数量动态调整大小，不为目录名
 预留固定大宽度，可以拖动位置并在下次启动时恢复位置。悬浮窗会保持在屏幕工作区内；
 如果动态变宽或变高导致越界，会自动贴到对应边缘。右键菜单中的“贴边收纳”选项勾
 选时，悬浮窗贴在左侧或右侧后，鼠标移出 1 秒会动态收纳，只折叠目录名，服务器彩色
-标识条继续保留，状态圆点平滑变形为更节省宽度的竖向胶囊条；运行中的蓝色竖条继续
-显示呼吸光晕。鼠标移入会动态展开并可打断正在进行的收纳动画，状态条同时恢复为圆
+标识条继续保留，状态圆点平滑变形为更节省宽度的竖向胶囊条；运行中的蓝色竖条和待确认
+的琥珀色竖条继续显示各自的呼吸光晕。鼠标移入会动态展开并可打断正在进行的收纳动画，状态条同时恢复为圆
 点。完全收纳后，服务器彩条到首个状态条、相邻状态条之间、末个状态条到右边框的三
 处水平间距完全一致；取消勾选后不会自动收纳。鼠标移到状态标识上会
 显示 CLI 类型、PID、状态、目录和启动时间。右键点击悬浮窗会打开菜单，可以调整显示大小、打开
@@ -1073,8 +1192,9 @@ ${XDG_STATE_HOME:-~/.local/state}/codex-cli-monitor/launches.jsonl
 
 ## 测试
 
-运行后端单元测试（包含 OpenCode SQLite 解析、OpenCode hook 日志与安装器测试，以及
-Claude Code 注册绑定与 transcript 结局判定测试）：
+运行后端单元测试（包含 OpenCode SQLite 解析、OpenCode hook 日志与安装器测试、OpenCode
+决策日志与插件安装器测试、Codex `PermissionRequest` 待确认判定，以及 Claude Code 注册绑定
+与 transcript 结局判定测试）：
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
