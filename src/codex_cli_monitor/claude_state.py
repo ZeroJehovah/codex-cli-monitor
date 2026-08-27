@@ -25,6 +25,17 @@ option choice, a permission prompt, an authorization request - so it maps to
 manual action to continue.  ``idle`` means no turn is in flight, so the outcome
 of the most recent turn is read from the bound transcript instead.
 
+An open-turn status is only displayed once the session has actually submitted
+work.  Claude Code reports ``waiting`` for *any* open dialog, including the
+onboarding, trust, and model prompts a freshly launched session shows before the
+user has typed anything, and it reports ``busy`` for startup work of its own.  A
+session parked on such a prompt would otherwise sit in the display as ``待确认``
+forever without a person ever having used it - which is what happens to an
+interactive ``claude`` another CLI spawned into a pty nobody is watching.
+Display eligibility is therefore proven from the transcript, exactly as a
+freshly opened Codex process stays hidden until a prompt hook or a structured
+``task_started`` arrives.
+
 The transcript lives at
 ``~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl``.  Only a bounded tail is
 read, and only structural fields are inspected: the record ``type`` plus the
@@ -74,6 +85,7 @@ __all__ = [
     "read_session_registration",
     "reset_caches",
     "resolve_transcript_path",
+    "transcript_proves_work_submitted",
 ]
 
 # Status values Claude Code writes while a submitted turn is still open and is
@@ -104,6 +116,12 @@ DISPLAY_KINDS = frozenset({"interactive"})
 MAX_REGISTRATION_BYTES = 64 * 1024
 MAX_REGISTRATION_FILES = 512
 TRANSCRIPT_TAIL_BYTES = 1024 * 1024
+# Claude Code writes a short preamble of ``mode``/``permission-mode``/
+# ``file-history-snapshot`` and injected ``isMeta`` records before the first
+# real submission, and a slash command such as ``/model`` adds a few more.  A
+# bounded head read covers that preamble so display eligibility stays provable
+# on a transcript whose tail window no longer reaches the first submission.
+TRANSCRIPT_HEAD_BYTES = 128 * 1024
 MAX_PROJECT_DIRS = 512
 MAX_TRANSCRIPT_CACHE_ENTRIES = 256
 
@@ -112,16 +130,27 @@ _PROJECT_DIR_UNSAFE = re.compile(r"[^a-zA-Z0-9]")
 _CACHE_LOCK = threading.Lock()
 _TRANSCRIPT_CACHE: dict[Path, tuple[tuple[object, ...], "TranscriptOutcome"]] = {}
 _TRANSCRIPT_PATHS: dict[tuple[str, str], Path] = {}
+# Transcripts already proven to carry submitted work.  Display eligibility only
+# ever moves from false to true, so latching it keeps the open-turn path from
+# re-reading a transcript on every resident scan.
+_ELIGIBLE_TRANSCRIPTS: set[str] = set()
 
 
 @dataclass(frozen=True)
 class TranscriptOutcome:
-    """Structural lifecycle facts read from a bounded transcript tail."""
+    """Structural lifecycle facts read from a bounded transcript tail.
+
+    ``work_submitted`` is the display-eligibility fact: the transcript holds at
+    least one main-conversation record proving the session actually started
+    working - a submitted human prompt or any assistant record.  It is the
+    Claude Code equivalent of a Codex prompt hook or structured ``task_started``.
+    """
 
     assistant_seen: bool = False
     terminal_event: bool = False
     failed_event: bool = False
     last_activity_at: float | None = None
+    work_submitted: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -129,6 +158,7 @@ class TranscriptOutcome:
             "terminal_event": self.terminal_event,
             "failed_event": self.failed_event,
             "last_activity_at": self.last_activity_at,
+            "work_submitted": self.work_submitted,
         }
 
 
@@ -271,6 +301,11 @@ def claude_session_state(
     transcript = resolve_transcript_path(session_id, cwd, home)
 
     if registered_status in WORKING_STATUSES:
+        if not transcript_proves_work_submitted(transcript):
+            # The turn Claude Code reports as open is its own startup work or a
+            # launch dialog; nothing has been submitted, so the session stays
+            # monitored but hidden.
+            return None
         blocked = registered_status in WAITING_STATUSES
         return ClaudeSessionState(
             pid=process.pid,
@@ -423,6 +458,81 @@ def read_transcript_outcome(path: Path | None) -> TranscriptOutcome:
     return outcome
 
 
+def transcript_proves_work_submitted(path: Path | None) -> bool:
+    """True once the transcript proves the session actually submitted work.
+
+    This is the display-eligibility gate for a session whose registration reports
+    an open turn, so it has to stay cheap on every resident scan.  Only a bounded
+    head of the transcript is read - the first submission always sits behind
+    Claude Code's short startup preamble - and the answer is latched per file,
+    because a session that has once submitted work never becomes ineligible
+    again.  A missing or unreadable transcript proves nothing and stays hidden.
+    """
+    if path is None:
+        return False
+    key = str(path)
+    with _CACHE_LOCK:
+        if key in _ELIGIBLE_TRANSCRIPTS:
+            return True
+    try:
+        with path.open("rb") as handle:
+            chunk = handle.read(TRANSCRIPT_HEAD_BYTES)
+    except OSError:
+        return False
+
+    truncated = len(chunk) >= TRANSCRIPT_HEAD_BYTES
+    lines = chunk.split(b"\n")
+    if chunk and not chunk.endswith(b"\n"):
+        # Drop the record the head window sliced in half.
+        lines.pop()
+    for raw in lines:
+        record = _record_from_line(raw)
+        if record is not None and _proves_work_submitted(record):
+            return _latch_eligible(key)
+
+    if truncated and read_transcript_outcome(path).work_submitted:
+        # A transcript whose first submission sits beyond the head window is
+        # pathological, so the fallback tail read is only paid until the latch
+        # closes rather than on every scan.
+        return _latch_eligible(key)
+    return False
+
+
+def _latch_eligible(key: str) -> bool:
+    with _CACHE_LOCK:
+        if len(_ELIGIBLE_TRANSCRIPTS) >= MAX_TRANSCRIPT_CACHE_ENTRIES:
+            _ELIGIBLE_TRANSCRIPTS.clear()
+        _ELIGIBLE_TRANSCRIPTS.add(key)
+    return True
+
+
+def _record_from_line(raw: bytes) -> Mapping | None:
+    if not raw or b"\x00" in raw:
+        return None
+    try:
+        record = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _proves_work_submitted(record: Mapping) -> bool:
+    """True for a main-conversation record proving the session started working.
+
+    An ``assistant`` record means the model already produced output, and a
+    submitted human prompt means a turn was opened.  Claude Code's own startup
+    bookkeeping - ``mode``, ``permission-mode``, ``file-history-snapshot``, and
+    the injected ``isMeta`` context records - proves nothing and is ignored, so a
+    session parked on a launch dialog stays hidden.
+    """
+    if record.get("isSidechain") is True:
+        return False
+    record_type = record.get("type")
+    if record_type == "assistant":
+        return True
+    return record_type == "user" and _is_submitted_prompt(record)
+
+
 def _outcome_from_lines(lines: list[bytes]) -> TranscriptOutcome:
     """Derive the last turn's outcome by walking the tail backwards.
 
@@ -443,13 +553,8 @@ def _outcome_from_lines(lines: list[bytes]) -> TranscriptOutcome:
     last_activity_at: float | None = None
 
     for raw in reversed(lines):
-        if not raw or b"\x00" in raw:
-            continue
-        try:
-            record = json.loads(raw)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if not isinstance(record, dict):
+        record = _record_from_line(raw)
+        if record is None:
             continue
         if last_activity_at is None:
             last_activity_at = _iso_to_seconds(record.get("timestamp"))
@@ -476,6 +581,7 @@ def _outcome_from_lines(lines: list[bytes]) -> TranscriptOutcome:
             terminal_event=True,
             failed_event=True,
             last_activity_at=last_activity_at,
+            work_submitted=True,
         )
 
     return TranscriptOutcome(
@@ -483,6 +589,7 @@ def _outcome_from_lines(lines: list[bytes]) -> TranscriptOutcome:
         terminal_event=assistant_seen,
         failed_event=failed_event,
         last_activity_at=last_activity_at,
+        work_submitted=assistant_seen or unanswered_prompt,
     )
 
 
@@ -577,3 +684,4 @@ def reset_caches() -> None:
     with _CACHE_LOCK:
         _TRANSCRIPT_CACHE.clear()
         _TRANSCRIPT_PATHS.clear()
+        _ELIGIBLE_TRANSCRIPTS.clear()

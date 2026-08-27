@@ -159,10 +159,19 @@ Claude Code 与 Codex/OpenCode 共存显示，使用相同的四种主状态。�
   树，保持隐藏（与排除 `codex exec` 的取舍一致）。`claude -p` 等一次性非交互调用根本
   不写注册文件，天然自我排除。
 - 注册文件里的 `status` 为 `busy`（模型或工具执行中）或 `shell`（正在跑 shell 命令）→
-  `运行中`。这一条路径完全不读 transcript，所以最热的分支开销最低。
+  `运行中`。
 - `status=waiting` 表示回合已开启、正停在等待用户决策的提示上（选方案、批准权限）→
   `待确认`，并把注册文件自己写下的 `waitingFor` 标签（有界长度）作为请求说明带出来。
-  这个判定同样只读注册文件：绝不去抓终端、读 transcript 或猜测任何在途工具状态。
+  状态本身只来自注册文件：绝不去抓终端、读 transcript 正文或猜测任何在途工具状态。
+- 上面两种「回合进行中」的状态都要先确认这个会话**真的提交过工作**才会显示。Claude Code
+  对启动阶段的引导、信任、模型选择等对话框同样写 `status=waiting`，对自身启动工作写
+  `busy`——此时用户还什么都没输入。判定依据是绑定 transcript 里出现过主线 `assistant`
+  记录，或一条 `origin.kind=human` 的已提交提示词；`mode`、`permission-mode`、
+  `file-history-snapshot`、`last-prompt` 以及注入的 `isMeta` 记录都不算，完全没有
+  transcript 的会话一律不显示。这条判定只读 transcript 有界头部（128 KiB），并按会话
+  latch 住结果（提交过工作的会话不会再变回不可显示），所以常驻刷新几乎没有额外开销。
+  典型场景：某个 CLI 在无人查看的 pty 里拉起一个交互式 `claude`，它会永远停在启动对话
+  框上报 `waiting`，这种进程不应该出现在悬浮窗里。
 - `status=idle`（或任何未知的将来状态）时，回退读取绑定 transcript 的有界尾部，倒序找
   出最近一轮的结局：
   - 最近的主线 `assistant` 记录带 `isApiErrorMessage` 或 `isAbortedMidStream` → `失败`。
@@ -171,7 +180,7 @@ Claude Code 与 Codex/OpenCode 共存显示，使用相同的四种主状态。�
   - 否则最近一轮正常收尾 → `成功`。
   - `isSidechain=true` 的记录属于子代理，不参与主线回合判定；`isMeta=true` 的用户记录
     和没有 `origin` 的工具结果都不算提交提示词。
-- 尚未产生任何 `assistant` 记录的新会话不显示，与「新打开但尚未提交提示词的进程不显
+- 从未提交过工作的会话不显示，无论注册状态是什么，与「新打开但尚未提交提示词的进程不显
   示」保持一致。
 - transcript 只读取有界尾部（1 MiB），并按 `(size, mtime_ns, inode)` 缓存；transcript
   路径按 session id 缓存，先用编码后的 cwd 直接命中，未命中再做有上限的项目目录扫描。

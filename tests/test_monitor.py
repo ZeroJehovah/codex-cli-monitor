@@ -456,6 +456,10 @@ class ClaudeMonitorTests(unittest.TestCase):
     def test_busy_claude_session_displays_running(self) -> None:
         with _claude_runtime() as (proc, claude_home):
             _write_claude_registration(claude_home, status="busy")
+            _write_claude_transcript(
+                claude_home,
+                [{"type": "user", "origin": {"kind": "human"}}],
+            )
 
             sessions = discover_sessions(proc)
 
@@ -524,12 +528,31 @@ class ClaudeMonitorTests(unittest.TestCase):
 
         self.assertEqual(sessions, ())
 
+    def test_claude_session_on_a_launch_dialog_is_not_displayed(self) -> None:
+        # A `claude` another CLI spawned into a pty nobody is watching parks on
+        # its onboarding dialog and reports `waiting` indefinitely without ever
+        # writing a transcript.  It must not show up as a session.
+        with _claude_runtime() as (proc, claude_home):
+            _write_claude_registration(
+                claude_home,
+                status="waiting",
+                waiting_for="dialog open",
+            )
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(sessions, ())
+
     def test_claude_and_codex_sessions_coexist(self) -> None:
         with _claude_runtime() as (proc, claude_home):
             hook_log = claude_home.parent / "hooks.jsonl"
             _write_process(proc, 100, "codex", "S", 1, ["codex"], "/work/a")
             _hook(hook_log, "user_prompt_submit", "session-a", "turn-a")
             _write_claude_registration(claude_home, status="busy")
+            _write_claude_transcript(
+                claude_home,
+                [{"type": "user", "origin": {"kind": "human"}}],
+            )
 
             sessions = discover_sessions(proc, hook_log=hook_log)
 
@@ -730,6 +753,10 @@ class WaitingDecisionTests(unittest.TestCase):
                 status="waiting",
                 waiting_for="goal proposal",
             )
+            _write_claude_transcript(
+                claude_home,
+                [{"type": "user", "origin": {"kind": "human"}}],
+            )
 
             sessions = discover_sessions(proc)
 
@@ -744,6 +771,10 @@ class WaitingDecisionTests(unittest.TestCase):
     def test_claude_waiting_without_a_label_still_displays_waiting(self) -> None:
         with _claude_runtime() as (proc, claude_home):
             _write_claude_registration(claude_home, status="waiting")
+            _write_claude_transcript(
+                claude_home,
+                [{"type": "user", "origin": {"kind": "human"}}],
+            )
 
             sessions = discover_sessions(proc)
 
