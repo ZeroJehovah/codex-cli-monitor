@@ -264,8 +264,31 @@ def _discover_opencode_sessions(
     hook_events = opencode_hook_events(default_opencode_hook_log_path())
     decisions = pending_decisions(default_opencode_decision_log_path())
     sessions: list[CodexSession] = []
+
+    def anchor_session(root: ProcessInfo) -> str | None:
+        session_id = _opencode_hook_session_id(root, hook_events)
+        if session_id is None:
+            session_id = _opencode_command_session_id(root.cmdline)
+        return session_id
+
+    def open_anchor(root: ProcessInfo) -> bool:
+        state = by_id.get(anchor_session(root))
+        if state is None:
+            return False
+        return state.turn_active or state.status in OPEN_TURN_STATUSES
+
     used_session_ids: set[str] = set()
-    for root in sorted(roots, key=lambda process: process.started_at or 0.0):
+    ordered = sorted(
+        roots,
+        key=lambda process: (
+            1 if open_anchor(process) else 0,
+            process.started_at is None,
+            process.started_at or 0.0,
+            process.pid,
+        ),
+        reverse=True,
+    )
+    for root in ordered:
         state = _opencode_state_for_root(
             root, by_cwd, by_id, hook_events, used_session_ids
         )
@@ -380,11 +403,16 @@ def _opencode_state_for_root(
         session_id = _opencode_command_session_id(root.cmdline)
 
     bound = by_id.get(session_id) if session_id else None
-    owned: list[OpenCodeSessionState] = []
     if bound is not None and bound.session_id not in used_session_ids:
+        if bound.turn_active or bound.status in OPEN_TURN_STATUSES:
+            return bound
+    owned: list[OpenCodeSessionState] = []
+    if bound is not None:
         owned.append(bound)
     for state in by_cwd.get(root.cwd, ()):
         if state.session_id in used_session_ids:
+            continue
+        if state is bound:
             continue
         if state.created_at is not None and root.started_at is not None:
             if state.created_at >= root.started_at - 2.0:
@@ -393,20 +421,21 @@ def _opencode_state_for_root(
             owned.append(state)
     if not owned:
         return None
-    open_turns = tuple(
-        state for state in owned if state.turn_active or state.status in OPEN_TURN_STATUSES
-    )
-    pool = open_turns or tuple(owned)
-    return max(
-        pool,
-        key=lambda state: (
-            state.last_activity_at
-            or state.updated_at
-            or state.created_at
-            or 0.0
-        ),
-    )
+    candidates = tuple(owned)
 
+    def gap(state) -> float:
+        if state.created_at is None or root.started_at is None:
+            return float("inf")
+        return abs(state.created_at - root.started_at)
+    open_turns = [
+        state for state in candidates
+        if state.turn_active or state.status in OPEN_TURN_STATUSES
+    ]
+    if open_turns:
+        return min(open_turns, key=gap)
+    if bound is not None and bound in candidates:
+        return bound
+    return min(candidates, key=gap)
 
 def _opencode_hook_session_id(
     root: ProcessInfo,
