@@ -236,19 +236,40 @@ class FindPendingDecisionTests(unittest.TestCase):
         assert found is not None
         self.assertEqual(found.session_id, "ses_1")
 
-    def test_directory_match_is_the_fallback(self) -> None:
+    def test_directory_match_falls_back_only_for_the_same_process(self) -> None:
+        # A decision recorded by the exact same OpenCode process is accepted
+        # when its session id is absent (plugin could not read one), because
+        # directory + pid is then the only binding the plugin had.
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
-            _write(path, [_asked(session_id="ses_other")])
+            _write(path, [_asked(session_id=None)])
             decisions = pending_decisions(path)
 
         found = find_pending_decision(
             decisions,
             session_id="ses_unknown",
             directory="/work/a",
+            pid=5000,
         )
         assert found is not None
         self.assertEqual(found.request_id, "per_1")
+
+    def test_different_session_in_same_directory_is_not_inherited(self) -> None:
+        # A fresh OpenCode process in the same directory must never be pinned to
+        # `待确认` by another session's unanswered prompt.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            _write(path, [_asked(session_id="ses_other", pid=5000)])
+            decisions = pending_decisions(path)
+
+        self.assertIsNone(
+            find_pending_decision(
+                decisions,
+                session_id="ses_unknown",
+                directory="/work/a",
+                pid=6000,
+            )
+        )
 
     def test_unrelated_directory_does_not_match(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

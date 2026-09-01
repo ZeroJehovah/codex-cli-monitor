@@ -102,8 +102,11 @@ Codex 只有 `PermissionRequest` 这一个正向信号能说明「已经停在�
 
 OpenCode 与 Codex CLI 共存显示，使用相同的四种主状态：
 
-- 只读打开 `~/.local/share/opencode/opencode.db`，把运行中的 `opencode` 进程绑定到
-  `session.directory` 与进程 `cwd` 相同的会话行。
+- 只读打开 `~/.local/share/opencode/opencode.db`，把运行中的 `opencode` 进程绑定到会话行：
+  优先使用生命周期 hook 标记记录的 `pid`/`ppid` 与 `session_id`，其次使用进程命令行里显式的
+  `opencode -s <session-id>` 恢复参数，最后才回退到 `session.directory` 与进程 `cwd` 相同、
+  且在进程启动之后创建的会话行。同一目录内的多个 OpenCode 进程因此各自占用独立的行，而不会
+  一起塌缩到某一个会话的状态上。
 - 会话最后一条 `message` 的 `role=assistant` 且缺少 `time.completed`（仍在流式输出），
   或最后一条 `part` 的 `state.status=running`（工具仍在执行）→ `运行中`。
 - 否则最后一条 assistant 消息 `finish=stop` → `成功`；`finish` 非 `stop`
@@ -138,7 +141,9 @@ OpenCode 会自动发现 `~/.config/opencode/plugin/*.js`。安装器只放进�
 - 日志按其他监控日志的同一规则读取：有界尾读、一代轮转、坏行跳过。超过 6 小时的标记直接
   忽略，这样在提示上被杀掉的会话不会把某个目录永久钉在 `待确认`。
 - 覆盖是纯建议性的：只有 SQLite 已经判定为 `运行中` 的行才会被改写成 `待确认`，所以插件
-  既不能让已结束的行「复活」，也不能凭空造出 OpenCode 并不存在的开启回合。
+  既不能让已结束的行「复活」，也不能凭空造出 OpenCode 并不存在的开启回合。且标记只作用于
+  打开它的那个确切进程/会话：别的进程或别的会话留下的未回答标记（例如在提示上被杀掉的旧
+  OpenCode）绝不会被同一目录里新开的会话继承，因此新任务启动时不会莫名显示成待人工选择。
 - 一次回答会同时清掉同 session 下所有未回答的标记（ask 用 `id`、reply 用 `requestID`，标
   识对不齐时不能把一行钉住整轮）。代价是同一 session 同时开两个提示时，第一个回答会一起
   释放——只会少报 `待确认`，不会多报。

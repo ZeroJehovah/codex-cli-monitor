@@ -828,6 +828,47 @@ class WaitingDecisionTests(unittest.TestCase):
         self.assertEqual(sessions[0].display_status, "运行中")
         self.assertEqual(sessions[0].inference.status, "running_terminal")
 
+    def test_same_directory_opencode_processes_bind_by_resume_session(self) -> None:
+        # Two OpenCode processes in one directory must not collapse onto the
+        # same session: each resumes a different session with `-s`, so the
+        # running one stays 运行中 and the finished one stays 成功.
+        with _opencode_two_session_runtime() as (proc, decision_log):
+            sessions = discover_sessions(proc)
+
+        by_pid = {session.root.pid: session for session in sessions}
+        self.assertEqual(set(by_pid), {400, 401})
+        self.assertEqual(by_pid[400].display_status, "运行中")
+        self.assertEqual(by_pid[401].display_status, "成功")
+
+    def test_opencode_decision_from_another_session_is_not_inherited(self) -> None:
+        # A fresh OpenCode row in the same directory as an unanswered marker
+        # from a different (older) session keeps its database status instead of
+        # showing 待确认.
+        with _opencode_runtime(status="running") as (proc, decision_log):
+            _write_decision_log(
+                decision_log,
+                [
+                    _opencode_ask(session_id="ses_other", pid=9999),
+                ],
+            )
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertIsNone(sessions[0].waiting_reason)
+
+    def test_opencode_decision_from_the_same_process_still_displays_waiting(self) -> None:
+        # The exact session/process that opened the prompt keeps 待确认; only
+        # cross-session markers are spurned.
+        with _opencode_runtime(status="running") as (proc, decision_log):
+            _write_decision_log(decision_log, [_opencode_ask(pid=400, category="bash")])
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(sessions[0].display_status, "待确认")
+        self.assertEqual(sessions[0].waiting_reason, "bash")
+
 
 OPENCODE_CWD = "/work/opencode"
 OPENCODE_SESSION_ID = "ses_monitor_waiting"
@@ -845,6 +886,45 @@ def _opencode_runtime(status: str):
         _write_common_proc(proc)
         _write_process(proc, 400, "opencode", "S", 1, ["opencode"], OPENCODE_CWD)
         _write_opencode_db(data_dir / "opencode.db", status)
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCODE_DATA": str(data_dir),
+                "OPENCODE_MONITOR_DECISION_LOG": str(decision_log),
+            },
+        ):
+            yield proc, decision_log
+
+
+@contextmanager
+def _opencode_two_session_runtime():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        proc = root / "proc"
+        data_dir = root / "opencode-data"
+        decision_log = root / "decisions.jsonl"
+        proc.mkdir()
+        data_dir.mkdir()
+        _write_common_proc(proc)
+        _write_process(
+            proc,
+            400,
+            "opencode",
+            "S",
+            1,
+            ["opencode", "-s", "ses_monitor_waiting"],
+            OPENCODE_CWD,
+        )
+        _write_process(
+            proc,
+            401,
+            "opencode",
+            "S",
+            1,
+            ["opencode", "-s", "ses_other_finished"],
+            OPENCODE_CWD,
+        )
+        _write_two_session_opencode_db(data_dir / "opencode.db")
         with patch.dict(
             os.environ,
             {
@@ -919,15 +999,122 @@ def _write_opencode_db(path: Path, status: str) -> None:
         connection.close()
 
 
-def _opencode_ask(category: str | None = None) -> dict:
+def _write_two_session_opencode_db(path: Path) -> None:
+    import sqlite3
+
+    now_ms = int(time.time() * 1000)
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.execute(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, "
+            "slug TEXT, directory TEXT, title TEXT, version TEXT, "
+            "time_created INTEGER, time_updated INTEGER)"
+        )
+        connection.execute(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, "
+            "time_created INTEGER, time_updated INTEGER, data TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, "
+            "session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO session VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "ses_monitor_waiting",
+                "global",
+                "s",
+                OPENCODE_CWD,
+                "t",
+                "1.0.0",
+                now_ms - 120_000,
+                now_ms - 5_000,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO session VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "ses_other_finished",
+                "global",
+                "s",
+                OPENCODE_CWD,
+                "t",
+                "1.0.0",
+                now_ms - 220_000,
+                now_ms - 1_000,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO message VALUES (?,?,?,?,?)",
+            (
+                "m1",
+                "ses_monitor_waiting",
+                now_ms - 120_000,
+                now_ms - 120_000,
+                json.dumps({"role": "user", "time": {"created": now_ms - 120_000}}),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO message VALUES (?,?,?,?,?)",
+            (
+                "m2",
+                "ses_monitor_waiting",
+                now_ms - 60_000,
+                now_ms - 5_000,
+                json.dumps(
+                    {"role": "assistant", "time": {"created": now_ms - 60_000}}
+                ),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO message VALUES (?,?,?,?,?)",
+            (
+                "m3",
+                "ses_other_finished",
+                now_ms - 220_000,
+                now_ms - 220_000,
+                json.dumps(
+                    {"role": "user", "time": {"created": now_ms - 220_000}}
+                ),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO message VALUES (?,?,?,?,?)",
+            (
+                "m4",
+                "ses_other_finished",
+                now_ms - 150_000,
+                now_ms - 1_000,
+                json.dumps(
+                    {
+                        "role": "assistant",
+                        "time": {
+                            "created": now_ms - 150_000,
+                            "completed": now_ms - 10_000,
+                        },
+                        "finish": "stop",
+                    }
+                ),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _opencode_ask(
+    category: str | None = None,
+    session_id: str | None = None,
+    pid: int | None = None,
+) -> dict:
     return {
         "schema_version": 1,
         "event": "permission.asked",
         "kind": "permission",
         "timestamp": time.time() - 20.0,
-        "pid": 400,
+        "pid": 400 if pid is None else pid,
         "directory": OPENCODE_CWD,
-        "session_id": OPENCODE_SESSION_ID,
+        "session_id": OPENCODE_SESSION_ID if session_id is None else session_id,
         "request_id": "per_1",
         "category": category,
     }

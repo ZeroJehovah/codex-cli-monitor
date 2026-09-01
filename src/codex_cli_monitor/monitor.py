@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from .classify import (
     is_claude_process,
@@ -253,12 +253,13 @@ def _discover_opencode_sessions(
         data_dir,
         ids=tuple(),
     )
-    by_cwd: dict[str, OpenCodeSessionState] = {}
+    by_cwd: dict[str, list[OpenCodeSessionState]] = {}
     by_id: dict[str, OpenCodeSessionState] = {}
     for state in states:
-        if state.cwd and state.cwd not in by_cwd:
-            by_cwd[state.cwd] = state
+        if state.cwd:
+            by_cwd.setdefault(state.cwd, []).append(state)
         by_id[state.session_id] = state
+    by_cwd = {path: tuple(items) for path, items in by_cwd.items()}
 
     hook_events = opencode_hook_events(default_opencode_hook_log_path())
     decisions = pending_decisions(default_opencode_decision_log_path())
@@ -310,9 +311,13 @@ def _opencode_pending_decision(
     """Return the open prompt blocking this OpenCode row, if there is one.
 
     The overlay only ever relabels a turn the database already reports as open.
+
     A decision marker left behind by a session that was killed at its prompt can
     therefore never resurrect a finished row, and the monitor can never invent an
-    open turn that OpenCode does not have.
+    open turn that OpenCode does not have.  A marker recorded by a different
+    OpenCode process or for a different session is never inherited by a new row
+    in the same working directory: each pending decision is bound to the exact
+    process (and session) that opened it.
     """
     if not decisions or state.status != STATUS_RUNNING:
         return None
@@ -320,6 +325,7 @@ def _opencode_pending_decision(
         decisions,
         session_id=state.session_id,
         directory=state.cwd or root.cwd,
+        pid=root.pid,
     )
 
 
@@ -360,15 +366,78 @@ def _opencode_inference(
 
 def _opencode_state_for_root(
     root: ProcessInfo,
-    by_cwd: dict[str, OpenCodeSessionState],
-    by_id: dict[str, OpenCodeSessionState],
+    by_cwd: Mapping[str, tuple[OpenCodeSessionState,...]],
+    by_id: Mapping[str, OpenCodeSessionState],
     hook_events: tuple[dict, ...],
 ) -> OpenCodeSessionState | None:
+    session_id = _opencode_hook_session_id(root, hook_events)
+    if session_id is None:
+        session_id = _opencode_command_session_id(root.cmdline)
+    if session_id and session_id in by_id:
+        return by_id[session_id]
     if root.cwd is None:
         return None
-    state = by_cwd.get(root.cwd)
-    if state is not None:
-        return state
+    candidates = by_cwd.get(root.cwd, ())
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    owned: tuple[OpenCodeSessionState, ...] = tuple(
+        state
+        for state in candidates
+        if state.created_at is not None
+        and root.started_at is not None
+        and state.created_at >= root.started_at - 2.0
+    )
+    if len(owned) == 1:
+        return owned[0]
+    if len(owned) > 1:
+        candidates = owned
+    return candidates[0]
+
+
+def _opencode_hook_session_id(
+    root: ProcessInfo,
+    hook_events: tuple[dict, ...],
+) -> str | None:
+    """Return the session id bound to this exact process by hook markers.
+
+    A hook marker is spawned by OpenCode, so its recorded ``ppid`` is the
+    process pid that owns the session(this is also how Codex hooks bind).  The
+    recorded ``pid`` (the hook process itself) is accepted as well in case a
+    future OpenCode build invokes hooks without a shell intermediate.
+    """
+    latest_at = -1.0
+    session_id: str | None = None
+    for event in hook_events:
+        if event.get("ppid") == root.pid or event.get("pid") == root.pid:
+            candidate = event.get("session_id")
+            timestamp = _optional_float(event.get("timestamp"))
+            if (
+                isinstance(candidate, str)
+                and candidate
+                and timestamp is not None
+                and timestamp >= latest_at
+            ):
+                latest_at = timestamp
+                session_id = candidate
+    return session_id
+
+
+def _opencode_command_session_id(cmdline: tuple[str, ...]) -> str | None:
+    """Return an explicit ``opencode -s <session-id>`` resume identifier."""
+    tokens = tuple(cmdline)
+    for index, token in enumerate(tokens):
+        if token in ("-s", "--session", "--session-id"):
+            if index + 1 < len(tokens):
+                value = tokens[index + 1]
+                if value and not value.startswith("-"):
+                    return value
+            continue
+        if token.startswith("--session="):
+            return token.split("=", 1)[1] or None
+        if token.startswith("--session-id="):
+            return token.split("=", 1)[1] or None
     return None
 
 

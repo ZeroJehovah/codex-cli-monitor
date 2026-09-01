@@ -65,6 +65,7 @@ class PendingDecision:
     directory: str | None
     category: str | None
     asked_at: float
+    pid: int | None = None
 
     @property
     def reason(self) -> str:
@@ -83,6 +84,7 @@ class PendingDecision:
             "directory": self.directory,
             "category": self.category,
             "asked_at": self.asked_at,
+            "pid": self.pid,
             "reason": self.reason,
         }
 
@@ -166,6 +168,7 @@ def _fold_decisions(records: Iterable[Mapping[str, object]]) -> tuple[PendingDec
                 directory=_optional_str(payload.get("directory")),
                 category=_optional_str(payload.get("category")),
                 asked_at=timestamp,
+                pid=_optional_int(payload.get("pid")),
             )
             continue
         if request_id is not None:
@@ -187,26 +190,42 @@ def find_pending_decision(
     *,
     session_id: str | None,
     directory: str | None,
+    pid: int | None = None,
 ) -> PendingDecision | None:
     """Pick the decision belonging to one monitored OpenCode row.
 
-    The session id is an exact match and is preferred.  A decision recorded for
-    the same working directory is accepted as a fallback because the plugin sees
-    the directory OpenCode was started in, which is how the monitor already
-    binds OpenCode processes to sessions.
+    The session id is an exact match and is preferred.  A decision recorded by
+    the exact same OpenCode process and the same working directory is accepted
+    as a fallback because the plugin sees the directory OpenCode was started in,
+    which is how the monitor binds processes to sessions without a hook.
+
+    A decision from a *different* session or a *different* process is never
+    inherited: it may belong to a concurrent or a killed OpenCode session that
+    happened to run in the same directory, and letting that stale marker label a
+    fresh row `待确认` is exactly the cross-session contamination this lookup
+    exists to prevent.
     """
     candidates = tuple(decisions)
     if session_id:
         for decision in candidates:
-            if decision.session_id == session_id:
+            if decision.session_id == session_id and (
+                pid is None or decision.pid in (None, pid)
+            ):
                 return decision
     normalized = _normalize_path(directory)
     if normalized is None:
         return None
+    best: PendingDecision | None = None
     for decision in candidates:
-        if _normalize_path(decision.directory) == normalized:
-            return decision
-    return None
+        if _normalize_path(decision.directory) != normalized:
+            continue
+        if session_id and decision.session_id not in (None, session_id):
+            continue
+        if pid is not None and decision.pid not in (None, pid):
+            continue
+        best = decision
+        break
+    return best
 
 
 def opencode_decision_log_health(path: Path | None = None) -> dict[str, object]:
@@ -286,3 +305,13 @@ def _optional_str(value: object) -> str | None:
     if isinstance(value, int) and not isinstance(value, bool):
         return str(value)
     return None
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed
