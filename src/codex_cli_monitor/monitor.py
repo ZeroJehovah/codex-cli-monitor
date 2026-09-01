@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import AbstractSet, Callable, Mapping
 
 from .classify import (
     is_claude_process,
@@ -264,10 +264,14 @@ def _discover_opencode_sessions(
     hook_events = opencode_hook_events(default_opencode_hook_log_path())
     decisions = pending_decisions(default_opencode_decision_log_path())
     sessions: list[CodexSession] = []
-    for root in roots:
-        state = _opencode_state_for_root(root, by_cwd, by_id, hook_events)
+    used_session_ids: set[str] = set()
+    for root in sorted(roots, key=lambda process: process.started_at or 0.0):
+        state = _opencode_state_for_root(
+            root, by_cwd, by_id, hook_events, used_session_ids
+        )
         if state is None:
             continue
+        used_session_ids.add(state.session_id)
         binding_method = "opencode_hook_session_id" if _opencode_hook_confirms_root(
             root, hook_events
         ) else "opencode_sqlite_cwd"
@@ -369,31 +373,39 @@ def _opencode_state_for_root(
     by_cwd: Mapping[str, tuple[OpenCodeSessionState,...]],
     by_id: Mapping[str, OpenCodeSessionState],
     hook_events: tuple[dict, ...],
+    used_session_ids: AbstractSet[str],
 ) -> OpenCodeSessionState | None:
     session_id = _opencode_hook_session_id(root, hook_events)
     if session_id is None:
         session_id = _opencode_command_session_id(root.cmdline)
-    if session_id and session_id in by_id:
-        return by_id[session_id]
-    if root.cwd is None:
+
+    bound = by_id.get(session_id) if session_id else None
+    owned: list[OpenCodeSessionState] = []
+    if bound is not None and bound.session_id not in used_session_ids:
+        owned.append(bound)
+    for state in by_cwd.get(root.cwd, ()):
+        if state.session_id in used_session_ids:
+            continue
+        if state.created_at is not None and root.started_at is not None:
+            if state.created_at >= root.started_at - 2.0:
+                owned.append(state)
+        elif bound is None:
+            owned.append(state)
+    if not owned:
         return None
-    candidates = by_cwd.get(root.cwd, ())
-    if not candidates:
-        return None
-    if len(candidates) == 1:
-        return candidates[0]
-    owned: tuple[OpenCodeSessionState, ...] = tuple(
-        state
-        for state in candidates
-        if state.created_at is not None
-        and root.started_at is not None
-        and state.created_at >= root.started_at - 2.0
+    open_turns = tuple(
+        state for state in owned if state.turn_active or state.status in OPEN_TURN_STATUSES
     )
-    if len(owned) == 1:
-        return owned[0]
-    if len(owned) > 1:
-        candidates = owned
-    return candidates[0]
+    pool = open_turns or tuple(owned)
+    return max(
+        pool,
+        key=lambda state: (
+            state.last_activity_at
+            or state.updated_at
+            or state.created_at
+            or 0.0
+        ),
+    )
 
 
 def _opencode_hook_session_id(

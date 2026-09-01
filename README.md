@@ -104,9 +104,11 @@ OpenCode 与 Codex CLI 共存显示，使用相同的四种主状态：
 
 - 只读打开 `~/.local/share/opencode/opencode.db`，把运行中的 `opencode` 进程绑定到会话行：
   优先使用生命周期 hook 标记记录的 `pid`/`ppid` 与 `session_id`，其次使用进程命令行里显式的
-  `opencode -s <session-id>` 恢复参数，最后才回退到 `session.directory` 与进程 `cwd` 相同、
-  且在进程启动之后创建的会话行。同一目录内的多个 OpenCode 进程因此各自占用独立的行，而不会
-  一起塌缩到某一个会话的状态上。
+  `opencode -s <session-id>` 恢复参数，，最后才回退到 `session.directory` 与进程 `cwd` 相同、
+  且在进程启动之后创建的会话行。`-s` 恢复锚点只是出发点而非绑定保证：若进程在此窗口内又创建了
+  更新的会话（例如另起新对话），该新会话才是该进程当前真正所在的行，其开启回合会取代陈旧的已完成
+  锚点，进程不会冻结在 `成功` 上；已被占用的行也被逐进程独占地认领。同一目录内的多个
+  OpenCode 进程因此各自占用独立的行，而不会一起塌缩到某一个会话的状态上。
 - 会话最后一条 `message` 的 `role=assistant` 且缺少 `time.completed`（仍在流式输出），
   或最后一条 `part` 的 `state.status=running`（工具仍在执行）→ `运行中`。
 - 否则最后一条 assistant 消息 `finish=stop` → `成功`；`finish` 非 `stop`
