@@ -249,9 +249,27 @@ def _discover_opencode_sessions(
     processes: dict[int, ProcessInfo],
 ) -> tuple[CodexSession, ...]:
     data_dir = default_opencode_data_dir()
+    hook_events = opencode_hook_events(default_opencode_hook_log_path())
+    directories = tuple(
+        sorted({root.cwd for root in roots if root.cwd})
+    )
+    anchored_ids = tuple(
+        sorted(
+            {
+                session_id
+                for root in roots
+                for session_id in (
+                    _opencode_hook_session_id(root, hook_events),
+                    _opencode_command_session_id(root.cmdline),
+                )
+                if session_id
+            }
+        )
+    )
     states = scan_opencode_state(
         data_dir,
-        ids=tuple(),
+        ids=anchored_ids,
+        directories=directories,
     )
     by_cwd: dict[str, list[OpenCodeSessionState]] = {}
     by_id: dict[str, OpenCodeSessionState] = {}
@@ -261,7 +279,6 @@ def _discover_opencode_sessions(
         by_id[state.session_id] = state
     by_cwd = {path: tuple(items) for path, items in by_cwd.items()}
 
-    hook_events = opencode_hook_events(default_opencode_hook_log_path())
     decisions = pending_decisions(default_opencode_decision_log_path())
     sessions: list[CodexSession] = []
 

@@ -418,6 +418,92 @@ class OpenCodeStateTests(unittest.TestCase):
         self.assertIn("s2", session_ids)  # requested id is kept visible
         self.assertGreaterEqual(len(states), 1)
 
+    def test_directory_filter_keeps_unrelated_history_out_of_scan(self) -> None:
+        now_ms = 1786681500000
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            data_dir.mkdir()
+            db = data_dir / "opencode.db"
+            _build_db(
+                db,
+                [
+                    {
+                        "id": "wanted",
+                        "directory": "/current",
+                        "time_created": now_ms - 2_000,
+                        "time_updated": now_ms - 1_000,
+                    },
+                    {
+                        "id": "other",
+                        "directory": "/unrelated",
+                        "time_created": now_ms - 4_000,
+                        "time_updated": now_ms - 3_000,
+                    },
+                ],
+                [
+                    {
+                        "id": "wanted-user",
+                        "session_id": "wanted",
+                        "time_created": now_ms - 2_000,
+                        "time_updated": now_ms - 2_000,
+                        "data": {
+                            "role": "user",
+                            "time": {"created": now_ms - 2_000},
+                        },
+                    },
+                    {
+                        "id": "other-user",
+                        "session_id": "other",
+                        "time_created": now_ms - 4_000,
+                        "time_updated": now_ms - 4_000,
+                        "data": {
+                            "role": "user",
+                            "time": {"created": now_ms - 4_000},
+                        },
+                    },
+                ],
+            )
+            states = scan_opencode_state(data_dir, directories=("/current",))
+
+        self.assertEqual([item.session_id for item in states], ["wanted"])
+
+    def test_large_database_still_scans_current_directory(self) -> None:
+        now_ms = 1786681500000
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            data_dir.mkdir()
+            db = data_dir / "opencode.db"
+            _build_db(
+                db,
+                [
+                    {
+                        "id": "large-db-session",
+                        "directory": "/current",
+                        "time_created": now_ms - 2_000,
+                        "time_updated": now_ms - 1_000,
+                    }
+                ],
+                [
+                    {
+                        "id": "large-db-user",
+                        "session_id": "large-db-session",
+                        "time_created": now_ms - 2_000,
+                        "time_updated": now_ms - 2_000,
+                        "data": {
+                            "role": "user",
+                            "time": {"created": now_ms - 2_000},
+                        },
+                    }
+                ],
+            )
+            with db.open("ab") as handle:
+                handle.truncate(512 * 1024 * 1024 + 1)
+            states = scan_opencode_state(data_dir, directories=("/current",))
+
+        self.assertEqual(len(states), 1)
+        self.assertEqual(states[0].session_id, "large-db-session")
+        self.assertEqual(states[0].status, STATUS_RUNNING)
+
 
 class OpenCodeHookStateTests(unittest.TestCase):
     def test_append_and_load(self) -> None:

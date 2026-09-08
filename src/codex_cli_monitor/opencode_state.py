@@ -54,16 +54,19 @@ OFFICIAL_EVENT_NAMES = {
 DB_OPEN_TIMEOUT_SECONDS = 0.05
 DB_READ_ONLY_URI = "file:{path}?mode=ro&immutable=0"
 SESSION_LIMIT = 256
+SESSIONS_PER_DIRECTORY_LIMIT = SESSION_LIMIT
 ACTIVE_SESSION_GRACE_SECONDS = 60.0
-MAX_DB_SIZE_BYTES = 512 * 1024 * 1024
-MAX_SESSIONS_PER_CACHE = 64
-MAX_STATE_CACHE_ENTRIES = 256
-DB_SIGNATURE_KEY = ("size", "mtime_ns", "inode")
 _terminated_cached: dict[Path, tuple[object, ...]] = {}
 
 _CACHE_LOCK = threading.Lock()
-_STATE_CACHE: dict[Path, object] = {}
-_STATE_SIGNATURE: dict[Path, object] = {}
+_STATE_CACHE: dict[
+    Path,
+    tuple[
+        tuple[object, ...],
+        tuple[tuple[str, ...], tuple[str, ...], int],
+        tuple["OpenCodeSessionState", ...],
+    ],
+] = {}
 
 STATUS_RUNNING = "运行中"
 STATUS_SUCCESS = "成功"
@@ -173,12 +176,15 @@ def opencode_hook_events(
 def scan_opencode_state(
     data_dir: Path | None = None,
     ids: tuple[str, ...] = (),
+    directories: tuple[str, ...] = (),
 ) -> tuple[OpenCodeSessionState, ...]:
     """Read session lifecycle states from the OpenCode SQLite database.
 
     ``ids`` optionally restricts the scan to a fixed set of stable session
-    ids (used to keep a PID-open session visible even when the database
-    becomes large).
+    ids. ``directories`` limits the fallback scan to sessions in the supplied
+    working directories. Both filters are intentionally scoped to live
+    OpenCode processes; the monitor never needs to load the complete session
+    history just to find the current rows.
     """
     db = opencode_db_path(data_dir)
     if not db.is_file():
@@ -187,24 +193,28 @@ def scan_opencode_state(
         info = db.stat()
     except OSError:
         return ()
-    if info.st_size > MAX_DB_SIZE_BYTES:
-        return ()
 
     signature = _db_signature(db, info)
+    query_key = (
+        tuple(sorted({item for item in ids if item})),
+        tuple(sorted({item for item in directories if item})),
+        SESSIONS_PER_DIRECTORY_LIMIT,
+    )
     with _CACHE_LOCK:
-        if _STATE_SIGNATURE.get(db) == signature and _STATE_CACHE.get(db) is not None:
-            cached = _STATE_CACHE[db]
-            return tuple(cached) if isinstance(cached, tuple) else _states_from_cached(cached)
+        cached = _STATE_CACHE.get(db)
+        if cached is not None:
+            cached_signature, cached_query_key, states = cached
+            if cached_signature == signature and cached_query_key == query_key:
+                return states
 
-    states = _read_session_states(db, ids)
-    cache_value: object
-    if len(states) > MAX_STATE_CACHE_ENTRIES:
-        cache_value = (states[:MAX_STATE_CACHE_ENTRIES],)
-    else:
-        cache_value = states
+    states = _read_session_states(
+        db,
+        ids=query_key[0],
+        directories=query_key[1],
+        directory_limit=SESSIONS_PER_DIRECTORY_LIMIT,
+    )
     with _CACHE_LOCK:
-        _STATE_CACHE[db] = cache_value
-        _STATE_SIGNATURE[db] = signature
+        _STATE_CACHE[db] = (signature, query_key, states)
     return states
 
 
@@ -228,15 +238,12 @@ def _db_signature(db: Path, db_stat: os.stat_result) -> tuple[object, ...]:
     return signature + (wal_stat.st_size, wal_stat.st_mtime_ns)
 
 
-def _states_from_cached(cached: object) -> tuple[OpenCodeSessionState, ...]:
-    if isinstance(cached, tuple) and cached and isinstance(cached[0], OpenCodeSessionState):
-        return cached
-    return ()
-
-
 def _read_session_states(
     db: Path,
+    *,
     ids: tuple[str, ...],
+    directories: tuple[str, ...],
+    directory_limit: int,
 ) -> tuple[OpenCodeSessionState, ...]:
     try:
         connection = sqlite3.connect(
@@ -251,7 +258,12 @@ def _read_session_states(
             connection.execute("PRAGMA query_only = ON")
         except sqlite3.Error:
             pass
-        sessions = _query_sessions(connection, ids)
+        sessions = _query_sessions(
+            connection,
+            ids=ids,
+            directories=directories,
+            directory_limit=directory_limit,
+        )
         messages = _query_messages(connection, sessions)
         tools = _query_running_tools(connection, sessions)
     except sqlite3.Error:
@@ -273,43 +285,49 @@ def _read_session_states(
 
 def _query_sessions(
     connection: sqlite3.Connection,
+    *,
     ids: tuple[str, ...],
+    directories: tuple[str, ...],
+    directory_limit: int,
 ) -> tuple[dict, ...]:
-    query = (
-        "SELECT id, directory, title, time_created, time_updated "
-        "FROM session ORDER BY time_updated DESC LIMIT ?"
-    )
-    rows = connection.execute(query, (SESSION_LIMIT,)).fetchall()
-    result = [
-        {
-            "id": str(row[0]),
-            "directory": _optional_str(row[1]),
-            "title": _optional_str(row[2]),
-            "time_created": _optional_int(row[3]),
-            "time_updated": _optional_int(row[4]),
-        }
-        for row in rows
-    ]
-    known = {session["id"] for session in result}
-    for session_id in ids:
-        if session_id in known:
-            continue
-        row = connection.execute(
-            "SELECT id, directory, title, time_created, time_updated "
-            "FROM session WHERE id = ?",
-            (session_id,),
-        ).fetchone()
-        if row is None:
-            continue
-        result.append(
-            {
-                "id": str(row[0]),
-                "directory": _optional_str(row[1]),
-                "title": _optional_str(row[2]),
-                "time_created": _optional_int(row[3]),
-                "time_updated": _optional_int(row[4]),
-            }
+    columns = "id, directory, title, time_created, time_updated"
+    result: list[dict] = []
+    known: set[str] = set()
+
+    def add_rows(rows: list[sqlite3.Row] | list[tuple]) -> None:
+        for row in rows:
+            session_id = str(row[0])
+            if session_id in known:
+                continue
+            known.add(session_id)
+            result.append(
+                {
+                    "id": session_id,
+                    "directory": _optional_str(row[1]),
+                    "title": _optional_str(row[2]),
+                    "time_created": _optional_int(row[3]),
+                    "time_updated": _optional_int(row[4]),
+                }
+            )
+
+    if directories:
+        query = (
+            f"SELECT {columns} FROM session WHERE directory = ? "
+            "ORDER BY time_updated DESC, id DESC LIMIT ?"
         )
+        for directory in directories:
+            add_rows(connection.execute(query, (directory, directory_limit)).fetchall())
+    else:
+        query = (
+            f"SELECT {columns} FROM session "
+            "ORDER BY time_updated DESC, id DESC LIMIT ?"
+        )
+        add_rows(connection.execute(query, (SESSION_LIMIT,)).fetchall())
+
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        query = f"SELECT {columns} FROM session WHERE id IN ({placeholders})"
+        add_rows(connection.execute(query, ids).fetchall())
     return tuple(result)
 
 
@@ -319,18 +337,22 @@ def _query_messages(
 ) -> dict[str, tuple[dict, ...]]:
     if not sessions:
         return {}
-    ids = tuple(session["id"] for session in sessions)
-    placeholders = ",".join("?" for _ in ids)
-    query = (
-        "SELECT id AS message_id, session_id, data, time_created "
-        "FROM message WHERE session_id IN ({}) ORDER BY time_created ASC"
-    ).format(placeholders)
-    rows = connection.execute(query, ids).fetchall()
     result: dict[str, list[dict]] = {session["id"]: [] for session in sessions}
-    for message_id, session_id, data, time_created in rows:
-        parsed = _parse_message_data(str(data), time_created)
-        if parsed is not None:
-            result[session_id].append(parsed)
+    query = (
+        "SELECT data, time_created FROM message "
+        "WHERE session_id = ? AND "
+        "json_extract(CASE WHEN json_valid(data) THEN data ELSE '{{}}' END, '$.role') = ? "
+        "ORDER BY time_created DESC, id DESC LIMIT 1"
+    )
+    for session in sessions:
+        session_id = session["id"]
+        for role in ("user", "assistant"):
+            row = connection.execute(query, (session_id, role)).fetchone()
+            if row is None:
+                continue
+            parsed = _parse_message_data(str(row[0]), row[1])
+            if parsed is not None:
+                result[session_id].append(parsed)
     return {session_id: tuple(items) for session_id, items in result.items()}
 
 
@@ -343,12 +365,15 @@ def _query_running_tools(
     ids = tuple(session["id"] for session in sessions)
     placeholders = ",".join("?" for _ in ids)
     query = (
-        "SELECT session_id, data, time_updated FROM part "
-        "WHERE session_id IN ({}) AND json_extract(data, '$.state.status') = 'running'"
+        "SELECT session_id, MAX(time_updated) FROM part "
+        "WHERE session_id IN ({}) AND "
+        "json_extract(CASE WHEN json_valid(data) THEN data ELSE '{{}}' END, "
+        "'$.state.status') = 'running' "
+        "GROUP BY session_id"
     ).format(placeholders)
     rows = connection.execute(query, ids).fetchall()
     result: dict[str, list[str]] = {session["id"]: [] for session in sessions}
-    for session_id, data, time_updated in rows:
+    for session_id, time_updated in rows:
         result[session_id].append(str(time_updated))
     return {session_id: tuple(sorted(items, reverse=True)) for session_id, items in result.items()}
 
