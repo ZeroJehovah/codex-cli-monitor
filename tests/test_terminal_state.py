@@ -10,13 +10,34 @@ from codex_cli_monitor.hook_state import HookSessionState
 from codex_cli_monitor.terminal_state import (
     MAX_INITIAL_TAIL_BYTES,
     MAX_INCREMENTAL_READ_BYTES,
+    _TerminalEvent,
     _TAIL_CACHE,
+    _merge_lifecycle_events,
     scan_process_terminal_activities,
     scan_terminal_activity,
 )
 
 
 class TerminalStateTests(unittest.TestCase):
+    def test_overlapping_lifecycle_windows_remain_in_timestamp_order(self) -> None:
+        events = tuple(
+            _TerminalEvent(
+                event_type="task_started" if index % 2 == 0 else "task_complete",
+                turn_id=f"turn-{index // 2}",
+                timestamp=float(index),
+                active=index % 2 == 0,
+                terminal=index % 2 == 1,
+                failed=False,
+            )
+            for index in range(81)
+        )
+        merged = _merge_lifecycle_events(events[-64:], events)
+        self.assertEqual(merged[-1], events[-1])
+        self.assertEqual(
+            [event.timestamp for event in merged],
+            sorted(event.timestamp for event in merged),
+        )
+
     def test_reads_only_structured_terminal_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

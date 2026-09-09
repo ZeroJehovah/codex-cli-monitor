@@ -330,7 +330,12 @@ def _terminal_events(
 def _merge_lifecycle_events(
     *groups: tuple[_TerminalEvent, ...],
 ) -> tuple[_TerminalEvent, ...]:
-    """Merge bounded lifecycle windows in file order and cap retained facts."""
+    """Merge bounded lifecycle windows in file order and cap retained facts.
+
+    The prefix and backscan windows overlap for medium-sized files. Sort
+    timestamped events after de-duplication so that an overlap never moves an
+    older lifecycle marker after a newer one.
+    """
     merged = []
     seen = set()
     for group in groups:
@@ -339,6 +344,8 @@ def _merge_lifecycle_events(
                 continue
             seen.add(event)
             merged.append(event)
+    if all(event.timestamp is not None for event in merged):
+        merged.sort(key=lambda event: event.timestamp)
     return tuple(merged[-MAX_TERMINAL_EVENTS_PER_FILE:])
 
 
