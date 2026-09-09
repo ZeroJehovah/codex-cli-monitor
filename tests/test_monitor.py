@@ -828,6 +828,30 @@ class WaitingDecisionTests(unittest.TestCase):
         self.assertEqual(sessions[0].display_status, "运行中")
         self.assertEqual(sessions[0].inference.status, "running_terminal")
 
+    def test_opencode_resumed_existing_session_older_than_process_is_visible(self) -> None:
+        # A process can resume an existing conversation without exposing a
+        # session id in argv.  The cwd fallback must not hide that row merely
+        # because it was created before the process started.
+        with _opencode_runtime(status="running") as (proc, _decision_log):
+            import sqlite3
+
+            database = Path(os.environ["OPENCODE_DATA"]) / "opencode.db"
+            connection = sqlite3.connect(str(database))
+            try:
+                connection.execute(
+                    "UPDATE session SET time_created = ?",
+                    (int((time.time() - 600.0) * 1000),),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertEqual(sessions[0].binding_method, "opencode_sqlite_cwd")
+
     def test_same_directory_opencode_processes_bind_by_resume_session(self) -> None:
         # Two OpenCode processes in one directory must not collapse onto the
         # same session: each resumes a different session with `-s`, so the

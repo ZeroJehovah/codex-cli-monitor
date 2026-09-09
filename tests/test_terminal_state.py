@@ -226,6 +226,66 @@ class TerminalStateTests(unittest.TestCase):
         self.assertTrue(completed[0].terminal_event)
         self.assertEqual(completed[0].last_payload_type, "task_complete")
 
+    def test_initial_scan_recovers_active_turn_before_the_normal_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "codex-home"
+            proc = root / "proc"
+            fd_dir = proc / "100" / "fd"
+            fd_dir.mkdir(parents=True)
+            session_id = "019fb18d-e2e2-7a00-a645-ddbb639854ba"
+            path = _path(home, session_id)
+            path.parent.mkdir(parents=True)
+            _append_terminal(path, "turn-old", "task_started")
+            _append_terminal(path, "turn-old", "task_complete", error=None)
+            _extend_with_sparse_gap(path, MAX_INITIAL_TAIL_BYTES)
+            _append_terminal(path, "turn-current", "task_started")
+            _extend_with_sparse_gap(path, MAX_INITIAL_TAIL_BYTES + 64 * 1024)
+            (fd_dir / "43").symlink_to(path)
+
+            active = scan_process_terminal_activities(
+                100,
+                proc_root=proc,
+                codex_home=home,
+                cwd="/work/a",
+            )
+
+        self.assertEqual(active[0].turn_id, "turn-current")
+        self.assertTrue(active[0].turn_active)
+        self.assertEqual(active[0].last_payload_type, "task_started")
+
+    def test_large_incremental_gap_keeps_cached_active_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "codex-home"
+            proc = root / "proc"
+            fd_dir = proc / "100" / "fd"
+            fd_dir.mkdir(parents=True)
+            session_id = "019fb18d-e2e2-7a00-a645-ddbb639854ba"
+            path = _path(home, session_id)
+            path.parent.mkdir(parents=True)
+            _append_terminal(path, "turn-current", "task_started")
+            (fd_dir / "43").symlink_to(path)
+
+            first = scan_process_terminal_activities(
+                100,
+                proc_root=proc,
+                codex_home=home,
+                cwd="/work/a",
+            )
+            _extend_with_sparse_gap(path, MAX_INITIAL_TAIL_BYTES + 64 * 1024)
+            after_gap = scan_process_terminal_activities(
+                100,
+                proc_root=proc,
+                codex_home=home,
+                cwd="/work/a",
+            )
+
+        self.assertTrue(first[0].turn_active)
+        self.assertEqual(after_gap[0].turn_id, "turn-current")
+        self.assertTrue(after_gap[0].turn_active)
+        self.assertEqual(after_gap[0].last_payload_type, "task_started")
+
 
 def _state(session_id: str, turn_id: str) -> HookSessionState:
     return HookSessionState(

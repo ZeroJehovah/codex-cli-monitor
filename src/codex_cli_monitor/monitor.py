@@ -426,16 +426,33 @@ def _opencode_state_for_root(
     owned: list[OpenCodeSessionState] = []
     if bound is not None:
         owned.append(bound)
+    cwd_candidates: list[OpenCodeSessionState] = []
     for state in by_cwd.get(root.cwd, ()):
         if state.session_id in used_session_ids:
             continue
         if state is bound:
             continue
-        if state.created_at is not None and root.started_at is not None:
-            if state.created_at >= root.started_at - 2.0:
-                owned.append(state)
-        elif bound is None:
-            owned.append(state)
+        cwd_candidates.append(state)
+
+    # A process may resume an existing conversation without exposing its
+    # session id in argv (and without the optional lifecycle hook).  In that
+    # case the session can predate the process by hours, so requiring a
+    # post-start creation timestamp would incorrectly hide an otherwise
+    # active row.  Prefer rows created after process start when there are any,
+    # but fall back to all rows for the directory when there are none.  This
+    # keeps the newer-conversation preference while allowing a single resumed
+    # conversation (or an older active row) to remain visible.
+    fresh_cwd_candidates = [
+        state
+        for state in cwd_candidates
+        if state.created_at is not None
+        and root.started_at is not None
+        and state.created_at >= root.started_at - 2.0
+    ]
+    if fresh_cwd_candidates:
+        owned.extend(fresh_cwd_candidates)
+    elif bound is None:
+        owned.extend(cwd_candidates)
     if not owned:
         return None
     candidates = tuple(owned)

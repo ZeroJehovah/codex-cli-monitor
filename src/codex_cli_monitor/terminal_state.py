@@ -20,6 +20,12 @@ if TYPE_CHECKING:
 MAX_INITIAL_TAIL_BYTES = 4 * 1024 * 1024
 MAX_INCREMENTAL_READ_BYTES = 1024 * 1024
 MAX_LIFECYCLE_PREFIX_BYTES = 1024 * 1024
+# A long-lived session can place its next ``task_started`` well before the
+# current tail after a large burst of ordinary rollout records.  On an
+# initial scan, inspect one additional bounded window immediately before the
+# tail so that a live Goal continuation is recoverable without reading the
+# whole history.
+MAX_LIFECYCLE_BACKSCAN_BYTES = 8 * 1024 * 1024
 MAX_TERMINAL_EVENTS_PER_FILE = 64
 MAX_CACHE_ENTRIES = 256
 MAX_OPEN_FDS_PER_PROCESS = 4096
@@ -262,12 +268,14 @@ def _terminal_events(
         prior_events: tuple[_TerminalEvent, ...] = ()
         discard_first_partial_line = offset > 0
         recover_prefix = offset > 0
+        recover_backscan = offset > 0
     else:
         offset = cached.offset
         carry = cached.carry
         prior_events = cached.events
         discard_first_partial_line = False
         recover_prefix = False
+        recover_backscan = False
 
     if size == offset:
         return prior_events
@@ -275,12 +283,22 @@ def _terminal_events(
     if size - offset > read_limit:
         offset = max(0, size - read_limit)
         carry = b""
-        prior_events = ()
+        # Keep the lifecycle facts already observed before the gap.  Clearing
+        # them makes a cached active ``task_started`` disappear whenever one
+        # refresh produces more than the bounded incremental read size, which
+        # leaves the matching hook ``Stop`` looking like the current outcome.
         discard_first_partial_line = offset > 0
-        recover_prefix = offset > 0
+        recover_prefix = False
+        recover_backscan = False
 
     if recover_prefix:
         prior_events = _lifecycle_prefix_events(path, offset)
+
+    if recover_backscan:
+        prior_events = _merge_lifecycle_events(
+            prior_events,
+            _lifecycle_backscan_events(path, offset),
+        )
 
     try:
         with path.open("rb") as handle:
@@ -309,6 +327,21 @@ def _terminal_events(
     return events
 
 
+def _merge_lifecycle_events(
+    *groups: tuple[_TerminalEvent, ...],
+) -> tuple[_TerminalEvent, ...]:
+    """Merge bounded lifecycle windows in file order and cap retained facts."""
+    merged = []
+    seen = set()
+    for group in groups:
+        for event in group:
+            if event in seen:
+                continue
+            seen.add(event)
+            merged.append(event)
+    return tuple(merged[-MAX_TERMINAL_EVENTS_PER_FILE:])
+
+
 def _lifecycle_prefix_events(
     path: Path,
     tail_offset: int,
@@ -330,6 +363,34 @@ def _lifecycle_prefix_events(
         if event is not None:
             events.append(event)
     return tuple(events[-MAX_TERMINAL_EVENTS_PER_FILE:])
+
+
+def _lifecycle_backscan_events(
+    path: Path,
+    tail_offset: int,
+) -> tuple[_TerminalEvent, ...]:
+    """Read a bounded window immediately before the normal initial tail."""
+    start = max(0, tail_offset - MAX_LIFECYCLE_BACKSCAN_BYTES)
+    read_limit = tail_offset - start
+    if read_limit <= 0:
+        return ()
+    try:
+        with path.open("rb") as handle:
+            handle.seek(start)
+            chunk = handle.read(read_limit)
+    except OSError:
+        return ()
+    lines = chunk.split(b"\n")
+    if chunk and not chunk.endswith(b"\n"):
+        lines.pop()
+    if start > 0 and lines:
+        lines.pop(0)
+    events = []
+    for line in lines:
+        event = _terminal_event_from_line(line)
+        if event is not None:
+            events.append(event)
+    return tuple(events)
 
 
 def _terminal_event_from_line(line: bytes) -> _TerminalEvent | None:
