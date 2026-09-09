@@ -5,7 +5,9 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from codex_cli_monitor import opencode_state
 from codex_cli_monitor.opencode_state import (
     STATUS_FAILURE,
     STATUS_RUNNING,
@@ -22,7 +24,12 @@ from codex_cli_monitor.opencode_hook_state import (
 )
 
 
-def _build_db(path: Path, sessions: list[dict], messages: list[dict]) -> None:
+def _build_db(
+    path: Path,
+    sessions: list[dict],
+    messages: list[dict],
+    parts: tuple[dict, ...] = (),
+) -> None:
     con = sqlite3.connect(str(path))
     try:
         con.execute(
@@ -110,18 +117,31 @@ def _build_db(path: Path, sessions: list[dict], messages: list[dict]) -> None:
                     json.dumps(item["data"], sort_keys=True),
                 ),
             )
+        for item in parts:
+            con.execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, "
+                "time_updated, data) VALUES (?,?,?,?,?,?)",
+                (
+                    item["id"],
+                    item["message_id"],
+                    item["session_id"],
+                    item["time_created"],
+                    item["time_updated"],
+                    json.dumps(item["data"], sort_keys=True),
+                ),
+            )
         con.commit()
     finally:
         con.close()
 
 
 class OpenCodeStateTests(unittest.TestCase):
-    def _scan(self, sessions, messages, ids=()):
+    def _scan(self, sessions, messages, ids=(), parts=()):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / ".local" / "share" / "opencode"
             data_dir.mkdir(parents=True)
             db = data_dir / "opencode.db"
-            _build_db(db, sessions, messages)
+            _build_db(db, sessions, messages, parts)
             return scan_opencode_state(data_dir, ids=ids)
 
     def test_default_prefers_env(self) -> None:
@@ -287,6 +307,152 @@ class OpenCodeStateTests(unittest.TestCase):
         )
         self.assertEqual(states[0].status, STATUS_FAILURE)
         self.assertTrue(states[0].failed_event)
+
+    def test_completed_intermediate_step_keeps_turn_open(self) -> None:
+        session = {
+            "id": "s1", "directory": "/work",
+            "time_created": 1000, "time_updated": 2000,
+        }
+        for finish in ("tool-calls", "unknown", None):
+            for tool_status in (None, "pending", "running", "completed", "error"):
+                with self.subTest(finish=finish, tool_status=tool_status):
+                    message = {
+                        "id": "m1", "session_id": "s1",
+                        "time_created": 1500, "time_updated": 2000,
+                        "data": {
+                            "role": "assistant",
+                            "time": {"created": 1500, "completed": 2000},
+                            "finish": finish,
+                        },
+                    }
+                    parts = () if tool_status is None else ({
+                        "id": "p1", "message_id": "m1", "session_id": "s1",
+                        "time_created": 1600, "time_updated": 1900,
+                        "data": {"type": "tool", "state": {"status": tool_status}},
+                    },)
+                    state, = self._scan([session], [message], parts=parts)
+                    self.assertEqual(state.status, STATUS_RUNNING)
+                    self.assertTrue(state.turn_active)
+                    self.assertFalse(state.terminal_event)
+                    self.assertFalse(state.failed_event)
+
+    def test_structured_error_terminates_intermediate_step(self) -> None:
+        session = {
+            "id": "s1", "directory": "/work",
+            "time_created": 1000, "time_updated": 2000,
+        }
+        for finish in ("tool-calls", "unknown", "stop", None):
+            for error_name in ("APIError", "MessageAbortedError"):
+                with self.subTest(finish=finish, error_name=error_name):
+                    state, = self._scan([session], [{
+                        "id": "m1", "session_id": "s1",
+                        "time_created": 1500, "time_updated": 2000,
+                        "data": {
+                            "role": "assistant",
+                            "time": {"created": 1500, "completed": 2000},
+                            "finish": finish,
+                            "error": {"name": error_name},
+                        },
+                    }])
+                    self.assertEqual(state.status, STATUS_FAILURE)
+                    self.assertFalse(state.turn_active)
+                    self.assertTrue(state.terminal_event)
+                    self.assertTrue(state.failed_event)
+
+    def test_tool_handoff_followed_by_next_step_and_terminal_outcome(self) -> None:
+        for finish, expected in (("stop", STATUS_SUCCESS), ("error", STATUS_FAILURE)):
+            with self.subTest(finish=finish), tempfile.TemporaryDirectory() as tmp:
+                data_dir = Path(tmp)
+                db = data_dir / "opencode.db"
+                _build_db(db, [{
+                    "id": "s1", "directory": "/work",
+                    "time_created": 1000, "time_updated": 2000,
+                }], [{
+                    "id": "m1", "session_id": "s1",
+                    "time_created": 1500, "time_updated": 2000,
+                    "data": {
+                        "role": "assistant",
+                        "time": {"created": 1500, "completed": 2000},
+                        "finish": "tool-calls",
+                        "error": None,
+                    },
+                }])
+                state, = scan_opencode_state(data_dir)
+                self.assertEqual(state.status, STATUS_RUNNING)
+                connection = sqlite3.connect(str(db))
+                try:
+                    connection.execute(
+                        "INSERT INTO message VALUES (?,?,?,?,?)",
+                        ("m2", "s1", 3000, 3000, json.dumps({
+                            "role": "assistant", "time": {"created": 3000},
+                        })),
+                    )
+                    connection.commit()
+                    state, = scan_opencode_state(data_dir)
+                    self.assertEqual(state.status, STATUS_RUNNING)
+                    connection.execute(
+                        "UPDATE message SET data = ?, time_updated = 4000 WHERE id = 'm2'",
+                        (json.dumps({
+                            "role": "assistant",
+                            "time": {"created": 3000, "completed": 4000},
+                            "finish": finish,
+                        }),),
+                    )
+                    connection.commit()
+                    state, = scan_opencode_state(data_dir)
+                    self.assertEqual(state.status, expected)
+                    self.assertTrue(state.terminal_event)
+                finally:
+                    connection.close()
+
+    def test_error_body_is_not_loaded_from_database(self) -> None:
+        with patch.object(
+            opencode_state, "_parse_message_data", wraps=opencode_state._parse_message_data
+        ) as parse:
+            state, = self._scan([{
+                "id": "s1", "directory": "/work",
+                "time_created": 1000, "time_updated": 2000,
+            }], [{
+                "id": "m1", "session_id": "s1",
+                "time_created": 1500, "time_updated": 2000,
+                "data": {
+                    "role": "assistant",
+                    "time": {"created": 1500, "completed": 2000},
+                    "error": {"name": "APIError", "data": {"message": "private error body"}},
+                },
+            }])
+        self.assertEqual(state.status, STATUS_FAILURE)
+        self.assertEqual(parse.call_count, 1)
+        self.assertNotIn("private error body", parse.call_args.args[0])
+        self.assertNotIn("APIError", parse.call_args.args[0])
+
+    def test_corrupt_message_does_not_hide_valid_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            db = data_dir / "opencode.db"
+            _build_db(db, [{
+                "id": "s1", "directory": "/work",
+                "time_created": 1000, "time_updated": 2000,
+            }], [{
+                "id": "m1", "session_id": "s1",
+                "time_created": 1500, "time_updated": 2000,
+                "data": {
+                    "role": "assistant",
+                    "time": {"created": 1500, "completed": 2000},
+                    "finish": "stop",
+                },
+            }])
+            connection = sqlite3.connect(str(db))
+            try:
+                connection.execute(
+                    "INSERT INTO message VALUES (?,?,?,?,?)",
+                    ("m2", "s1", 3000, 3000, '{"role":"assistant",'),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            state, = scan_opencode_state(data_dir)
+            self.assertEqual(state.status, STATUS_SUCCESS)
 
     def test_wal_write_invalidates_cache(self) -> None:
         """In WAL mode the main db file may not change on write; cache must

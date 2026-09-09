@@ -111,8 +111,12 @@ OpenCode 与 Codex CLI 共存显示，使用相同的四种主状态：
   OpenCode 进程因此各自占用独立的行，而不会一起塌缩到某一个会话的状态上。
 - 会话最后一条 `message` 的 `role=assistant` 且缺少 `time.completed`（仍在流式输出），
   或最后一条 `part` 的 `state.status=running`（工具仍在执行）→ `运行中`。
-- 否则最后一条 assistant 消息 `finish=stop` → `成功`；`finish` 非 `stop`
-  （如 `error`、`interrupted`）→ `失败`。
+- `time.completed` 只表示一次模型步骤结束。没有结构化 `error` 时，`finish=tool-calls`、
+  `unknown` 或尚无 `finish` 都保持 `运行中`，包括工具已完成、下一条 assistant 消息尚未
+  写入的间隙；单个工具的错误也不代表整个回合失败。
+- 已完成的 assistant 消息带非空结构化 `error`（包括 API 错误或人工中断）→ `失败`；
+  否则 `finish=stop` 且没有运行中的工具 → `成功`，其他终结原因
+  （如 `error`、`interrupted`）→ `失败`。只读取错误是否存在，不读取错误正文。
 - 进程存活但会话已为终结状态 → 保持显示会话结果；进程退出后经短暂 TTL 清理消失。
 - 可选安装 OpenCode 生命周期 hook 后，监控可通过 hook marker 的 `session_id`/pid 精确
   绑定进程与会话，并提供比数据库 flush 更及时的退出边缘。即使不安装 hook，SQLite

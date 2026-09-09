@@ -8,8 +8,9 @@ lifecycle (running / success / failure) from minimal structural records:
 * ``session`` rows give the stable session id, working directory, and
   creation/update times.
 * ``message`` rows carry ``role`` (user/assistant), ``time.created`` and
-  ``time.completed``, plus ``finish`` (``stop``/``tool-calls``) for assistant
-  messages.
+  ``time.completed``, plus ``finish`` and the presence of a structured
+  ``error`` for assistant messages. Completion closes one model step;
+  ``tool-calls``, ``unknown``, and a missing finish keep the turn open.
 * ``part`` rows carry tool-call state, including ``running`` obstacles that
   prove a turn is still in flight.
 
@@ -338,10 +339,17 @@ def _query_messages(
     if not sessions:
         return {}
     result: dict[str, list[dict]] = {session["id"]: [] for session in sessions}
+    safe_data = "CASE WHEN json_valid(data) THEN data ELSE '{}' END"
     query = (
-        "SELECT data, time_created FROM message "
+        "SELECT json_object("
+        f"'role', json_extract({safe_data}, '$.role'), "
+        f"'time', json_object('created', json_extract({safe_data}, '$.time.created'), "
+        f"'completed', json_extract({safe_data}, '$.time.completed')), "
+        f"'finish', json_extract({safe_data}, '$.finish'), "
+        f"'failed', json_type({safe_data}, '$.error') IS NOT NULL AND "
+        f"json_type({safe_data}, '$.error') != 'null'), time_created FROM message "
         "WHERE session_id = ? AND "
-        "json_extract(CASE WHEN json_valid(data) THEN data ELSE '{{}}' END, '$.role') = ? "
+        f"json_extract({safe_data}, '$.role') = ? "
         "ORDER BY time_created DESC, id DESC LIMIT 1"
     )
     for session in sessions:
@@ -394,6 +402,7 @@ def _parse_message_data(raw: str, time_created: int) -> dict | None:
         "created": _optional_positive_int(msg_time.get("created")),
         "completed": _optional_positive_int(msg_time.get("completed")),
         "finish": _optional_str(data.get("finish")),
+        "failed": bool(data.get("failed")),
         "message_time_created": _optional_positive_int(time_created),
     }
 
@@ -423,14 +432,15 @@ def _build_state(
     current_assistant = assistant_messages[-1] if assistant_messages else None
     current_completed = current_assistant["completed"] if current_assistant else None
     current_finish = current_assistant["finish"] if current_assistant else None
+    current_failed = bool(current_assistant and current_assistant["failed"])
     last_running_tool = running_tools[0] if running_tools else None
 
-    if current_completed is None:
-        turn_active = True
-        status = STATUS_RUNNING
-        terminal_event = False
-        failed_event = False
-    elif last_running_tool is not None:
+    # OpenCode completes each model step before starting the next one. There
+    # need not be a running tool during that handoff, even in a healthy turn.
+    step_continues = not current_finish or current_finish in ("tool-calls", "unknown")
+    if current_completed is None or (
+        not current_failed and (last_running_tool is not None or step_continues)
+    ):
         turn_active = True
         status = STATUS_RUNNING
         terminal_event = False
@@ -438,7 +448,7 @@ def _build_state(
     else:
         turn_active = False
         terminal_event = True
-        failed_event = bool(current_finish and current_finish != "stop")
+        failed_event = current_failed or current_finish != "stop"
         status = STATUS_FAILURE if failed_event else STATUS_SUCCESS
 
     state = OpenCodeSessionState(
