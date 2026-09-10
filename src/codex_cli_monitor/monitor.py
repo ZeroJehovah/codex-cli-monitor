@@ -449,7 +449,21 @@ def _opencode_state_for_root(
         and root.started_at is not None
         and state.created_at >= root.started_at - 2.0
     ]
-    if fresh_cwd_candidates:
+    open_cwd_candidates = [
+        state
+        for state in cwd_candidates
+        if state.turn_active or state.status in OPEN_TURN_STATUSES
+    ]
+    if open_cwd_candidates:
+        # A still-open row is stronger ownership evidence than the creation
+        # time of a completed row.  This matters when several unanchored
+        # OpenCode processes share a cwd: one process may be working in a
+        # resumed session created long before it started, while a different,
+        # recently-created row has already completed.  Filtering to fresh rows
+        # first would bind the live process to that completed row and leave its
+        # actual open row unused.
+        owned.extend(open_cwd_candidates)
+    elif fresh_cwd_candidates:
         owned.extend(fresh_cwd_candidates)
     elif bound is None:
         owned.extend(cwd_candidates)
