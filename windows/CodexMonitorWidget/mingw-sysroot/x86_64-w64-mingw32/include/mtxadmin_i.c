@@ -1,1 +1,0 @@
-../../share/mingw-w64/include/mtxadmin_i.c

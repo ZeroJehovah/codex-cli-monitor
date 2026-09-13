@@ -7,7 +7,7 @@ already running exits immediately without opening another floating panel.
 Run the monitor API first from Linux or WSL:
 
 ```bash
-PYTHONPATH=src python3 -m codex_cli_monitor --daemon
+PYTHONPATH=src python3 -m codex_cli_monitor --serve --ws-enabled
 ```
 
 Build from Linux/WSL with MinGW-w64:
@@ -22,10 +22,11 @@ x86_64-w64-mingw32-windres -I windows/CodexMonitorWidget/src \
   -O coff -o "$resource_obj"
 x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
   windows/CodexMonitorWidget/src/main.c \
+  windows/CodexMonitorWidget/src/websocket.c \
   "$resource_obj" \
   -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
   -mwindows -municode -Wl,--subsystem,windows \
-  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lmsimg32
+  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lmsimg32 -lws2_32
 cp windows/CodexMonitorWidget/CodexMonitorWidget.ini.example \
   dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.ini
 ```

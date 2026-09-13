@@ -272,7 +272,7 @@ PYTHONPATH=src python3 -m codex_cli_monitor --stop
 前台运行 API 服务，便于调试：
 
 ```bash
-PYTHONPATH=src python3 -m codex_cli_monitor --serve --host 127.0.0.1 --port 8765
+PYTHONPATH=src python3 -m codex_cli_monitor --serve --host 127.0.0.1 --port 8765 --ws-enabled
 ```
 
 查询会话状态：
@@ -283,6 +283,10 @@ curl http://127.0.0.1:8765/api/sessions
 
 API 会返回每个 Codex 进程的主状态、目录和启动时间，示例字段如下（`waiting_reason` 只在
 `status` 为 `待确认` 时非空，其余状态为 `null`）：
+
+启用 `--ws-enabled` 后，前端可通过同一 HTTP 端口的 `/ws` 路径建立 WebSocket 连接；
+连接完成后发送 `{"token":"..."}`，服务端先返回鉴权确认，再发送初始快照和后续状态
+变化。Cloudflare Tunnel 只需要继续反代原来的 HTTP 端口。
 
 ```json
 {
@@ -524,7 +528,7 @@ vim start-server.sh
 | `LISTEN_HOST` | 必须确认 | 推荐填写 VPS 的 Tailscale/WireGuard IP；`127.0.0.1` 只能供本机或反向代理访问 |
 | `LISTEN_PORT` | 可选 | 默认 `8765` |
 | `REMOTE_TTL` | 可选 | 远端采集器多久无更新后移除旧会话，默认 30 秒，可容忍短暂网络超时 |
-| `LOCAL_CACHE_SECONDS` | 可选 | VPS 本机扫描缓存，默认 0.25 秒 |
+| `LOCAL_CACHE_SECONDS` | 可选 | VPS 本机扫描缓存，默认 0.05 秒 |
 | `INSTALL_HOOKS` | 可选 | `1` 表示自动安装本机 Hook，建议保持 `1` |
 | `INSTALL_OPENCODE_HOOKS` | 可选 | `1` 时在 VPS 为 OpenCode 安装生命周期 hook；默认 `0`（SQLite 只读轮询始终工作） |
 | `API_READ_TOKEN` | 必须修改 | Windows 和只读 API 使用的 Token |
@@ -630,7 +634,7 @@ vim start-collector.sh
 | `LISTEN_HOST` | 通常不改 | 本机诊断 API，建议保持 `127.0.0.1` |
 | `LISTEN_PORT` | 可选 | 本机诊断 API 端口，默认 `8765` |
 | `COLLECTOR_INTERVAL` | 可选 | 上报间隔，默认 0.5 秒 |
-| `LOCAL_CACHE_SECONDS` | 可选 | 本机扫描缓存，默认 0.25 秒 |
+| `LOCAL_CACHE_SECONDS` | 可选 | 本机扫描缓存，默认 0.05 秒 |
 | `INSTALL_HOOKS` | 可选 | `1` 表示自动安装本机 Hook，建议保持 `1` |
 | `INSTALL_OPENCODE_HOOKS` | 可选 | `1` 时为本机 OpenCode 安装生命周期 hook；默认 `0`（SQLite 只读轮询始终工作） |
 
@@ -1163,10 +1167,11 @@ x86_64-w64-mingw32-windres -I windows/CodexMonitorWidget/src \
   -O coff -o "$resource_obj"
 x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
   windows/CodexMonitorWidget/src/main.c \
+  windows/CodexMonitorWidget/src/websocket.c \
   "$resource_obj" \
   -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
   -mwindows -municode -Wl,--subsystem,windows \
-  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lmsimg32
+  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lmsimg32 -lws2_32
 cp windows/CodexMonitorWidget/CodexMonitorWidget.ini.example \
   dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.ini
 ```

@@ -1,1 +1,0 @@
-../../share/mingw-w64/include/d3d10_1shader.h

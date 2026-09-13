@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import ctypes
+import os
 import select
 import sys
+import struct
 import threading
 import time
 from datetime import datetime, timezone
@@ -12,15 +15,79 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, urlunparse
 from urllib.request import OpenerDirector, ProxyHandler, Request, build_opener
 
-try:
-    import pyinotify
-    INOTIFY_AVAILABLE = True
-except ImportError:
-    INOTIFY_AVAILABLE = False
+INOTIFY_AVAILABLE = sys.platform.startswith("linux")
 
 
 COLLECTOR_SNAPSHOT_PATH = "/api/collector/snapshot"
 FAILURE_LOG_REPEAT_SECONDS = 30.0
+
+
+class _InotifyWatcher:
+    """Small dependency-free inotify watcher for one parent directory."""
+
+    _EVENT_HEADER = struct.Struct("=iIII")
+    _IN_IGNORED = 0x00008000
+    _IN_Q_OVERFLOW = 0x00004000
+    _MASK = (
+        0x00000002  # IN_MODIFY
+        | 0x00000008  # IN_CLOSE_WRITE
+        | 0x00000100  # IN_CREATE
+        | 0x00000080  # IN_MOVED_TO
+        | 0x00000040  # IN_MOVED_FROM
+        | 0x00000200  # IN_DELETE
+    )
+
+    def __init__(self, directory: Path, target_name: str) -> None:
+        if not INOTIFY_AVAILABLE:
+            raise OSError("inotify is only available on Linux")
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.inotify_init1.argtypes = [ctypes.c_int]
+        libc.inotify_init1.restype = ctypes.c_int
+        libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        libc.inotify_add_watch.restype = ctypes.c_int
+        self._fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if self._fd < 0:
+            raise OSError(ctypes.get_errno(), "inotify_init1 failed")
+        watch = libc.inotify_add_watch(self._fd, os.fsencode(str(directory)), self._MASK)
+        if watch < 0:
+            error = OSError(ctypes.get_errno(), "inotify_add_watch failed")
+            os.close(self._fd)
+            raise error
+        self._target_name = os.fsencode(target_name)
+        self._closed = False
+
+    def wait(self, timeout: float) -> bool:
+        readable, _, _ = select.select([self._fd], [], [], timeout)
+        if not readable:
+            return False
+        try:
+            data = os.read(self._fd, 64 * 1024)
+        except BlockingIOError:
+            return False
+        offset = 0
+        matched = False
+        while offset + self._EVENT_HEADER.size <= len(data):
+            _, mask, _, name_length = self._EVENT_HEADER.unpack_from(data, offset)
+            offset += self._EVENT_HEADER.size
+            if offset + name_length > len(data):
+                raise OSError("truncated inotify event")
+            raw_name = data[offset : offset + name_length]
+            offset += name_length
+            if mask & (self._IN_IGNORED | self._IN_Q_OVERFLOW):
+                raise OSError("inotify watch is no longer usable")
+            name = raw_name.split(b"\0", 1)[0]
+            if name == self._target_name:
+                matched = True
+        return matched
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
 
 
 def normalize_aggregator_url(value: str) -> str:
@@ -195,10 +262,6 @@ class CollectorPusher:
 
         _log("INFO", f"collector push started url={self.url} proxy=disabled mode=event-driven watch={self.hook_log_path}")
 
-        # Setup inotify watcher
-        wm = pyinotify.WatchManager()
-        mask = pyinotify.IN_MODIFY | pyinotify.IN_CREATE
-
         # Ensure parent directory exists and watch it
         watch_dir = self.hook_log_path.parent
         if not watch_dir.exists():
@@ -207,83 +270,87 @@ class CollectorPusher:
             return
 
         try:
-            wdd = wm.add_watch(str(watch_dir), mask, rec=False)
-            if wdd[str(watch_dir)] < 0:
-                _log("WARN", "inotify watch failed, falling back to polling")
-                self._run_polling(stop_event)
-                return
+            watcher = _InotifyWatcher(watch_dir, self.hook_log_path.name)
         except Exception as e:
             _log("WARN", f"inotify setup failed: {e}, falling back to polling")
             self._run_polling(stop_event)
             return
 
-        notifier = pyinotify.Notifier(wm, timeout=100)  # 100ms timeout for stop_event checks
         last_push_time = 0.0
         debounce_seconds = 0.1  # Debounce rapid file changes
 
-        # Do initial push
+        # Do initial push.  A successful initial snapshot also satisfies the
+        # periodic deadline so an unchanged log does not cause an immediate
+        # duplicate request below.
         try:
             self.post_once()
+            last_push_time = time.time()
         except Exception as error:
             _log("ERROR", f"collector initial push failed error={error}")
 
-        while not stop_event.is_set():
-            # Check for file system events
-            if notifier.check_events(timeout=100):  # 100ms
-                notifier.read_events()
-                notifier.process_events()
+        try:
+            while not stop_event.is_set():
+                # Check for file system events.
+                if watcher.wait(0.1):
+                    # Debounce rapid writes and rotations.
+                    now = time.time()
+                    if now - last_push_time >= debounce_seconds:
+                        failures_before_attempt = self.status_snapshot()["consecutive_failures"]
+                        try:
+                            self.post_once()
+                            last_push_time = now
+                        except Exception as error:
+                            status = self.status_snapshot()
+                            if (
+                                status["consecutive_failures"] == 1
+                                or last_failure_log_at is None
+                                or str(error) != last_logged_error
+                                or now - last_failure_log_at >= FAILURE_LOG_REPEAT_SECONDS
+                            ):
+                                _log(
+                                    "ERROR",
+                                    "collector push failed "
+                                    f"consecutive={status['consecutive_failures']} "
+                                    f"total_failures={status['failure_count']} error={error}",
+                                )
+                                last_failure_log_at = now
+                                last_logged_error = str(error)
+                        else:
+                            status = self.status_snapshot()
+                            if failures_before_attempt:
+                                _log(
+                                    "INFO",
+                                    "collector push recovered "
+                                    f"after={failures_before_attempt} "
+                                    f"total_successes={status['success_count']}",
+                                )
+                            elif not ready_logged:
+                                _log(
+                                    "INFO",
+                                    f"collector push ready total_successes={status['success_count']}",
+                                )
+                            ready_logged = True
+                            last_failure_log_at = None
+                            last_logged_error = None
 
-                # Debounce: only push if enough time has passed
+                # The hook log is not the only source of state (for example,
+                # OpenCode's database and Claude registrations), so retain a
+                # periodic refresh as a bounded-latency fallback.
                 now = time.time()
-                if now - last_push_time >= debounce_seconds:
-                    failures_before_attempt = self.status_snapshot()["consecutive_failures"]
+                if now - last_push_time >= self.interval_seconds:
                     try:
                         self.post_once()
                         last_push_time = now
-                    except Exception as error:
-                        status = self.status_snapshot()
-                        if (
-                            status["consecutive_failures"] == 1
-                            or last_failure_log_at is None
-                            or str(error) != last_logged_error
-                            or now - last_failure_log_at >= FAILURE_LOG_REPEAT_SECONDS
-                        ):
-                            _log(
-                                "ERROR",
-                                "collector push failed "
-                                f"consecutive={status['consecutive_failures']} "
-                                f"total_failures={status['failure_count']} error={error}",
-                            )
-                            last_failure_log_at = now
-                            last_logged_error = str(error)
-                    else:
-                        status = self.status_snapshot()
-                        if failures_before_attempt:
-                            _log(
-                                "INFO",
-                                "collector push recovered "
-                                f"after={failures_before_attempt} "
-                                f"total_successes={status['success_count']}",
-                            )
-                        elif not ready_logged:
-                            _log(
-                                "INFO",
-                                f"collector push ready total_successes={status['success_count']}",
-                            )
-                        ready_logged = True
-                        last_failure_log_at = None
-                        last_logged_error = None
-
-            # Also do periodic push as fallback (every interval_seconds)
-            now = time.time()
-            if now - last_push_time >= self.interval_seconds:
-                try:
-                    self.post_once()
-                    last_push_time = now
-                except Exception:
-                    pass  # Errors already logged in event-driven path
-
-        notifier.stop()
+                    except Exception:
+                        pass  # Errors are logged by the event-driven path.
+        except (OSError, ValueError) as error:
+            # A removed/invalid inotify fd should not terminate delivery;
+            # continue with the original polling implementation instead.
+            _log("WARN", f"inotify watcher stopped: {error}, falling back to polling")
+            if not stop_event.is_set():
+                self._run_polling(stop_event)
+        finally:
+            watcher.close()
 
     def _record_attempt(self, attempted_at: float) -> None:
         with self._status_lock:

@@ -29,7 +29,7 @@ COLLECTOR_WRITE_TOKEN="REPLACE_WITH_COLLECTOR_WRITE_TOKEN"
 LISTEN_HOST="127.0.0.1"
 LISTEN_PORT="8765"
 COLLECTOR_INTERVAL="0.5"
-LOCAL_CACHE_SECONDS="0.25"
+LOCAL_CACHE_SECONDS="0.05"
 INSTALL_HOOKS="1"
 
 fail() {
@@ -99,7 +99,7 @@ Environment=$(systemd_quote "HOME=$SERVICE_HOME")
 Environment=$(systemd_quote "PYTHONPATH=$REPO_ROOT/src")
 EnvironmentFile=$ENV_FILE
 # Snapshot delivery explicitly bypasses inherited proxy settings in the client.
-ExecStart=$(systemd_quote "$PYTHON_BIN") -m codex_cli_monitor --serve --host $LISTEN_HOST --port $LISTEN_PORT --collector-interval $COLLECTOR_INTERVAL --cache-seconds $LOCAL_CACHE_SECONDS
+ExecStart=$(systemd_quote "$PYTHON_BIN") -m codex_cli_monitor --serve --host $LISTEN_HOST --port $LISTEN_PORT --collector-interval $COLLECTOR_INTERVAL --cache-seconds $LOCAL_CACHE_SECONDS --ws-enabled
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=15

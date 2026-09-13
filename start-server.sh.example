@@ -25,7 +25,7 @@ SERVER_NAME="My VPS"
 LISTEN_HOST="127.0.0.1" # 推荐改成 VPS 的 Tailscale/WireGuard IP。
 LISTEN_PORT="8765"
 REMOTE_TTL="30"
-LOCAL_CACHE_SECONDS="0.25"
+LOCAL_CACHE_SECONDS="0.05"
 INSTALL_HOOKS="1"
 
 # 使用 `openssl rand -hex 32` 分别生成两个 Token。
@@ -98,7 +98,7 @@ WorkingDirectory=$REPO_ROOT
 Environment=$(systemd_quote "HOME=$SERVICE_HOME")
 Environment=$(systemd_quote "PYTHONPATH=$REPO_ROOT/src")
 EnvironmentFile=$ENV_FILE
-ExecStart=$(systemd_quote "$PYTHON_BIN") -m codex_cli_monitor --serve --aggregate --host $LISTEN_HOST --port $LISTEN_PORT --remote-ttl $REMOTE_TTL --cache-seconds $LOCAL_CACHE_SECONDS
+ExecStart=$(systemd_quote "$PYTHON_BIN") -m codex_cli_monitor --serve --aggregate --host $LISTEN_HOST --port $LISTEN_PORT --remote-ttl $REMOTE_TTL --cache-seconds $LOCAL_CACHE_SECONDS --ws-enabled
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=15

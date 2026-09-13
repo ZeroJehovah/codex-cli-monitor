@@ -2,7 +2,7 @@
 
 ## 更新内容
 
-✅ **已更新**: WebSocket 端点从 `ws://host:8766` 改为 `ws://host:8765/ws`
+✅ **已更新**: WebSocket 端点现在与 HTTP API 共用端口，并使用 `/ws` 路径
 - 现在 WebSocket 与 HTTP API 使用同一端口
 - 自动从 API URL 提取主机和端口信息
 - 添加 `/ws` 路径到 WebSocket 连接
@@ -27,18 +27,10 @@ cd /opt/dev/projects/personal/codex-cli-monitor
 rm -rf dist/CodexMonitorWidget-win-x64
 mkdir -p dist/CodexMonitorWidget-win-x64
 
-# 编译资源文件（图标）
-resource_obj="$(mktemp /tmp/codex-monitor-widget-resource.XXXXXX.o)"
-trap 'rm -f "$resource_obj"' EXIT
-x86_64-w64-mingw32-windres -I windows/CodexMonitorWidget/src \
-  windows/CodexMonitorWidget/src/resources.rc \
-  -O coff -o "$resource_obj"
-
 # 编译 C 源代码
 x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
   windows/CodexMonitorWidget/src/main.c \
   windows/CodexMonitorWidget/src/websocket.c \
-  "$resource_obj" \
   -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
   -mwindows -municode -Wl,--subsystem,windows \
   -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lmsimg32 -lws2_32
@@ -48,6 +40,15 @@ cp windows/CodexMonitorWidget/CodexMonitorWidget.ini.example \
   dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.ini
 
 echo "✅ 编译完成！输出目录: dist/CodexMonitorWidget-win-x64/"
+```
+
+如果交叉编译器与目标汇编器/链接器位于不同目录，可以把 `binutils-mingw-w64-x86-64`
+解压后的 `usr/bin` 目录通过 `BINUTILS_DIR` 传给 Makefile：
+
+```bash
+make -C windows/CodexMonitorWidget \
+  BINUTILS_DIR=/tmp/codex-mingw-binutils/root/usr/bin \
+  MINGW_INCLUDE_DIR=/path/to/mingw-w64/include
 ```
 
 ## 配置文件
@@ -73,7 +74,7 @@ ApiToken=你的-API-令牌
 - `https://codex-monitor.aiof.top/api/sessions`
 
 那么 WebSocket 将连接到：
-- `wss://codex-monitor.aiof.top:8765/ws`
+- `wss://codex-monitor.aiof.top/ws`
 
 程序会自动：
 1. 从 API URL 提取主机和端口
@@ -82,9 +83,9 @@ ApiToken=你的-API-令牌
 
 ## 注意事项
 
-- ⚠️ 当前环境缺少完整的 MinGW-w64 工具链，无法直接编译
-- 建议在有完整 MinGW 的环境中编译（Ubuntu/Debian/WSL）
-- 项目自带的 mingw-sysroot 不完整，缺少必要的头文件和工具
+- Makefile 优先使用 PATH 中的 `x86_64-w64-mingw32-gcc-posix` 或
+  `x86_64-w64-mingw32-gcc`；也可以通过 `CC=/path/to/compiler` 显式指定
+- `windres` 是可选的；没有它时只是不嵌入自定义图标，程序仍然可用
 - 编译后的 `.exe` 文件不会提交到 git（在 .gitignore 中）
 
 ## 故障排查
@@ -97,7 +98,7 @@ ApiToken=你的-API-令牌
 
 ## 已完成的更改
 
-- ✅ 移除了硬编码的端口 8766
+- ✅ 移除了独立 WebSocket 端口
 - ✅ 改为从 API URL 动态提取主机和端口
 - ✅ 添加 `/ws` 路径到 WebSocket URL
 - ✅ 保持与 HTTP API 相同的主机和端口

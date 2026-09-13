@@ -1,1 +1,0 @@
-../../share/mingw-w64/include/ktmw32.h

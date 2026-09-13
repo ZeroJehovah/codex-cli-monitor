@@ -5,7 +5,6 @@ import base64
 import hashlib
 import json
 import logging
-import os
 import queue
 import socket
 import struct
@@ -47,6 +46,17 @@ class SyncWebSocketClient:
             self.sock.close()
         except Exception:
             pass
+
+    def send_control(self, opcode: int, payload: bytes = b"") -> None:
+        """Queue a control frame such as ping or pong."""
+        if len(payload) > 125:
+            raise ValueError("WebSocket control frame payload is too large")
+        if self.closed:
+            return
+        self.send_queue.put(self._encode_frame(payload, opcode=opcode))
+
+    def send_pong(self, payload: bytes = b"") -> None:
+        self.send_control(0xA, payload)
     
     def _encode_frame(self, payload: bytes, opcode: int = 0x1) -> bytes:
         """Encode WebSocket frame (server to client, no masking)."""
@@ -66,59 +76,68 @@ class SyncWebSocketClient:
         frame.extend(payload)
         return bytes(frame)
     
-    def _read_frame(self, timeout: float | None = None) -> bytes | None:
+    def _read_exact(self, length: int) -> bytes | None:
+        data = bytearray()
+        while len(data) < length:
+            chunk = self.sock.recv(length - len(data))
+            if not chunk:
+                return None
+            data.extend(chunk)
+        return bytes(data)
+
+    def _read_frame(self, timeout: float | None = None) -> tuple[int, bytes] | None:
         """Read one WebSocket frame from client (masked)."""
         old_timeout = self.sock.gettimeout()
         try:
             if timeout is not None:
                 self.sock.settimeout(timeout)
-            
-            # Read first 2 bytes
-            header = self.sock.recv(2)
-            if len(header) < 2:
+
+            header = self._read_exact(2)
+            if header is None:
                 return None
-            
             fin_opcode = header[0]
             mask_len = header[1]
-            
+            fin = bool(fin_opcode & 0x80)
             opcode = fin_opcode & 0x0F
             masked = bool(mask_len & 0x80)
             payload_len = mask_len & 0x7F
-            
-            # Close frame
-            if opcode == 0x8:
-                return None
-            
-            # Extended payload length
+
             if payload_len == 126:
-                ext = self.sock.recv(2)
+                ext = self._read_exact(2)
+                if ext is None:
+                    return None
                 payload_len = struct.unpack('!H', ext)[0]
             elif payload_len == 127:
-                ext = self.sock.recv(8)
-                payload_len = struct.unpack('!Q', ext)[0]
-            
-            # Masking key (client to server)
-            mask_key = self.sock.recv(4) if masked else None
-            
-            # Payload
-            payload = bytearray()
-            while len(payload) < payload_len:
-                chunk = self.sock.recv(payload_len - len(payload))
-                if not chunk:
+                ext = self._read_exact(8)
+                if ext is None:
                     return None
-                payload.extend(chunk)
-            
-            # Unmask
+                payload_len = struct.unpack('!Q', ext)[0]
+            if payload_len > 1024 * 1024:
+                return None
+            mask_key = self._read_exact(4) if masked else None
+            if masked and mask_key is None:
+                return None
+            raw_payload = self._read_exact(payload_len)
+            if raw_payload is None:
+                return None
+            payload = bytearray(raw_payload)
             if masked and mask_key:
                 payload = bytearray(b ^ mask_key[i % 4] for i, b in enumerate(payload))
-            
-            return bytes(payload)
+            if not masked and opcode < 0x8:
+                # RFC 6455 requires client-to-server frames to be masked.
+                return None
+            if opcode >= 0x8 and (not fin or payload_len > 125):
+                return None
+            return opcode, bytes(payload)
         except socket.timeout:
             return None
         except Exception:
             return None
         finally:
-            self.sock.settimeout(old_timeout)
+            try:
+                self.sock.settimeout(old_timeout)
+            except Exception:
+                pass
     
     def run_send_loop(self) -> None:
         """Send loop running in background thread."""
@@ -138,20 +157,18 @@ class SyncWebSocketClient:
     
     def run_recv_loop(self) -> None:
         """Receive loop (blocking until close)."""
-        self.sock.settimeout(30.0)
+        self.sock.settimeout(None)
         try:
             while not self.closed:
-                frame = self._read_frame(timeout=30.0)
+                frame = self._read_frame()
                 if frame is None:
                     break
-                
-                # Handle ping
-                try:
-                    msg = frame.decode('utf-8')
-                    if msg == 'ping':
-                        self.send_text('pong')
-                except Exception:
-                    pass
+                opcode, payload = frame
+                if opcode == 0x8:
+                    self.send_control(0x8, payload[:125])
+                    break
+                if opcode == 0x9:
+                    self.send_pong(payload)
         except Exception:
             pass
         finally:
@@ -212,18 +229,45 @@ class WebSocketBroadcaster:
         if dead:
             with self._lock:
                 self.clients -= set(dead)
+
+    def ping(self) -> None:
+        """Keep idle connections alive through intermediaries."""
+        with self._lock:
+            clients = tuple(self.clients)
+        for client in clients:
+            try:
+                if not client.closed:
+                    client.send_control(0x9)
+            except Exception:
+                self.unregister(client)
     
     def _compute_state_hash(
         self,
         sessions: tuple[CodexSession, ...],
         remote_snapshots: tuple[RemoteSnapshot, ...],
     ) -> int:
-        local_sig = tuple(
-            (s.root.pid, s.display_status, s.root.cwd, s.waiting_reason)
+        local_sig = tuple(sorted(
+            (s.root.pid, s.root.started_at, s.display_status, s.root.cwd,
+             s.waiting_reason, getattr(s, "cli_type", "codex"))
             for s in sessions
-        )
-        remote_sig = tuple(
-            (snap.identity.server_id, len(snap.sessions))
+        ))
+        remote_sig = tuple(sorted(
+            (
+                snap.identity.server_id,
+                snap.identity.server_name,
+                tuple(sorted(
+                    (
+                        item.get("session_key"),
+                        item.get("pid"),
+                        item.get("started_at"),
+                        item.get("status"),
+                        item.get("directory"),
+                        item.get("waiting_reason"),
+                        item.get("cli_type", "codex"),
+                    )
+                    for item in snap.sessions
+                )),
+            )
             for snap in remote_snapshots
-        )
+        ))
         return hash((local_sig, remote_sig))

@@ -1,268 +1,377 @@
 #include "websocket.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
-// WebSocket frame opcodes
-#define WS_OPCODE_TEXT 0x1
-#define WS_OPCODE_BINARY 0x2
-#define WS_OPCODE_CLOSE 0x8
-#define WS_OPCODE_PING 0x9
-#define WS_OPCODE_PONG 0xA
+#define MAX_WS_MESSAGE_BYTES (4U * 1024U * 1024U)
 
-// WebSocket connection thread data
 typedef struct {
     HWND hwnd;
-    wchar_t url[1024];
     wchar_t host[256];
     wchar_t path[768];
-    int port;
+    wchar_t token[512];
+    INTERNET_PORT port;
     int use_ssl;
 } WebSocketThreadData;
 
 static DWORD WINAPI websocket_thread_proc(LPVOID param);
-static int parse_websocket_url(const wchar_t *url, wchar_t *host, int *port, wchar_t *path, int *use_ssl);
-static int websocket_handshake(HINTERNET hRequest, HWND hwnd);
-static void websocket_receive_loop(HINTERNET hRequest, HWND hwnd);
+static int parse_websocket_url(
+    const wchar_t *url,
+    wchar_t *host,
+    size_t host_count,
+    INTERNET_PORT *port,
+    wchar_t *path,
+    size_t path_count,
+    int *use_ssl
+);
+static HINTERNET websocket_handshake(HINTERNET request, const wchar_t *token);
+static void websocket_receive_loop(HINTERNET websocket, HWND hwnd);
 
-HANDLE websocket_connect_async(HWND hwnd, const wchar_t *url) {
-    WebSocketThreadData *data = (WebSocketThreadData *)malloc(sizeof(WebSocketThreadData));
-    if (data == NULL) {
-        return NULL;
+static int append_json_escaped_utf8(
+    char *output,
+    size_t output_size,
+    size_t *length,
+    const char *value
+) {
+    const unsigned char *cursor = (const unsigned char *)value;
+    while (*cursor != '\0') {
+        const char *escape = NULL;
+        char escaped[7];
+        size_t escaped_length;
+        if (*cursor == '\\') {
+            escape = "\\\\";
+        } else if (*cursor == '"') {
+            escape = "\\\"";
+        } else if (*cursor == '\b') {
+            escape = "\\b";
+        } else if (*cursor == '\f') {
+            escape = "\\f";
+        } else if (*cursor == '\n') {
+            escape = "\\n";
+        } else if (*cursor == '\r') {
+            escape = "\\r";
+        } else if (*cursor == '\t') {
+            escape = "\\t";
+        } else if (*cursor < 0x20) {
+            snprintf(escaped, sizeof(escaped), "\\u%04x", *cursor);
+            escape = escaped;
+        }
+        escaped_length = escape != NULL ? strlen(escape) : 1;
+        if (escaped_length >= output_size || *length > output_size - escaped_length - 1) {
+            return 0;
+        }
+        if (escape != NULL) {
+            memcpy(output + *length, escape, escaped_length);
+        } else {
+            output[*length] = (char)*cursor;
+        }
+        *length += escaped_length;
+        cursor++;
     }
-    
-    data->hwnd = hwnd;
-    wcsncpy(data->url, url, 1023);
-    data->url[1023] = L'\0';
-    
-    if (!parse_websocket_url(url, data->host, &data->port, data->path, &data->use_ssl)) {
-        free(data);
-        return NULL;
-    }
-    
-    HANDLE thread = CreateThread(NULL, 0, websocket_thread_proc, data, 0, NULL);
-    if (thread == NULL) {
-        free(data);
-        return NULL;
-    }
-    
-    return thread;
+    output[*length] = '\0';
+    return 1;
 }
 
-static int parse_websocket_url(const wchar_t *url, wchar_t *host, int *port, wchar_t *path, int *use_ssl) {
-    // Parse ws://host:port/path or wss://host:port/path
-    const wchar_t *p = url;
-    
-    if (wcsncmp(p, L"ws://", 5) == 0) {
+int websocket_connect_async(HWND hwnd, const wchar_t *url, const wchar_t *token) {
+    WebSocketThreadData *data;
+    HANDLE thread;
+
+    data = (WebSocketThreadData *)calloc(1, sizeof(*data));
+    if (data == NULL) {
+        return 0;
+    }
+    data->hwnd = hwnd;
+    wcsncpy(data->token, token != NULL ? token : L"", 511);
+    data->token[511] = L'\0';
+    if (!parse_websocket_url(
+            url,
+            data->host,
+            sizeof(data->host) / sizeof(data->host[0]),
+            &data->port,
+            data->path,
+            sizeof(data->path) / sizeof(data->path[0]),
+            &data->use_ssl)) {
+        free(data);
+        return 0;
+    }
+    thread = CreateThread(NULL, 0, websocket_thread_proc, data, 0, NULL);
+    if (thread == NULL) {
+        free(data);
+        return 0;
+    }
+    CloseHandle(thread);
+    return 1;
+}
+
+static int parse_websocket_url(
+    const wchar_t *url,
+    wchar_t *host,
+    size_t host_count,
+    INTERNET_PORT *port,
+    wchar_t *path,
+    size_t path_count,
+    int *use_ssl
+) {
+    const wchar_t *cursor;
+    const wchar_t *slash;
+    const wchar_t *colon;
+    size_t host_len;
+    size_t port_len;
+    wchar_t port_text[8];
+    wchar_t *end_port;
+    long parsed_port;
+
+    if (wcsncmp(url, L"ws://", 5) == 0) {
         *use_ssl = 0;
         *port = 80;
-        p += 5;
-    } else if (wcsncmp(p, L"wss://", 6) == 0) {
+        cursor = url + 5;
+    } else if (wcsncmp(url, L"wss://", 6) == 0) {
         *use_ssl = 1;
         *port = 443;
-        p += 6;
+        cursor = url + 6;
     } else {
         return 0;
     }
-    
-    // Extract host
-    const wchar_t *slash = wcschr(p, L'/');
-    const wchar_t *colon = wcschr(p, L':');
-    
+
+    slash = wcschr(cursor, L'/');
+    colon = wcschr(cursor, L':');
     if (colon != NULL && (slash == NULL || colon < slash)) {
-        // Port specified
-        size_t host_len = colon - p;
-        if (host_len >= 255) {
+        host_len = (size_t)(colon - cursor);
+        if (host_len == 0 || host_len >= host_count) {
             return 0;
         }
-        wcsncpy(host, p, host_len);
+        wcsncpy(host, cursor, host_len);
         host[host_len] = L'\0';
-        
-        *port = _wtoi(colon + 1);
-        p = slash ? slash : (colon + wcslen(colon));
+        port_len = slash != NULL ? (size_t)(slash - (colon + 1)) : wcslen(colon + 1);
+        if (port_len == 0 || port_len >= sizeof(port_text) / sizeof(port_text[0])) {
+            return 0;
+        }
+        wcsncpy(port_text, colon + 1, port_len);
+        port_text[port_len] = L'\0';
+        parsed_port = wcstol(port_text, &end_port, 10);
+        if (end_port == port_text || *end_port != L'\0' ||
+            parsed_port < 1 || parsed_port > 65535) {
+            return 0;
+        }
+        *port = (INTERNET_PORT)parsed_port;
+        cursor = slash != NULL ? slash : colon + wcslen(colon);
     } else {
-        // No port specified
-        size_t host_len = slash ? (slash - p) : wcslen(p);
-        if (host_len >= 255) {
+        host_len = slash != NULL ? (size_t)(slash - cursor) : wcslen(cursor);
+        if (host_len == 0 || host_len >= host_count) {
             return 0;
         }
-        wcsncpy(host, p, host_len);
+        wcsncpy(host, cursor, host_len);
         host[host_len] = L'\0';
-        p = slash ? slash : (p + host_len);
+        cursor = slash != NULL ? slash : cursor + host_len;
     }
-    
-    // Extract path
-    if (*p == L'\0') {
+
+    if (*cursor == L'\0') {
+        if (path_count < 2) {
+            return 0;
+        }
         wcscpy(path, L"/");
     } else {
-        wcsncpy(path, p, 767);
-        path[767] = L'\0';
+        if (wcslen(cursor) >= path_count) {
+            return 0;
+        }
+        wcscpy(path, cursor);
     }
-    
     return 1;
 }
 
 static DWORD WINAPI websocket_thread_proc(LPVOID param) {
     WebSocketThreadData *data = (WebSocketThreadData *)param;
-    HWND hwnd = data->hwnd;
-    
-    // Open session
-    HINTERNET hSession = WinHttpOpen(
+    HINTERNET session = NULL;
+    HINTERNET connection = NULL;
+    HINTERNET request = NULL;
+    HINTERNET websocket = NULL;
+
+    session = WinHttpOpen(
         L"CodexMonitorWidget/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS,
         0
     );
-    
-    if (hSession == NULL) {
-        PostMessage(hwnd, WM_WEBSOCKET_CLOSED, 0, 0);
-        free(data);
-        return 1;
+    if (session != NULL) {
+        connection = WinHttpConnect(session, data->host, data->port, 0);
     }
-    
-    // Connect
-    HINTERNET hConnect = WinHttpConnect(
-        hSession,
-        data->host,
-        data->port,
-        0
-    );
-    
-    if (hConnect == NULL) {
-        WinHttpCloseHandle(hSession);
-        PostMessage(hwnd, WM_WEBSOCKET_CLOSED, 0, 0);
-        free(data);
-        return 1;
+    if (connection != NULL) {
+        DWORD flags = WINHTTP_FLAG_REFRESH;
+        if (data->use_ssl) {
+            flags |= WINHTTP_FLAG_SECURE;
+        }
+        request = WinHttpOpenRequest(
+            connection,
+            L"GET",
+            data->path,
+            NULL,
+            WINHTTP_NO_REFERER,
+            WINHTTP_DEFAULT_ACCEPT_TYPES,
+            flags
+        );
     }
-    
-    // Open request
-    DWORD flags = WINHTTP_FLAG_REFRESH;
-    if (data->use_ssl) {
-        flags |= WINHTTP_FLAG_SECURE;
+    if (request != NULL) {
+        websocket = websocket_handshake(request, data->token);
+        WinHttpCloseHandle(request);
+        request = NULL;
     }
-    
-    HINTERNET hRequest = WinHttpOpenRequest(
-        hConnect,
-        L"GET",
-        data->path,
-        NULL,
-        WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES,
-        flags
-    );
-    
-    if (hRequest == NULL) {
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        PostMessage(hwnd, WM_WEBSOCKET_CLOSED, 0, 0);
-        free(data);
-        return 1;
+    if (websocket != NULL) {
+        PostMessage(data->hwnd, WM_WEBSOCKET_CONNECTED, 0, 0);
+        websocket_receive_loop(websocket, data->hwnd);
+        WinHttpCloseHandle(websocket);
     }
-    
-    // Perform WebSocket handshake
-    if (!websocket_handshake(hRequest, hwnd)) {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        PostMessage(hwnd, WM_WEBSOCKET_CLOSED, 0, 0);
-        free(data);
-        return 1;
+    if (connection != NULL) {
+        WinHttpCloseHandle(connection);
     }
-    
-    PostMessage(hwnd, WM_WEBSOCKET_CONNECTED, 0, 0);
-    
-    // Receive loop
-    websocket_receive_loop(hRequest, hwnd);
-    
-    // Cleanup
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-    PostMessage(hwnd, WM_WEBSOCKET_CLOSED, 0, 0);
+    if (session != NULL) {
+        WinHttpCloseHandle(session);
+    }
+    PostMessage(data->hwnd, WM_WEBSOCKET_CLOSED, 0, 0);
     free(data);
-    
     return 0;
 }
 
-static int websocket_handshake(HINTERNET hRequest, HWND hwnd) {
-    // Set WebSocket upgrade headers
-    WinHttpSetOption(hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, NULL, 0);
-    
-    if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-        return 0;
-    }
-    
-    if (!WinHttpReceiveResponse(hRequest, NULL)) {
-        return 0;
-    }
-    
+static HINTERNET websocket_handshake(HINTERNET request, const wchar_t *token) {
     DWORD status_code = 0;
-    DWORD size = sizeof(status_code);
-    if (!WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status_code, &size, NULL)) {
-        return 0;
+    DWORD status_size = sizeof(status_code);
+    HINTERNET websocket;
+
+    if (!WinHttpSetOption(request, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, NULL, 0) ||
+        !WinHttpSendRequest(
+            request,
+            WINHTTP_NO_ADDITIONAL_HEADERS,
+            0,
+            WINHTTP_NO_REQUEST_DATA,
+            0,
+            0,
+            0) ||
+        !WinHttpReceiveResponse(request, NULL) ||
+        !WinHttpQueryHeaders(
+            request,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            NULL,
+            &status_code,
+            &status_size,
+            NULL) ||
+        status_code != 101) {
+        return NULL;
     }
-    
-    if (status_code != 101) {
-        return 0;
+    websocket = WinHttpWebSocketCompleteUpgrade(request, 0);
+    if (websocket == NULL) {
+        return NULL;
     }
-    
-    return 1;
+    if (token != NULL && token[0] != L'\0') {
+        char token_utf8[2048];
+        char auth[2112];
+        int token_length = WideCharToMultiByte(
+            CP_UTF8,
+            WC_ERR_INVALID_CHARS,
+            token,
+            -1,
+            token_utf8,
+            sizeof(token_utf8),
+            NULL,
+            NULL
+        );
+        size_t auth_length = 0;
+        int auth_ok = 1;
+        if (token_length <= 0) {
+            WinHttpWebSocketClose(
+                websocket,
+                WINHTTP_WEB_SOCKET_INVALID_DATA_TYPE_CLOSE_STATUS,
+                NULL,
+                0
+            );
+            WinHttpCloseHandle(websocket);
+            return NULL;
+        }
+        if (sizeof(auth) < 11) {
+            auth_ok = 0;
+        } else {
+            memcpy(auth, "{\"token\":\"", 10);
+            auth_length = 10;
+            auth_ok = append_json_escaped_utf8(
+                auth,
+                sizeof(auth),
+                &auth_length,
+                token_utf8
+            );
+            if (auth_ok && auth_length > sizeof(auth) - 3) {
+                auth_ok = 0;
+            }
+            if (auth_ok) {
+                memcpy(auth + auth_length, "\"}", 2);
+                auth_length += 2;
+                auth[auth_length] = '\0';
+            }
+        }
+        if (!auth_ok ||
+            WinHttpWebSocketSend(
+                websocket,
+                WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                auth,
+                (DWORD)auth_length) != ERROR_SUCCESS) {
+            WinHttpWebSocketClose(
+                websocket,
+                WINHTTP_WEB_SOCKET_ENDPOINT_TERMINATED_CLOSE_STATUS,
+                NULL,
+                0
+            );
+            WinHttpCloseHandle(websocket);
+            return NULL;
+        }
+    }
+    return websocket;
 }
 
-static void websocket_receive_loop(HINTERNET hRequest, HWND hwnd) {
+static void websocket_receive_loop(HINTERNET websocket, HWND hwnd) {
     char buffer[8192];
-    DWORD bytes_read = 0;
-    WINHTTP_WEB_SOCKET_BUFFER_TYPE buffer_type;
-    
-    while (1) {
+    char *message = NULL;
+    size_t message_length = 0;
+
+    for (;;) {
+        DWORD bytes_read = 0;
+        WINHTTP_WEB_SOCKET_BUFFER_TYPE buffer_type;
         DWORD error = WinHttpWebSocketReceive(
-            hRequest,
+            websocket,
             buffer,
-            sizeof(buffer) - 1,
+            sizeof(buffer),
             &bytes_read,
             &buffer_type
         );
-        
-        if (error != ERROR_SUCCESS) {
+        if (error != ERROR_SUCCESS || buffer_type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
             break;
         }
-        
-        if (buffer_type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
+        if (buffer_type != WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE &&
+            buffer_type != WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE) {
+            continue;
+        }
+        if (bytes_read > MAX_WS_MESSAGE_BYTES - message_length) {
             break;
         }
-        
-        if (buffer_type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE ||
-            buffer_type == WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE) {
-            buffer[bytes_read] = '\0';
-            
-            // Allocate message buffer
-            char *msg = (char *)malloc(bytes_read + 1);
-            if (msg != NULL) {
-                memcpy(msg, buffer, bytes_read + 1);
-                PostMessage(hwnd, WM_WEBSOCKET_MESSAGE, 0, (LPARAM)msg);
+        {
+            char *grown = (char *)realloc(message, message_length + bytes_read + 1);
+            if (grown == NULL) {
+                break;
             }
+            message = grown;
+        }
+        memcpy(message + message_length, buffer, bytes_read);
+        message_length += bytes_read;
+        message[message_length] = '\0';
+        if (buffer_type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
+            char *copy = (char *)malloc(message_length + 1);
+            if (copy != NULL) {
+                memcpy(copy, message, message_length + 1);
+                PostMessage(hwnd, WM_WEBSOCKET_MESSAGE, 0, (LPARAM)copy);
+            }
+            free(message);
+            message = NULL;
+            message_length = 0;
         }
     }
-}
-
-void websocket_send_ping(HINTERNET hWebSocket) {
-    if (hWebSocket == NULL) {
-        return;
-    }
-    
-    WinHttpWebSocketSend(
-        hWebSocket,
-        WINHTTP_WEB_SOCKET_PING_BUFFER_TYPE,
-        NULL,
-        0
-    );
-}
-
-void websocket_close(HINTERNET hWebSocket) {
-    if (hWebSocket == NULL) {
-        return;
-    }
-    
-    WinHttpWebSocketClose(hWebSocket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, NULL, 0);
+    free(message);
 }

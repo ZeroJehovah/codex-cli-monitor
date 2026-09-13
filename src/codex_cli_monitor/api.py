@@ -24,7 +24,7 @@ from .aggregation import (
     snapshot_server_id,
 )
 from .collector import CollectorPusher
-from .hook_state import hook_log_health
+from .hook_state import default_hook_log_path, hook_log_health
 from .install_hooks import check_hooks
 from .models import CodexSession
 from .monitor import discover_sessions
@@ -190,6 +190,15 @@ def make_api_handler(
 
     class CodexMonitorApiHandler(BaseHTTPRequestHandler):
         server_version = "codex-cli-monitor"
+        protocol_version = "HTTP/1.1"
+
+        def handle(self) -> None:
+            # A polling client may close a persistent HTTP connection after
+            # reading its response. Treat that normal disconnect quietly.
+            try:
+                super().handle()
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
 
         def do_OPTIONS(self) -> None:
             self.send_response(HTTPStatus.NO_CONTENT.value)
@@ -413,12 +422,14 @@ def make_api_handler(
             self.send_header("Connection", "Upgrade")
             self.send_header("Sec-WebSocket-Accept", accept)
             self.end_headers()
+            # Do not let BaseHTTPRequestHandler parse WebSocket frames as a
+            # second HTTP request after do_GET returns.
+            self.close_connection = True
             
-            # Detach socket from HTTP handler
-            sock = self.request
-            self.connection = None  # Prevent handler from closing it
-            self.rfile = None  # Detach read buffer
-            self.wfile = None  # Detach write buffer
+            # Duplicate the descriptor before returning control to the HTTP
+            # handler.  Its normal finish() path may close the original
+            # request socket, while the WebSocket owns this duplicate.
+            sock = self.connection.dup()
             
             client = SyncWebSocketClient(sock)
             
@@ -434,7 +445,10 @@ def make_api_handler(
                     if frame is None:
                         return
                     try:
-                        auth = json.loads(frame.decode("utf-8"))
+                        opcode, payload = frame
+                        if opcode != 0x1:
+                            raise ValueError("authentication must be a text frame")
+                        auth = json.loads(payload.decode("utf-8"))
                         if auth.get("token") != api_token:
                             client.send_text(json.dumps({"error": "unauthorized"}))
                             time.sleep(0.1)
@@ -460,6 +474,10 @@ def make_api_handler(
             finally:
                 ws_broadcaster.unregister(client)
                 client.close()
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
 
 
@@ -509,11 +527,16 @@ def serve_api(
         
         def broadcast_loop():
             """Periodically broadcast state changes to all WS clients."""
+            last_ping = time.monotonic()
             while True:
                 try:
                     sessions, _ = provider.get()
                     remote_snapshots = remote_store.active(time.time()) if remote_store else ()
                     ws_broadcaster.broadcast(sessions, identity, remote_snapshots)
+                    now = time.monotonic()
+                    if now - last_ping >= 20.0:
+                        ws_broadcaster.ping()
+                        last_ping = now
                 except Exception:
                     pass
                 time.sleep(config.ws_broadcast_interval)
@@ -526,15 +549,13 @@ def serve_api(
         ws_broadcast_thread.start()
     collector_pusher: CollectorPusher | None = None
     if config.collector_url is not None:
-        from .opencode_hook_state import default_opencode_hook_log_path
-
         def collector_snapshot() -> dict:
             sessions, observed_at = provider.get()
             return build_collector_snapshot(sessions, identity, observed_at)
 
         hook_log_path = None
         try:
-            hook_log_path = default_opencode_hook_log_path()
+            hook_log_path = config.hook_log or default_hook_log_path()
         except Exception:
             pass  # Hook log path not available, will fall back to polling
 

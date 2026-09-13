@@ -1,1 +1,0 @@
-../../share/mingw-w64/include/t2embapi.h

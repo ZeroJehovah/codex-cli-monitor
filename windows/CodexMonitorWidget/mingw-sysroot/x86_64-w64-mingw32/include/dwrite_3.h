@@ -1,1 +1,0 @@
-../../share/mingw-w64/include/dwrite_3.h

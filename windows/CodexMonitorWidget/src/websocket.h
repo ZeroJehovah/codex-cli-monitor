@@ -4,19 +4,13 @@
 #include <windows.h>
 #include <winhttp.h>
 
-// Custom window messages for WebSocket events
+// Custom window messages for WebSocket events.
 #define WM_WEBSOCKET_CONNECTED (WM_APP + 3)
 #define WM_WEBSOCKET_MESSAGE (WM_APP + 4)
 #define WM_WEBSOCKET_CLOSED (WM_APP + 5)
 
-// Connect to WebSocket server asynchronously
-// Returns thread handle or NULL on failure
-HANDLE websocket_connect_async(HWND hwnd, const wchar_t *url);
-
-// Send ping frame
-void websocket_send_ping(HINTERNET hWebSocket);
-
-// Close WebSocket connection
-void websocket_close(HINTERNET hWebSocket);
+// Connect and authenticate on a worker thread. The thread handle is closed
+// internally; the return value only reports whether it could be started.
+int websocket_connect_async(HWND hwnd, const wchar_t *url, const wchar_t *token);
 
 #endif // WEBSOCKET_H

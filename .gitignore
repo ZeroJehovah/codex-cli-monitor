@@ -7,6 +7,7 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+/windows/CodexMonitorWidget/*.exe
 /start-server.sh
 /start-collector.sh
 /windows/CodexMonitorWidget/CodexMonitorWidget.ini
