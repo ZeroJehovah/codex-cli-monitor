@@ -240,6 +240,12 @@ static void settle_dragged_window(void);
 static void clear_indicator_bitmap_cache(void);
 static void release_widget_buffer(WidgetBuffer *buffer);
 
+/* The HTTP API URL is also the source of the WebSocket authority.  Keep this
+ * conversion independent of the configured API path: users may configure the
+ * bare origin ("http://host:8765"), an origin with a query string, or the
+ * usual "/api/sessions" path, and all of them must connect to "/ws". */
+static int build_websocket_url(const wchar_t *api_url, wchar_t *ws_url, int ws_url_count);
+
 static void utf8_to_wide(const char *source, wchar_t *target, int target_count) {
     if (target_count <= 0) {
         return;
@@ -258,6 +264,56 @@ static void copy_wide(wchar_t *target, int target_count, const wchar_t *source) 
     }
     wcsncpy(target, source, target_count - 1);
     target[target_count - 1] = L'\0';
+}
+
+static int build_websocket_url(const wchar_t *api_url, wchar_t *ws_url, int ws_url_count) {
+    const wchar_t *http_prefix;
+    const wchar_t *authority;
+    const wchar_t *authority_end;
+    const wchar_t *ws_prefix;
+    size_t authority_length;
+    int written;
+
+    if (ws_url_count <= 0) {
+        return 0;
+    }
+    ws_url[0] = L'\0';
+    if (api_url == NULL) {
+        return 0;
+    }
+    if (_wcsnicmp(api_url, L"https://", 8) == 0) {
+        http_prefix = L"https://";
+        ws_prefix = L"wss://";
+    } else if (_wcsnicmp(api_url, L"http://", 7) == 0) {
+        http_prefix = L"http://";
+        ws_prefix = L"ws://";
+    } else {
+        return 0;
+    }
+
+    authority = api_url + wcslen(http_prefix);
+    authority_end = wcspbrk(authority, L"/?#");
+    authority_length = authority_end == NULL
+        ? wcslen(authority)
+        : (size_t)(authority_end - authority);
+    if (authority_length == 0 || authority_length >= (size_t)ws_url_count) {
+        return 0;
+    }
+
+    written = _snwprintf(
+        ws_url,
+        (size_t)ws_url_count,
+        L"%s%.*ls/ws",
+        ws_prefix,
+        (int)authority_length,
+        authority
+    );
+    if (written < 0 || written >= ws_url_count) {
+        ws_url[ws_url_count - 1] = L'\0';
+        return 0;
+    }
+    ws_url[written] = L'\0';
+    return 1;
 }
 
 static void copy_ascii(char *target, int target_count, const char *source) {
@@ -3827,19 +3883,9 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         SetTimer(hwnd, REFRESH_TIMER_ID, REFRESH_INTERVAL_MS, NULL);
 
         // Try WebSocket first, fallback to polling
-        if (wcsstr(g_app.api_url, L"http://") == g_app.api_url || wcsstr(g_app.api_url, L"https://") == g_app.api_url) {
+        {
             wchar_t ws_url[1024];
-            const wchar_t *http_prefix = wcsstr(g_app.api_url, L"https://") ? L"https://" : L"http://";
-            const wchar_t *ws_prefix = wcsstr(g_app.api_url, L"https://") ? L"wss://" : L"ws://";
-            const wchar_t *after_protocol = g_app.api_url + wcslen(http_prefix);
-            const wchar_t *path_start = wcschr(after_protocol, L'/');
-
-            if (path_start != NULL) {
-                // WebSocket now uses same host:port as HTTP API with /ws path
-                size_t host_len = path_start - after_protocol;
-                wchar_t host_and_port[512] = {0};
-                wcsncpy(host_and_port, after_protocol, host_len < 511 ? host_len : 511);
-                _snwprintf(ws_url, 1024, L"%s%s/ws", ws_prefix, host_and_port);
+            if (build_websocket_url(g_app.api_url, ws_url, (int)(sizeof(ws_url) / sizeof(ws_url[0])))) {
                 g_app.websocket_enabled = 1;
                 g_app.websocket_connecting = 1;
                 if (!websocket_connect_async(hwnd, ws_url, g_app.api_token)) {
@@ -3862,17 +3908,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             if (!g_app.websocket_connected && !g_app.websocket_connecting && g_app.websocket_enabled) {
                 // Try reconnect
                 wchar_t ws_url[1024];
-                const wchar_t *http_prefix = wcsstr(g_app.api_url, L"https://") ? L"https://" : L"http://";
-                const wchar_t *ws_prefix = wcsstr(g_app.api_url, L"https://") ? L"wss://" : L"ws://";
-                const wchar_t *after_protocol = g_app.api_url + wcslen(http_prefix);
-                const wchar_t *path_start = wcschr(after_protocol, L'/');
-
-                if (path_start != NULL) {
-                    // WebSocket now uses same host:port as HTTP API with /ws path
-                    size_t host_len = path_start - after_protocol;
-                    wchar_t host_and_port[512] = {0};
-                    wcsncpy(host_and_port, after_protocol, host_len < 511 ? host_len : 511);
-                    _snwprintf(ws_url, 1024, L"%s%s/ws", ws_prefix, host_and_port);
+                if (build_websocket_url(g_app.api_url, ws_url, (int)(sizeof(ws_url) / sizeof(ws_url[0])))) {
                     g_app.websocket_connecting = 1;
                     if (!websocket_connect_async(hwnd, ws_url, g_app.api_token)) {
                         g_app.websocket_connecting = 0;
