@@ -197,6 +197,26 @@ def make_api_handler(
             self.end_headers()
 
         def do_GET(self) -> None:
+            # Handle WebSocket upgrade on /ws endpoint
+            if self.path == "/ws" and "Upgrade" in self.headers and self.headers["Upgrade"].lower() == "websocket":
+                # Deny WebSocket upgrade - use separate port
+                self.send_response(HTTPStatus.BAD_REQUEST)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                error_msg = {
+                    "error": "websocket_unavailable",
+                    "message": "WebSocket runs on separate port",
+                    "ws_port": config.ws_port if config.ws_enabled else None,
+                }
+                if config.ws_enabled:
+                    ws_proto = "wss" if "https://" in self.headers.get("Host", "") else "ws"
+                    ws_host = self.headers.get("Host", "").split(":")[0]
+                    error_msg["ws_url"] = f"{ws_proto}://{ws_host}:{config.ws_port}"
+                self.wfile.write(
+                    json.dumps(error_msg, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                )
+                return
+
             parsed = urlparse(self.path)
             if parsed.path in {"/api/sessions", "/api/status", "/api/servers"}:
                 if not self._authorize(config.api_token):

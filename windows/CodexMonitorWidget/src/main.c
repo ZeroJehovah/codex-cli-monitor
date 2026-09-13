@@ -3839,7 +3839,12 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
 
             if (path_start != NULL) {
                 size_t host_len = path_start - after_protocol;
-                _snwprintf(ws_url, 1024, L"%s%.*s/ws", ws_prefix, (int)host_len, after_protocol);
+                // Extract hostname without port
+                wchar_t hostname[256] = {0};
+                const wchar_t *port_colon = wmemchr(after_protocol, L':', host_len);
+                size_t pure_host_len = port_colon ? (port_colon - after_protocol) : host_len;
+                wcsncpy(hostname, after_protocol, pure_host_len < 255 ? pure_host_len : 255);
+                _snwprintf(ws_url, 1024, L"%s%s:8766", ws_prefix, hostname);
                 websocket_connect_async(hwnd, ws_url);
                 g_app.websocket_enabled = 1;
             }
@@ -3872,7 +3877,12 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
 
                 if (path_start != NULL) {
                     size_t host_len = path_start - after_protocol;
-                    _snwprintf(ws_url, 1024, L"%s%.*s/ws", ws_prefix, (int)host_len, after_protocol);
+                // Extract hostname without port
+                wchar_t hostname[256] = {0};
+                const wchar_t *port_colon = wmemchr(after_protocol, L':', host_len);
+                size_t pure_host_len = port_colon ? (port_colon - after_protocol) : host_len;
+                wcsncpy(hostname, after_protocol, pure_host_len < 255 ? pure_host_len : 255);
+                    _snwprintf(ws_url, 1024, L"%s%s:8766", ws_prefix, hostname);
                     websocket_connect_async(hwnd, ws_url);
                     g_app.websocket_connecting = 1;
                 }
