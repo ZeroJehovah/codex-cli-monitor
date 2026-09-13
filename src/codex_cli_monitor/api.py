@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import base64
+import hashlib
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlparse
@@ -178,6 +180,7 @@ def make_api_handler(
     identity: ServerIdentity | None = None,
     provider: LocalSessionProvider | None = None,
     remote_store: RemoteSnapshotStore | None = None,
+    ws_broadcaster: WebSocketBroadcaster | None = None,
     collector_status_provider: Callable[[], dict] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     identity = identity or resolve_server_identity(
@@ -216,6 +219,31 @@ def make_api_handler(
                     json.dumps(error_msg, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 )
                 return
+            # WebSocket upgrade on /ws
+            if self.path == "/ws":
+                if "Upgrade" not in self.headers or self.headers["Upgrade"].lower() != "websocket":
+                    self._send_json(
+                        {"error": "upgrade_required"},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                
+                if not config.ws_enabled or ws_broadcaster is None:
+                    self._send_json(
+                        {"error": "websocket_disabled"},
+                        status=HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                    return
+                
+                self._handle_websocket_upgrade(
+                    ws_broadcaster,
+                    provider,
+                    remote_store,
+                    identity,
+                    config.api_token,
+                )
+                return
+
 
             parsed = urlparse(self.path)
             if parsed.path in {"/api/sessions", "/api/status", "/api/servers"}:
@@ -382,6 +410,75 @@ def make_api_handler(
                 "Access-Control-Allow-Headers",
                 "Authorization, Content-Type",
             )
+        def _handle_websocket_upgrade(
+            self,
+            ws_broadcaster: WebSocketBroadcaster,
+            provider,
+            remote_store,
+            identity,
+            api_token: str | None,
+        ) -> None:
+            """Handle WebSocket upgrade from HTTP."""
+            sec_key = self.headers.get("Sec-WebSocket-Key")
+            if not sec_key:
+                self._send_json({"error": "missing_sec_websocket_key"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            
+            # Compute accept hash per RFC 6455
+            magic = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+            accept = base64.b64encode(hashlib.sha1(sec_key.encode() + magic).digest()).decode()
+            
+            # Send 101 Switching Protocols
+            self.send_response(101, "Switching Protocols")
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Sec-WebSocket-Accept", accept)
+            self.end_headers()
+            
+            # Take over socket
+            sock = self.request
+            self.connection = None
+            client = SyncWebSocketClient(sock)
+            
+            def handle():
+                try:
+                    # Auth if required
+                    if api_token:
+                        sock.settimeout(5.0)
+                        frame = client._read_frame(timeout=5.0)
+                        if frame is None:
+                            return
+                        try:
+                            auth = json.loads(frame.decode("utf-8"))
+                            if auth.get("token") != api_token:
+                                client.send_text(json.dumps({"error": "unauthorized"}))
+                                client.close()
+                                return
+                            client.send_text(json.dumps({"ok": True}))
+                        except Exception:
+                            client.send_text(json.dumps({"error": "invalid_auth"}))
+                            client.close()
+                            return
+                    
+                    # Send initial state
+                    sessions, _ = provider.get()
+                    remote_snapshots = remote_store.active(time.time()) if remote_store else ()
+                    from .aggregation import build_sessions_payload
+                    initial = build_sessions_payload(sessions, time.time(), identity, remote_snapshots)
+                    client.send_text(json.dumps(initial, ensure_ascii=False))
+                    
+                    # Register and start loops
+                    ws_broadcaster.register(client)
+                    send_thread = threading.Thread(target=client.run_send_loop, daemon=True)
+                    send_thread.start()
+                    client.run_recv_loop()
+                finally:
+                    ws_broadcaster.unregister(client)
+                    client.close()
+            
+            threading.Thread(target=handle, daemon=True, name=f"ws-{id(sock)}").start()
+
+
 
         def _send_json(
             self,
@@ -420,6 +517,30 @@ def serve_api(
     remote_store = (
         RemoteSnapshotStore(config.remote_ttl_seconds) if config.aggregate else None
     )
+    
+    # WebSocket broadcaster (runs on same port via /ws path)
+    ws_broadcaster: WebSocketBroadcaster | None = None
+    ws_broadcast_thread: threading.Thread | None = None
+    if config.ws_enabled:
+        ws_broadcaster = WebSocketBroadcaster()
+        
+        def broadcast_loop():
+            """Periodically broadcast state changes to all WS clients."""
+            while True:
+                try:
+                    sessions, _ = provider.get()
+                    remote_snapshots = remote_store.active(time.time()) if remote_store else ()
+                    ws_broadcaster.broadcast(sessions, identity, remote_snapshots)
+                except Exception:
+                    pass
+                time.sleep(config.ws_broadcast_interval)
+        
+        ws_broadcast_thread = threading.Thread(
+            target=broadcast_loop,
+            name="codex-monitor-ws-broadcast",
+            daemon=True,
+        )
+        ws_broadcast_thread.start()
     collector_pusher: CollectorPusher | None = None
     if config.collector_url is not None:
         from .opencode_hook_state import default_opencode_hook_log_path
@@ -449,6 +570,7 @@ def serve_api(
             identity,
             provider,
             remote_store,
+            ws_broadcaster,
             collector_pusher.status_snapshot
             if collector_pusher is not None
             else None,
