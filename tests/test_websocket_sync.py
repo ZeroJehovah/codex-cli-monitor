@@ -94,6 +94,21 @@ class WebSocketTests(unittest.TestCase):
             ["运行中", "成功", "失败", "待确认"],
         )
 
+    def test_register_queues_initial_snapshot_before_future_broadcasts(self) -> None:
+        class Client:
+            closed = False
+
+            def __init__(self) -> None:
+                self.messages: list[str] = []
+
+            def send_text(self, value: str) -> None:
+                self.messages.append(value)
+
+        client = Client()
+        broadcaster = WebSocketBroadcaster()
+        broadcaster.register(client, initial_message="initial")  # type: ignore[arg-type]
+        self.assertEqual(client.messages, ["initial"])
+
     def test_http_upgrade_uses_http11_and_authenticates(self) -> None:
         identity = ServerIdentity("local", "Local", None)
         broadcaster = WebSocketBroadcaster()

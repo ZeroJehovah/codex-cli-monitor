@@ -183,9 +183,20 @@ class WebSocketBroadcaster:
         self.last_state_hash: int | None = None
         self._lock = threading.Lock()
     
-    def register(self, client: SyncWebSocketClient) -> None:
+    def register(
+        self,
+        client: SyncWebSocketClient,
+        initial_message: str | None = None,
+    ) -> None:
         with self._lock:
             self.clients.add(client)
+            # Queue the initial snapshot while holding the same lock used by
+            # broadcast().  This prevents a state change from being broadcast
+            # between the initial snapshot and client registration, which
+            # could otherwise leave a newly connected client permanently
+            # behind until a later state change.
+            if initial_message is not None:
+                client.send_text(initial_message)
             logger.info(f"WebSocket client registered, total: {len(self.clients)}")
     
     def unregister(self, client: SyncWebSocketClient) -> None:

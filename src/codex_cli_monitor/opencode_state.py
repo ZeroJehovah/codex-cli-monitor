@@ -227,16 +227,50 @@ def _db_signature(db: Path, db_stat: os.stat_result) -> tuple[object, ...]:
     and size may not change until a checkpoint runs.  A signature that only
     inspects the main file would therefore serve stale cached state long
     after a session transitioned from ``运行中`` to ``成功`` or ``失败``.
-    Including the WAL file (size + mtime) ensures the cache invalidates on
-    every write.
+    Including the WAL file (size + mtime + ctime) ensures the cache
+    invalidates on every write.  Device, inode, and ctime also distinguish a
+    newly created database that reuses the same path and inode after a prior
+    temporary database was removed.
     """
-    signature: tuple[object, ...] = (db_stat.st_size, db_stat.st_mtime_ns, db_stat.st_ino)
+    signature: tuple[object, ...] = (
+        db_stat.st_dev,
+        db_stat.st_ino,
+        db_stat.st_size,
+        db_stat.st_mtime_ns,
+        db_stat.st_ctime_ns,
+        _sqlite_change_counter(db),
+    )
     wal = db.with_name(db.name + "-wal")
     try:
         wal_stat = wal.stat()
     except OSError:
         return signature
-    return signature + (wal_stat.st_size, wal_stat.st_mtime_ns)
+    return signature + (
+        wal_stat.st_dev,
+        wal_stat.st_ino,
+        wal_stat.st_size,
+        wal_stat.st_mtime_ns,
+        wal_stat.st_ctime_ns,
+    )
+
+
+def _sqlite_change_counter(db: Path) -> int | None:
+    """Read SQLite's transaction change counter from the fixed-size header.
+
+    A normal rollback-journal commit can update a row in place without
+    changing the database size or filesystem timestamps at the resolution
+    exposed by the host.  SQLite still increments the big-endian change
+    counter at header offset 24 for every committed transaction, giving the
+    read-only state cache a cheap and reliable invalidation signal.
+    """
+    try:
+        with db.open("rb") as handle:
+            header = handle.read(28)
+    except OSError:
+        return None
+    if len(header) < 28 or header[:16] != b"SQLite format 3\x00":
+        return None
+    return int.from_bytes(header[24:28], "big")
 
 
 def _read_session_states(

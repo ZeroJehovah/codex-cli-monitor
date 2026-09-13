@@ -484,10 +484,13 @@ def make_api_handler(
                 remote_snapshots = remote_store.active(time.time()) if remote_store else ()
                 from .aggregation import build_sessions_payload
                 initial = build_sessions_payload(sessions, identity, remote_snapshots, time.time())
-                client.send_text(json.dumps(initial, ensure_ascii=False))
-                
-                # Register and run recv loop
-                ws_broadcaster.register(client)
+                # Register and queue the initial snapshot atomically with
+                # respect to the broadcaster so no state update can slip
+                # between those two operations.
+                ws_broadcaster.register(
+                    client,
+                    initial_message=json.dumps(initial, ensure_ascii=False),
+                )
                 client.run_recv_loop()
             finally:
                 ws_broadcaster.unregister(client)
