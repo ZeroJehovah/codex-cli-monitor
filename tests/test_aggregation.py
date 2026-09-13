@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stderr
 from http.client import HTTPConnection
@@ -12,6 +13,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import ProxyHandler
 
+import codex_cli_monitor.collector as collector_module
 from codex_cli_monitor.aggregation import (
     RemoteSnapshotStore,
     ServerIdentity,
@@ -413,6 +415,54 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual(status["success_count"], 1)
         self.assertEqual(status["failure_count"], 1)
         self.assertEqual(status["consecutive_failures"], 0)
+
+    def test_event_driven_collector_does_not_spin_when_push_fails(self) -> None:
+        stop_event = threading.Event()
+        calls: list[float] = []
+
+        class _AlwaysFailOpener:
+            def open(self, *args: object, **kwargs: object) -> _FakeResponse:
+                calls.append(time.monotonic())
+                raise URLError("offline")
+
+        class _FakeWatcher:
+            def __init__(self, directory: Path, target_name: str) -> None:
+                self.deadline = time.monotonic() + 0.15
+
+            def wait(self, timeout: float) -> bool:
+                time.sleep(0.005)
+                if time.monotonic() >= self.deadline:
+                    stop_event.set()
+                return False
+
+            def close(self) -> None:
+                return None
+
+        original_watcher = collector_module._InotifyWatcher
+        collector_module._InotifyWatcher = _FakeWatcher  # type: ignore[assignment]
+        try:
+            pusher = CollectorPusher(
+                "https://codex-monitor.aiof.top",
+                "write-secret",
+                lambda: {"schema_version": 1},
+                interval_seconds=0.04,
+                opener=_AlwaysFailOpener(),
+                hook_log_path=Path(tempfile.gettempdir()) / "codex-monitor-hooks.jsonl",
+                event_driven=True,
+            )
+            with redirect_stderr(io.StringIO()):
+                pusher.run(stop_event)
+        finally:
+            collector_module._InotifyWatcher = original_watcher  # type: ignore[assignment]
+
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertLessEqual(len(calls), 5)
+        self.assertTrue(
+            all(
+                later - earlier >= 0.025
+                for earlier, later in zip(calls, calls[1:])
+            )
+        )
 
 
 def _session(

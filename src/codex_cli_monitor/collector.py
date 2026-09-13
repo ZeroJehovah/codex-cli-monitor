@@ -284,9 +284,13 @@ class CollectorPusher:
         # duplicate request below.
         try:
             self.post_once()
-            last_push_time = time.time()
         except Exception as error:
             _log("ERROR", f"collector initial push failed error={error}")
+        finally:
+            # A failed initial attempt still starts the retry interval.  Do
+            # not let the fallback path spin at the watcher poll cadence when
+            # the aggregator is unavailable.
+            last_push_time = time.time()
 
         try:
             while not stop_event.is_set():
@@ -332,6 +336,11 @@ class CollectorPusher:
                             ready_logged = True
                             last_failure_log_at = None
                             last_logged_error = None
+                        finally:
+                            # Count failed event-triggered attempts toward the
+                            # retry interval too; otherwise the periodic
+                            # fallback below retries every 100ms on failure.
+                            last_push_time = time.time()
 
                 # The hook log is not the only source of state (for example,
                 # OpenCode's database and Claude registrations), so retain a
@@ -340,9 +349,12 @@ class CollectorPusher:
                 if now - last_push_time >= self.interval_seconds:
                     try:
                         self.post_once()
-                        last_push_time = now
                     except Exception:
                         pass  # Errors are logged by the event-driven path.
+                    finally:
+                        # Keep the configured retry cadence even when the
+                        # aggregator is down.
+                        last_push_time = time.time()
         except (OSError, ValueError) as error:
             # A removed/invalid inotify fd should not terminate delivery;
             # continue with the original polling implementation instead.
