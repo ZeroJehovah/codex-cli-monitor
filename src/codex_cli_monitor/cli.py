@@ -16,7 +16,7 @@ from .api import (
     DEFAULT_COLLECTOR_INTERVAL_SECONDS,
     DEFAULT_LOCAL_CACHE_SECONDS,
     DEFAULT_REMOTE_TTL_SECONDS,
-    DEFAULT_WS_PORT,
+    
     DEFAULT_WS_BROADCAST_INTERVAL,
     ApiConfig,
     build_hook_health,
@@ -236,13 +236,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="enable WebSocket server for real-time state updates",
     )
     parser.add_argument(
-        "--ws-port",
-        type=int,
-        default=DEFAULT_WS_PORT,
-        metavar="PORT",
-        help=f"WebSocket server port; defaults to {DEFAULT_WS_PORT}",
-    )
-    parser.add_argument(
         "--ws-broadcast-interval",
         type=_non_negative_float,
         default=DEFAULT_WS_BROADCAST_INTERVAL,
@@ -325,7 +318,7 @@ def _serve(args: argparse.Namespace) -> int:
                 collector_token=args.collector_token,
                 collector_interval_seconds=args.collector_interval,
                 ws_enabled=args.ws_enabled,
-                ws_port=args.ws_port,
+                
                 ws_broadcast_interval=args.ws_broadcast_interval,
             ),
         )
@@ -386,8 +379,6 @@ def _start_daemon(args: argparse.Namespace) -> int:
         command.extend(["--hook-log", str(args.hook_log)])
     if args.ws_enabled:
         command.append("--ws-enabled")
-    if args.ws_port != DEFAULT_WS_PORT:
-        command.extend(["--ws-port", str(args.ws_port)])
     if args.ws_broadcast_interval != DEFAULT_WS_BROADCAST_INTERVAL:
         command.extend(["--ws-broadcast-interval", str(args.ws_broadcast_interval)])
 

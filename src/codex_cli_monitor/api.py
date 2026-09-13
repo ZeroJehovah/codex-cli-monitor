@@ -32,12 +32,11 @@ from .claude_state import claude_state_health
 from .opencode_decisions import opencode_decision_log_health
 from .opencode_hook_state import opencode_hook_log_health
 from .opencode_state import opencode_db_path
-from .websocket_server import run_websocket_server
+from .websocket_sync import SyncWebSocketClient, WebSocketBroadcaster
 
 
 DEFAULT_API_HOST = "127.0.0.1"
 DEFAULT_API_PORT = 8765
-DEFAULT_WS_PORT = 8766
 DEFAULT_WS_BROADCAST_INTERVAL = 0.1
 DEFAULT_REMOTE_TTL_SECONDS = 30.0
 DEFAULT_LOCAL_CACHE_SECONDS = 0.05  # Reduced from 0.25 for lower WebSocket latency
@@ -65,7 +64,6 @@ class ApiConfig:
     collector_token: str | None = None
     collector_interval_seconds: float = DEFAULT_COLLECTOR_INTERVAL_SECONDS
     ws_enabled: bool = False
-    ws_port: int = DEFAULT_WS_PORT
     ws_broadcast_interval: float = DEFAULT_WS_BROADCAST_INTERVAL
 
 
@@ -200,25 +198,6 @@ def make_api_handler(
             self.end_headers()
 
         def do_GET(self) -> None:
-            # Handle WebSocket upgrade on /ws endpoint
-            if self.path == "/ws" and "Upgrade" in self.headers and self.headers["Upgrade"].lower() == "websocket":
-                # Deny WebSocket upgrade - use separate port
-                self.send_response(HTTPStatus.BAD_REQUEST)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                error_msg = {
-                    "error": "websocket_unavailable",
-                    "message": "WebSocket runs on separate port",
-                    "ws_port": config.ws_port if config.ws_enabled else None,
-                }
-                if config.ws_enabled:
-                    ws_proto = "wss" if "https://" in self.headers.get("Host", "") else "ws"
-                    ws_host = self.headers.get("Host", "").split(":")[0]
-                    error_msg["ws_url"] = f"{ws_proto}://{ws_host}:{config.ws_port}"
-                self.wfile.write(
-                    json.dumps(error_msg, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                )
-                return
             # WebSocket upgrade on /ws
             if self.path == "/ws":
                 if "Upgrade" not in self.headers or self.headers["Upgrade"].lower() != "websocket":
@@ -587,32 +566,6 @@ def serve_api(
         )
         collector_thread.start()
 
-    # Start WebSocket server if enabled
-    ws_thread: threading.Thread | None = None
-    if config.ws_enabled:
-        def ws_state_provider() -> tuple[tuple[CodexSession, ...], ServerIdentity, tuple[RemoteSnapshot, ...]]:
-            sessions, _ = provider.get()
-            remote_snapshots = (
-                remote_store.active(time.time()) if remote_store is not None else ()
-            )
-            return sessions, identity, remote_snapshots
-
-        def run_ws_server():
-            import asyncio
-            asyncio.run(run_websocket_server(
-                host=host,
-                port=config.ws_port,
-                state_provider=ws_state_provider,
-                api_token=config.api_token,
-                broadcast_interval=config.ws_broadcast_interval,
-            ))
-
-        ws_thread = threading.Thread(
-            target=run_ws_server,
-            name="codex-monitor-websocket",
-            daemon=True,
-        )
-        ws_thread.start()
 
     try:
         server.serve_forever()
