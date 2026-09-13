@@ -23,7 +23,10 @@
 #define SINGLE_INSTANCE_MUTEX_NAME L"Local\\ZeroJehovah.CodexMonitorWidget.SingleInstance"
 #define REFRESH_TIMER_ID 1
 #define ANIMATION_TIMER_ID 2
+#define WEBSOCKET_TIMER_ID 3
 #define REFRESH_INTERVAL_MS 500
+#define WEBSOCKET_RECONNECT_INTERVAL_MS 5000
+#define WEBSOCKET_HEARTBEAT_INTERVAL_MS 30000
 #define EMPTY_RESULT_CONFIRMATIONS 6
 #define ANIMATION_INTERVAL_MS 16
 #define ANIMATION_FRAME_INTERVAL_MS 8
@@ -34,6 +37,9 @@
 #define EDGE_TUCK_ATTACH_TOLERANCE 1
 #define WM_FETCH_DONE (WM_APP + 1)
 #define WM_ANIMATION_FRAME (WM_APP + 2)
+#define WM_WEBSOCKET_CONNECTED (WM_APP + 3)
+#define WM_WEBSOCKET_MESSAGE (WM_APP + 4)
+#define WM_WEBSOCKET_CLOSED (WM_APP + 5)
 #define MENU_EXIT_ID 1001
 #define MENU_ABOUT_ID 1002
 #define MENU_EDGE_TUCK_ID 1003
@@ -186,6 +192,11 @@ typedef struct AppState {
     WidgetBuffer static_buffer;
     WidgetBuffer frame_buffer;
     int static_buffer_dirty;
+    HINTERNET websocket_handle;
+    int websocket_enabled;
+    int websocket_connected;
+    int websocket_connecting;
+    ULONGLONG websocket_last_heartbeat;
 } AppState;
 
 static const char STATUS_RUNNING[] = "\xe8\xbf\x90\xe8\xa1\x8c\xe4\xb8\xad";
@@ -1967,6 +1978,15 @@ static void parse_session_object(const char *start, const char *end, Session *se
     if (session->cli_type[0] == '\0') {
         copy_ascii(session->cli_type, sizeof(session->cli_type), "codex");
     }
+}
+
+static FetchResult *parse_json_response(const char *json) {
+    FetchResult *result = (FetchResult *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(FetchResult));
+    if (result == NULL) {
+        return NULL;
+    }
+    parse_sessions_json(json, result);
+    return result;
 }
 
 static void parse_sessions_json(const char *json, FetchResult *result) {
@@ -3808,6 +3828,23 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         update_directory_column_width();
         refresh_widget_view();
         SetTimer(hwnd, REFRESH_TIMER_ID, REFRESH_INTERVAL_MS, NULL);
+
+        // Try WebSocket first, fallback to polling
+        if (wcsstr(g_app.api_url, L"http://") == g_app.api_url || wcsstr(g_app.api_url, L"https://") == g_app.api_url) {
+            wchar_t ws_url[1024];
+            const wchar_t *http_prefix = wcsstr(g_app.api_url, L"https://") ? L"https://" : L"http://";
+            const wchar_t *ws_prefix = wcsstr(g_app.api_url, L"https://") ? L"wss://" : L"ws://";
+            const wchar_t *after_protocol = g_app.api_url + wcslen(http_prefix);
+            const wchar_t *path_start = wcschr(after_protocol, L'/');
+
+            if (path_start != NULL) {
+                size_t host_len = path_start - after_protocol;
+                _snwprintf(ws_url, 1024, L"%s%.*s/ws", ws_prefix, (int)host_len, after_protocol);
+                websocket_connect_async(hwnd, ws_url);
+                g_app.websocket_enabled = 1;
+            }
+        }
+
         start_fetch();
         return 0;
     case WM_TIMER:
@@ -3816,6 +3853,29 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
                 g_app.drag_refresh_pending = 1;
             } else {
                 start_fetch();
+            }
+        } else if (wparam == WEBSOCKET_TIMER_ID) {
+            ULONGLONG now = GetTickCount64();
+            if (g_app.websocket_connected) {
+                // Send heartbeat ping
+                if (now - g_app.websocket_last_heartbeat > WEBSOCKET_HEARTBEAT_INTERVAL_MS) {
+                    websocket_send_ping(g_app.websocket_handle);
+                    g_app.websocket_last_heartbeat = now;
+                }
+            } else if (!g_app.websocket_connecting && g_app.websocket_enabled) {
+                // Try reconnect
+                wchar_t ws_url[1024];
+                const wchar_t *http_prefix = wcsstr(g_app.api_url, L"https://") ? L"https://" : L"http://";
+                const wchar_t *ws_prefix = wcsstr(g_app.api_url, L"https://") ? L"wss://" : L"ws://";
+                const wchar_t *after_protocol = g_app.api_url + wcslen(http_prefix);
+                const wchar_t *path_start = wcschr(after_protocol, L'/');
+
+                if (path_start != NULL) {
+                    size_t host_len = path_start - after_protocol;
+                    _snwprintf(ws_url, 1024, L"%s%.*s/ws", ws_prefix, (int)host_len, after_protocol);
+                    websocket_connect_async(hwnd, ws_url);
+                    g_app.websocket_connecting = 1;
+                }
             }
         } else if (wparam == ANIMATION_TIMER_ID) {
             if (g_app.dragging) {
@@ -3873,6 +3933,54 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             g_app.drag_refresh_pending = 1;
         } else {
             refresh_widget_view();
+        }
+        return 0;
+    }
+    case WM_WEBSOCKET_CONNECTED: {
+        g_app.websocket_connected = 1;
+        g_app.websocket_connecting = 0;
+        g_app.websocket_last_heartbeat = GetTickCount64();
+        SetTimer(hwnd, WEBSOCKET_TIMER_ID, 5000, NULL);
+        return 0;
+    }
+    case WM_WEBSOCKET_MESSAGE: {
+        char *json_data = (char *)lparam;
+        if (json_data != NULL) {
+            FetchResult *result = parse_json_response(json_data);
+            if (result != NULL && result->ok) {
+                if (result->count > 0 || g_app.session_count == 0) {
+                    g_app.session_count = result->count;
+                    memcpy(g_app.sessions, result->sessions, sizeof(Session) * result->count);
+                    rebuild_directory_rows();
+                    g_app.empty_success_count = 0;
+                } else {
+                    g_app.empty_success_count++;
+                    if (g_app.empty_success_count >= EMPTY_RESULT_CONFIRMATIONS) {
+                        g_app.session_count = 0;
+                        rebuild_directory_rows();
+                        g_app.empty_success_count = 0;
+                    }
+                }
+                g_app.last_error[0] = '\0';
+                if (g_app.row_count <= 0) {
+                    update_directory_column_width();
+                }
+                if (g_app.dragging) {
+                    g_app.drag_refresh_pending = 1;
+                } else {
+                    refresh_widget_view();
+                }
+                HeapFree(GetProcessHeap(), 0, result);
+            }
+            HeapFree(GetProcessHeap(), 0, json_data);
+        }
+        return 0;
+    }
+    case WM_WEBSOCKET_CLOSED: {
+        g_app.websocket_connected = 0;
+        if (g_app.websocket_handle != NULL) {
+            WinHttpCloseHandle(g_app.websocket_handle);
+            g_app.websocket_handle = NULL;
         }
         return 0;
     }
@@ -3985,9 +4093,13 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         set_edge_tuck_target(0);
         apply_display_font_wheel_delta(GET_WHEEL_DELTA_WPARAM(wparam));
         return 0;
+        g_app.websocket_connected = 0;
+        g_app.websocket_handle = NULL;
+        return 0;
     case WM_DESTROY:
         save_widget_placement();
         KillTimer(hwnd, REFRESH_TIMER_ID);
+        KillTimer(hwnd, WEBSOCKET_TIMER_ID);        if (g_app.websocket_handle != NULL) {            WinHttpCloseHandle(g_app.websocket_handle);            g_app.websocket_handle = NULL;        }
         KillTimer(hwnd, ANIMATION_TIMER_ID);
         stop_animation_frame_timer(1);
         clear_indicator_bitmap_cache();

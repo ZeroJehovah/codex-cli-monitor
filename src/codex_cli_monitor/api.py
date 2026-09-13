@@ -30,12 +30,15 @@ from .claude_state import claude_state_health
 from .opencode_decisions import opencode_decision_log_health
 from .opencode_hook_state import opencode_hook_log_health
 from .opencode_state import opencode_db_path
+from .websocket_server import run_websocket_server
 
 
 DEFAULT_API_HOST = "127.0.0.1"
 DEFAULT_API_PORT = 8765
+DEFAULT_WS_PORT = 8766
+DEFAULT_WS_BROADCAST_INTERVAL = 0.1
 DEFAULT_REMOTE_TTL_SECONDS = 30.0
-DEFAULT_LOCAL_CACHE_SECONDS = 0.25
+DEFAULT_LOCAL_CACHE_SECONDS = 0.05  # Reduced from 0.25 for lower WebSocket latency
 DEFAULT_COLLECTOR_INTERVAL_SECONDS = 0.5
 MAX_SNAPSHOT_BODY_BYTES = 1024 * 1024
 
@@ -59,6 +62,9 @@ class ApiConfig:
     collector_url: str | None = None
     collector_token: str | None = None
     collector_interval_seconds: float = DEFAULT_COLLECTOR_INTERVAL_SECONDS
+    ws_enabled: bool = False
+    ws_port: int = DEFAULT_WS_PORT
+    ws_broadcast_interval: float = DEFAULT_WS_BROADCAST_INTERVAL
 
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -396,15 +402,25 @@ def serve_api(
     )
     collector_pusher: CollectorPusher | None = None
     if config.collector_url is not None:
+        from .opencode_hook_state import default_opencode_hook_log_path
+
         def collector_snapshot() -> dict:
             sessions, observed_at = provider.get()
             return build_collector_snapshot(sessions, identity, observed_at)
+
+        hook_log_path = None
+        try:
+            hook_log_path = default_opencode_hook_log_path()
+        except Exception:
+            pass  # Hook log path not available, will fall back to polling
 
         collector_pusher = CollectorPusher(
             config.collector_url,
             config.collector_token or "",
             collector_snapshot,
             interval_seconds=config.collector_interval_seconds,
+            hook_log_path=hook_log_path,
+            event_driven=True,
         )
     server = ReusableThreadingHTTPServer(
         (host, port),
@@ -428,6 +444,34 @@ def serve_api(
             daemon=True,
         )
         collector_thread.start()
+
+    # Start WebSocket server if enabled
+    ws_thread: threading.Thread | None = None
+    if config.ws_enabled:
+        def ws_state_provider() -> tuple[tuple[CodexSession, ...], ServerIdentity, tuple[RemoteSnapshot, ...]]:
+            sessions, _ = provider.get()
+            remote_snapshots = (
+                remote_store.active(time.time()) if remote_store is not None else ()
+            )
+            return sessions, identity, remote_snapshots
+
+        def run_ws_server():
+            import asyncio
+            asyncio.run(run_websocket_server(
+                host=host,
+                port=config.ws_port,
+                state_provider=ws_state_provider,
+                api_token=config.api_token,
+                broadcast_interval=config.ws_broadcast_interval,
+            ))
+
+        ws_thread = threading.Thread(
+            target=run_ws_server,
+            name="codex-monitor-websocket",
+            daemon=True,
+        )
+        ws_thread.start()
+
     try:
         server.serve_forever()
     finally:
