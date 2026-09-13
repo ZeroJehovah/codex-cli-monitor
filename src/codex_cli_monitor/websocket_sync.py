@@ -180,6 +180,7 @@ class WebSocketBroadcaster:
     
     def __init__(self) -> None:
         self.clients: set[SyncWebSocketClient] = set()
+        self._pending_sync: set[SyncWebSocketClient] = set()
         self.last_state_hash: int | None = None
         self._lock = threading.Lock()
     
@@ -197,11 +198,13 @@ class WebSocketBroadcaster:
             # behind until a later state change.
             if initial_message is not None:
                 client.send_text(initial_message)
+                self._pending_sync.add(client)
             logger.info(f"WebSocket client registered, total: {len(self.clients)}")
     
     def unregister(self, client: SyncWebSocketClient) -> None:
         with self._lock:
             self.clients.discard(client)
+            self._pending_sync.discard(client)
             logger.info(f"WebSocket client unregistered, total: {len(self.clients)}")
     
     def broadcast(
@@ -212,10 +215,19 @@ class WebSocketBroadcaster:
     ) -> None:
         """Broadcast state to all clients if changed."""
         state_hash = self._compute_state_hash(sessions, remote_snapshots)
-        if state_hash == self.last_state_hash:
+        with self._lock:
+            state_changed = state_hash != self.last_state_hash
+            self.last_state_hash = state_hash
+            pending = set(self._pending_sync)
+            self._pending_sync.clear()
+            clients = set(self.clients)
+
+        # A state update can race with the handler's initial snapshot before
+        # it registers the client.  Even when the global state hash has not
+        # changed since then, send the current state once to every newly
+        # registered client so it cannot remain on that stale initial frame.
+        if not state_changed and not pending:
             return
-        
-        self.last_state_hash = state_hash
         
         from .aggregation import build_sessions_payload
         payload = build_sessions_payload(
@@ -226,13 +238,10 @@ class WebSocketBroadcaster:
         )
         message = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
         
-        with self._lock:
-            clients = set(self.clients)
-        
         dead = []
         for client in clients:
             try:
-                if not client.closed:
+                if (state_changed or client in pending) and not client.closed:
                     client.send_text(message)
             except Exception:
                 dead.append(client)

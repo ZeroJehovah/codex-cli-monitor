@@ -109,6 +109,44 @@ class WebSocketTests(unittest.TestCase):
         broadcaster.register(client, initial_message="initial")  # type: ignore[arg-type]
         self.assertEqual(client.messages, ["initial"])
 
+    def test_register_resynchronizes_after_state_was_broadcast_before_registration(self) -> None:
+        class Client:
+            closed = False
+
+            def __init__(self) -> None:
+                self.messages: list[str] = []
+
+            def send_text(self, value: str) -> None:
+                self.messages.append(value)
+
+        local = ServerIdentity("local", "Local", None)
+        remote = ServerIdentity("remote", "Remote", None)
+        session = {
+            "session_key": "remote:1:1",
+            "pid": 1,
+            "started_at": 1.0,
+            "directory": "/work",
+            "cli_type": "codex",
+            "waiting_reason": None,
+            "status": "成功",
+        }
+        current = RemoteSnapshot(
+            remote,
+            observed_at=1.0,
+            received_at=1.0,
+            sessions=(session,),
+        )
+        broadcaster = WebSocketBroadcaster()
+        # This is the state that won the race before the handler registered.
+        broadcaster.broadcast((), local, (current,))
+
+        client = Client()
+        broadcaster.register(client, initial_message="stale")  # type: ignore[arg-type]
+        broadcaster.broadcast((), local, (current,))
+
+        self.assertEqual(client.messages[0], "stale")
+        self.assertEqual(json.loads(client.messages[1])["sessions"][0]["status"], "成功")
+
     def test_http_upgrade_uses_http11_and_authenticates(self) -> None:
         identity = ServerIdentity("local", "Local", None)
         broadcaster = WebSocketBroadcaster()
