@@ -443,7 +443,7 @@ def make_api_handler(
                     sessions, _ = provider.get()
                     remote_snapshots = remote_store.active(time.time()) if remote_store else ()
                     from .aggregation import build_sessions_payload
-                    initial = build_sessions_payload(sessions, time.time(), identity, remote_snapshots)
+                    initial = build_sessions_payload(sessions, identity, remote_snapshots, time.time())
                     client.send_text(json.dumps(initial, ensure_ascii=False))
                     
                     # Register and start loops

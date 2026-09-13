@@ -192,9 +192,9 @@ class WebSocketBroadcaster:
         from .aggregation import build_sessions_payload
         payload = build_sessions_payload(
             sessions,
-            observed_at=time.time(),
-            identity=identity,
-            remote_snapshots=remote_snapshots,
+            identity,
+            remote_snapshots,
+            time.time(),
         )
         message = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
         
