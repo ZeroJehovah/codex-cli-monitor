@@ -3838,13 +3838,11 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             const wchar_t *path_start = wcschr(after_protocol, L'/');
 
             if (path_start != NULL) {
+                // WebSocket now uses same host:port as HTTP API with /ws path
                 size_t host_len = path_start - after_protocol;
-                // Extract hostname without port
-                wchar_t hostname[256] = {0};
-                const wchar_t *port_colon = wmemchr(after_protocol, L':', host_len);
-                size_t pure_host_len = port_colon ? (port_colon - after_protocol) : host_len;
-                wcsncpy(hostname, after_protocol, pure_host_len < 255 ? pure_host_len : 255);
-                _snwprintf(ws_url, 1024, L"%s%s:8766", ws_prefix, hostname);
+                wchar_t host_and_port[512] = {0};
+                wcsncpy(host_and_port, after_protocol, host_len < 511 ? host_len : 511);
+                _snwprintf(ws_url, 1024, L"%s%s/ws", ws_prefix, host_and_port);
                 websocket_connect_async(hwnd, ws_url);
                 g_app.websocket_enabled = 1;
             }
@@ -3876,13 +3874,11 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
                 const wchar_t *path_start = wcschr(after_protocol, L'/');
 
                 if (path_start != NULL) {
+                    // WebSocket now uses same host:port as HTTP API with /ws path
                     size_t host_len = path_start - after_protocol;
-                // Extract hostname without port
-                wchar_t hostname[256] = {0};
-                const wchar_t *port_colon = wmemchr(after_protocol, L':', host_len);
-                size_t pure_host_len = port_colon ? (port_colon - after_protocol) : host_len;
-                wcsncpy(hostname, after_protocol, pure_host_len < 255 ? pure_host_len : 255);
-                    _snwprintf(ws_url, 1024, L"%s%s:8766", ws_prefix, hostname);
+                    wchar_t host_and_port[512] = {0};
+                    wcsncpy(host_and_port, after_protocol, host_len < 511 ? host_len : 511);
+                    _snwprintf(ws_url, 1024, L"%s%s/ws", ws_prefix, host_and_port);
                     websocket_connect_async(hwnd, ws_url);
                     g_app.websocket_connecting = 1;
                 }
