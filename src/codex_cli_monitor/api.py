@@ -414,52 +414,52 @@ def make_api_handler(
             self.send_header("Sec-WebSocket-Accept", accept)
             self.end_headers()
             
-            # Take over socket
+            # Detach socket from HTTP handler
             sock = self.request
-            self.connection = None
+            self.connection = None  # Prevent handler from closing it
+            self.rfile = None  # Detach read buffer
+            self.wfile = None  # Detach write buffer
+            
             client = SyncWebSocketClient(sock)
             
-            def handle():
-                try:
-                    # Start send loop immediately
-                    send_thread = threading.Thread(target=client.run_send_loop, daemon=True)
-                    send_thread.start()
-                    
-                    # Auth if required
-                    if api_token:
-                        sock.settimeout(5.0)
-                        frame = client._read_frame(timeout=5.0)
-                        if frame is None:
-                            return
-                        try:
-                            auth = json.loads(frame.decode("utf-8"))
-                            if auth.get("token") != api_token:
-                                client.send_text(json.dumps({"error": "unauthorized"}))
-                                time.sleep(0.1)  # Let send thread flush
-                                client.close()
-                                return
-                            client.send_text(json.dumps({"ok": True}))
-                        except Exception:
-                            client.send_text(json.dumps({"error": "invalid_auth"}))
-                            time.sleep(0.1)  # Let send thread flush
+            try:
+                # Start send loop
+                send_thread = threading.Thread(target=client.run_send_loop, daemon=True)
+                send_thread.start()
+                
+                # Auth if required
+                if api_token:
+                    sock.settimeout(5.0)
+                    frame = client._read_frame(timeout=5.0)
+                    if frame is None:
+                        return
+                    try:
+                        auth = json.loads(frame.decode("utf-8"))
+                        if auth.get("token") != api_token:
+                            client.send_text(json.dumps({"error": "unauthorized"}))
+                            time.sleep(0.1)
                             client.close()
                             return
-                    
-                    # Send initial state
-                    sessions, _ = provider.get()
-                    remote_snapshots = remote_store.active(time.time()) if remote_store else ()
-                    from .aggregation import build_sessions_payload
-                    initial = build_sessions_payload(sessions, identity, remote_snapshots, time.time())
-                    client.send_text(json.dumps(initial, ensure_ascii=False))
-                    
-                    # Register and run recv loop
-                    ws_broadcaster.register(client)
-                    client.run_recv_loop()
-                finally:
-                    ws_broadcaster.unregister(client)
-                    client.close()
-            
-            threading.Thread(target=handle, daemon=True, name=f"ws-{id(sock)}").start()
+                        client.send_text(json.dumps({"ok": True}))
+                    except Exception:
+                        client.send_text(json.dumps({"error": "invalid_auth"}))
+                        time.sleep(0.1)
+                        client.close()
+                        return
+                
+                # Send initial state
+                sessions, _ = provider.get()
+                remote_snapshots = remote_store.active(time.time()) if remote_store else ()
+                from .aggregation import build_sessions_payload
+                initial = build_sessions_payload(sessions, identity, remote_snapshots, time.time())
+                client.send_text(json.dumps(initial, ensure_ascii=False))
+                
+                # Register and run recv loop
+                ws_broadcaster.register(client)
+                client.run_recv_loop()
+            finally:
+                ws_broadcaster.unregister(client)
+                client.close()
 
 
 
