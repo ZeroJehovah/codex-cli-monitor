@@ -135,7 +135,7 @@ def build_hook_health(
     hook_log: Path | None = None,
 ) -> dict[str, object]:
     home = (codex_home or Path.home() / ".codex").expanduser()
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = _resolve_monitor_repo_root()
     installation = check_hooks(
         home / "hooks.json",
         repo_root,
@@ -171,6 +171,24 @@ def build_hook_health(
         "installation": installation.to_dict(),
         "runtime": runtime,
     }
+
+
+def _resolve_monitor_repo_root() -> Path:
+    """Find the checkout root for both ``src/`` and flat deployments.
+
+    The normal editable checkout imports ``src/codex_cli_monitor``.  Some
+    lightweight deployments also place a copied package directly beneath the
+    checkout root, so ``Path(__file__).parents[2]`` would point one directory
+    too high there and make an otherwise valid Hook installation look stale.
+    Prefer a candidate that contains the monitor's Hook module and retain the
+    old parent as a conservative fallback for installed packages.
+    """
+    module_path = Path(__file__).resolve()
+    candidates = (module_path.parents[2], module_path.parents[1])
+    for candidate in candidates:
+        if (candidate / "src" / "codex_cli_monitor" / "hooks.py").is_file():
+            return candidate
+    return module_path.parents[2]
 
 
 def make_api_handler(
