@@ -173,7 +173,7 @@ def build_hook_health(
     }
 
 
-def _resolve_monitor_repo_root() -> Path:
+def _resolve_monitor_repo_root(module_file: Path | None = None) -> Path:
     """Find the checkout root for both ``src/`` and flat deployments.
 
     The normal editable checkout imports ``src/codex_cli_monitor``.  Some
@@ -183,7 +183,7 @@ def _resolve_monitor_repo_root() -> Path:
     Prefer a candidate that contains the monitor's Hook module and retain the
     old parent as a conservative fallback for installed packages.
     """
-    module_path = Path(__file__).resolve()
+    module_path = (module_file or Path(__file__)).resolve()
     candidates = (module_path.parents[2], module_path.parents[1])
     for candidate in candidates:
         if (candidate / "src" / "codex_cli_monitor" / "hooks.py").is_file():

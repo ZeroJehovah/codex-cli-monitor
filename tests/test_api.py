@@ -4,12 +4,29 @@ import unittest
 import tempfile
 from pathlib import Path
 
-from codex_cli_monitor.api import build_hook_health, build_sessions_payload
+from codex_cli_monitor.api import (
+    _resolve_monitor_repo_root,
+    build_hook_health,
+    build_sessions_payload,
+)
 from codex_cli_monitor.install_hooks import install_hooks
 from codex_cli_monitor.models import CodexSession, Inference, ProcessInfo
 
 
 class ApiTests(unittest.TestCase):
+    def test_hook_health_repo_root_supports_src_and_flat_package_layouts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "monitor"
+            hook_module = root / "src" / "codex_cli_monitor" / "hooks.py"
+            hook_module.parent.mkdir(parents=True)
+            hook_module.touch()
+
+            src_module = root / "src" / "codex_cli_monitor" / "api.py"
+            flat_module = root / "codex_cli_monitor" / "api.py"
+
+            self.assertEqual(_resolve_monitor_repo_root(src_module), root)
+            self.assertEqual(_resolve_monitor_repo_root(flat_module), root)
+
     def test_hook_health_distinguishes_explicit_disable_and_tool_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "codex-home"
