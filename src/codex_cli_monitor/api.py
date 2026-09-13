@@ -421,6 +421,10 @@ def make_api_handler(
             
             def handle():
                 try:
+                    # Start send loop immediately
+                    send_thread = threading.Thread(target=client.run_send_loop, daemon=True)
+                    send_thread.start()
+                    
                     # Auth if required
                     if api_token:
                         sock.settimeout(5.0)
@@ -431,11 +435,13 @@ def make_api_handler(
                             auth = json.loads(frame.decode("utf-8"))
                             if auth.get("token") != api_token:
                                 client.send_text(json.dumps({"error": "unauthorized"}))
+                                time.sleep(0.1)  # Let send thread flush
                                 client.close()
                                 return
                             client.send_text(json.dumps({"ok": True}))
                         except Exception:
                             client.send_text(json.dumps({"error": "invalid_auth"}))
+                            time.sleep(0.1)  # Let send thread flush
                             client.close()
                             return
                     
@@ -446,10 +452,8 @@ def make_api_handler(
                     initial = build_sessions_payload(sessions, identity, remote_snapshots, time.time())
                     client.send_text(json.dumps(initial, ensure_ascii=False))
                     
-                    # Register and start loops
+                    # Register and run recv loop
                     ws_broadcaster.register(client)
-                    send_thread = threading.Thread(target=client.run_send_loop, daemon=True)
-                    send_thread.start()
                     client.run_recv_loop()
                 finally:
                     ws_broadcaster.unregister(client)
