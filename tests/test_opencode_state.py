@@ -308,6 +308,92 @@ class OpenCodeStateTests(unittest.TestCase):
         self.assertEqual(states[0].status, STATUS_FAILURE)
         self.assertTrue(states[0].failed_event)
 
+    def test_old_running_tool_cannot_reopen_a_later_completed_message(self) -> None:
+        # A tool can be left running in an interrupted model step even though
+        # the same conversation later reaches a terminal assistant message.
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                terminal = {
+                    "role": "assistant",
+                    "time": {"created": 4000, "completed": 5000},
+                    "finish": None if failed else "stop",
+                }
+                if failed:
+                    terminal["error"] = {"name": "APIError"}
+                state, = self._scan([{
+                    "id": "s1", "directory": "/work",
+                    "time_created": 1000, "time_updated": 5000,
+                }], [{
+                    "id": "user", "session_id": "s1",
+                    "time_created": 1000, "time_updated": 1000,
+                    "data": {"role": "user", "time": {"created": 1000}},
+                }, {
+                    "id": "old-step", "session_id": "s1",
+                    "time_created": 2000, "time_updated": 2000,
+                    "data": {"role": "assistant", "time": {"created": 2000}},
+                }, {
+                    "id": "terminal", "session_id": "s1",
+                    "time_created": 4000, "time_updated": 5000,
+                    "data": terminal,
+                }], parts=({
+                    "id": "old-tool", "message_id": "old-step", "session_id": "s1",
+                    "time_created": 2100, "time_updated": 2200,
+                    "data": {"type": "tool", "state": {"status": "running"}},
+                },))
+                self.assertEqual(state.status, STATUS_FAILURE if failed else STATUS_SUCCESS)
+                self.assertFalse(state.turn_active)
+
+    def test_new_prompt_reopens_a_completed_or_failed_turn(self) -> None:
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                assistant = {
+                    "role": "assistant",
+                    "time": {"created": 2000, "completed": 3000},
+                    "finish": "stop",
+                }
+                if failed:
+                    assistant["error"] = {"name": "APIError"}
+                state, = self._scan([{
+                    "id": "s1", "directory": "/work",
+                    "time_created": 1000, "time_updated": 4000,
+                }], [{
+                    "id": "previous-assistant", "session_id": "s1",
+                    "time_created": 2000, "time_updated": 3000,
+                    "data": assistant,
+                }, {
+                    "id": "new-user", "session_id": "s1",
+                    "time_created": 4000, "time_updated": 4000,
+                    "data": {"role": "user", "time": {"created": 4000}},
+                }])
+                self.assertEqual(state.status, STATUS_RUNNING)
+                self.assertTrue(state.turn_active)
+                self.assertFalse(state.failed_event)
+
+    def test_activity_times_use_seconds_and_include_current_step_updates(self) -> None:
+        state, = self._scan([{
+            "id": "s1", "directory": "/work",
+            "time_created": 1000, "time_updated": 2000,
+        }], [{
+            "id": "user", "session_id": "s1",
+            "time_created": 1500, "time_updated": 1500,
+            "data": {"role": "user", "time": {"created": 1500}},
+        }, {
+            "id": "assistant", "session_id": "s1",
+            "time_created": 2100, "time_updated": 3000,
+            "data": {
+                "role": "assistant", "time": {"created": 2100, "completed": 2500},
+                "finish": "tool-calls",
+            },
+        }], parts=({
+            "id": "tool", "message_id": "assistant", "session_id": "s1",
+            "time_created": 2600, "time_updated": 4000,
+            "data": {"type": "tool", "state": {"status": "running"}},
+        },))
+        self.assertEqual(state.created_at, 1.0)
+        self.assertEqual(state.updated_at, 2.0)
+        self.assertEqual(state.turn_started_at, 1.5)
+        self.assertEqual(state.last_activity_at, 4.0)
+
     def test_completed_intermediate_step_keeps_turn_open(self) -> None:
         session = {
             "id": "s1", "directory": "/work",

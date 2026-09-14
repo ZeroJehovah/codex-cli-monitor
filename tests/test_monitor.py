@@ -864,6 +864,76 @@ class WaitingDecisionTests(unittest.TestCase):
         self.assertEqual(by_pid[400].display_status, "运行中")
         self.assertEqual(by_pid[401].display_status, "成功")
 
+    def test_historical_open_rows_cannot_displace_current_opencode_outcome(self) -> None:
+        import sqlite3
+
+        for outcome in ("success", "failure"):
+            with self.subTest(outcome=outcome), _opencode_runtime(outcome) as (proc, _):
+                database = Path(os.environ["OPENCODE_DATA"]) / "opencode.db"
+                connection = sqlite3.connect(database)
+                try:
+                    old_ms = int((time.time() - 14 * 24 * 3600) * 1000)
+                    for sid in ("historical-tool", "historical-user-only"):
+                        connection.execute(
+                            "INSERT INTO session VALUES (?,?,?,?,?,?,?,?)",
+                            (sid, "global", "s", OPENCODE_CWD, "t", "1.0.0", old_ms, old_ms),
+                        )
+                        connection.execute(
+                            "INSERT INTO message VALUES (?,?,?,?,?)",
+                            (f"user-{sid}", sid, old_ms, old_ms, json.dumps({
+                                "role": "user", "time": {"created": old_ms},
+                            })),
+                        )
+                    connection.execute(
+                        "INSERT INTO message VALUES (?,?,?,?,?)",
+                        ("old-step", "historical-tool", old_ms + 1, old_ms + 1, json.dumps({
+                            "role": "assistant", "time": {"created": old_ms + 1},
+                        })),
+                    )
+                    connection.execute(
+                        "INSERT INTO part VALUES (?,?,?,?,?,?)",
+                        ("old-tool", "old-step", "historical-tool", old_ms + 2, old_ms + 2,
+                         json.dumps({"type": "tool", "state": {"status": "running"}})),
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+
+                sessions = discover_sessions(proc)
+
+                self.assertEqual(len(sessions), 1)
+                self.assertEqual(sessions[0].display_status, "失败" if outcome == "failure" else "成功")
+                self.assertIn(OPENCODE_SESSION_ID, sessions[0].inference.evidence[0].detail)
+
+    def test_unanchored_opencode_cannot_inherit_only_historical_activity(self) -> None:
+        with _opencode_runtime("running") as (proc, _):
+            _age_opencode_session(Path(os.environ["OPENCODE_DATA"]) / "opencode.db")
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(sessions, ())
+
+    def test_explicit_opencode_resume_can_bind_an_idle_historical_session(self) -> None:
+        with _opencode_runtime("success") as (proc, _):
+            _age_opencode_session(Path(os.environ["OPENCODE_DATA"]) / "opencode.db")
+            (proc / "400" / "cmdline").write_bytes(
+                b"opencode\0-s\0" + OPENCODE_SESSION_ID.encode() + b"\0"
+            )
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "成功")
+
+    def test_same_opencode_resume_anchor_is_claimed_only_once(self) -> None:
+        with _opencode_two_session_runtime() as (proc, _):
+            for pid in (400, 401):
+                (proc / str(pid) / "cmdline").write_bytes(
+                    b"opencode\0-s\0" + OPENCODE_SESSION_ID.encode() + b"\0"
+                )
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 2)
+        self.assertCountEqual([session.display_status for session in sessions], ["运行中", "成功"])
+
     def test_unanchored_same_directory_processes_claim_all_open_rows(self) -> None:
         # A resumed session can be older than both processes.  A completed row
         # created after the older process started must not displace that open
@@ -1017,9 +1087,11 @@ def _write_opencode_db(path: Path, status: str) -> None:
         "role": "assistant",
         "time": {"created": now_ms - 50_000},
     }
-    if status == "success":
+    if status in ("success", "failure"):
         assistant["time"] = {"created": now_ms - 50_000, "completed": now_ms - 10_000}
         assistant["finish"] = "stop"
+        if status == "failure":
+            assistant["error"] = {"name": "APIError"}
     connection = sqlite3.connect(str(path))
     try:
         connection.execute(
@@ -1067,6 +1139,27 @@ def _write_opencode_db(path: Path, status: str) -> None:
                 now_ms - 1_000,
                 json.dumps(assistant),
             ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _age_opencode_session(path: Path) -> None:
+    import sqlite3
+
+    old_ms = int((time.time() - 14 * 24 * 3600) * 1000)
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "UPDATE session SET time_created = ?, time_updated = ?",
+            (old_ms, old_ms + 2000),
+        )
+        connection.execute(
+            "UPDATE message SET time_created = ?, time_updated = ?, "
+            "data = json_set(data, '$.time.created', ?, '$.time.completed', "
+            "CASE WHEN json_extract(data, '$.time.completed') IS NULL THEN NULL ELSE ? END)",
+            (old_ms, old_ms + 2000, old_ms, old_ms + 2000),
         )
         connection.commit()
     finally:

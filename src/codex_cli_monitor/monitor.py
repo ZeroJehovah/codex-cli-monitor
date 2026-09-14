@@ -420,7 +420,9 @@ def _opencode_state_for_root(
         session_id = _opencode_command_session_id(root.cmdline)
 
     bound = by_id.get(session_id) if session_id else None
-    if bound is not None and bound.session_id not in used_session_ids:
+    if bound is not None and bound.session_id in used_session_ids:
+        bound = None
+    if bound is not None:
         if bound.turn_active or bound.status in OPEN_TURN_STATUSES:
             return bound
     owned: list[OpenCodeSessionState] = []
@@ -432,16 +434,24 @@ def _opencode_state_for_root(
             continue
         if state is bound:
             continue
+        # A directory can contain abandoned open turns from previous processes.
+        # Only activity during this process's lifetime supports a cwd binding.
+        # An explicit resume/hook anchor above remains valid for an idle row.
+        if (
+            root.started_at is None
+            or state.last_activity_at is None
+            or state.last_activity_at < root.started_at - 2.0
+        ):
+            continue
         cwd_candidates.append(state)
 
     # A process may resume an existing conversation without exposing its
     # session id in argv (and without the optional lifecycle hook).  In that
     # case the session can predate the process by hours, so requiring a
     # post-start creation timestamp would incorrectly hide an otherwise
-    # active row.  Prefer rows created after process start when there are any,
-    # but fall back to all rows for the directory when there are none.  This
-    # keeps the newer-conversation preference while allowing a single resumed
-    # conversation (or an older active row) to remain visible.
+    # active row. Its message/tool activity can instead prove that it belongs
+    # to the current process lifetime. Prefer newly created rows only within
+    # the same lifecycle class, preserving resumed active conversations.
     fresh_cwd_candidates = [
         state
         for state in cwd_candidates

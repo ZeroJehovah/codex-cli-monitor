@@ -340,6 +340,16 @@ PYTHONPATH=src python3 -m codex_cli_monitor
 表格会多出一列 `CLI`（`codex`、`opencode` 或 `claude`）和一列 `WAITING FOR`：只有
 `待确认` 的行会在这里显示它在等什么，其余行显示 `-`。
 
+会话优先由当前进程的 Hook 或 `-s <session-id>` 绑定。按工作目录推断时，候选会话必须
+在该进程启动后有会话、消息或当前工具的活动记录；历史遗留的未结束会话不能抢占当前
+进程。同目录有多个进程时，每条会话只分配一次，并在符合时间条件的候选中优先分配
+进行中的会话。因此，启动后继续工作的旧会话仍能被识别，显式恢复的空闲会话也能保留
+原来的结果。
+
+工具状态只检查最新 assistant 消息所属的工具。较早消息遗留的 `running` 工具不能
+覆盖后续完成消息；已完成消息携带结构化错误时显示 `失败`。新用户提示词比上一条
+assistant 消息更新时，立即显示 `运行中`，等待新一轮的结构化结果。
+
 #### （可选）为 OpenCode 安装决策插件
 
 只有装了这个插件，卡在权限或提问提示上的 OpenCode 会话才会显示 `待确认`；否则它们仍显示
@@ -698,6 +708,42 @@ Bearer Token。采集日志使用 UTC 时间戳，在首次失败、持续失败
 `REMOTE_TTL`，聚合端会移除它的旧会话。默认 30 秒 TTL 用来限制失联服务器的陈旧
 状态；悬浮窗的连续空响应确认则负责吸收短暂的快照抖动。
 
+#### 无 systemd 的本机采集器
+
+本机使用程序自带的 daemon 模式时，通过 `start-local-collector.sh` 启动或重启。
+该入口先加载受保护的配置，再使用完整参数停止旧实例、启动后台服务，确保重启后仍然
+向聚合端上报。它不会安装系统服务。
+
+配置文件默认为 `~/.config/codex-cli-monitor/collector.env`，跟随 `XDG_CONFIG_HOME`；
+也可用 `CODEX_MONITOR_ENV_FILE` 指定其他路径。首次部署时创建这个文件，填写：
+
+```bash
+CODEX_MONITOR_SERVER_ID=my-local-server
+CODEX_MONITOR_SERVER_NAME="My Local Server"
+CODEX_MONITOR_AGGREGATOR_URL=https://codex-monitor.aiof.top
+CODEX_MONITOR_COLLECTOR_TOKEN=REPLACE_WITH_COLLECTOR_WRITE_TOKEN
+CODEX_MONITOR_COLLECTOR_ENABLED=1
+CODEX_MONITOR_LOCAL_HOST=127.0.0.1
+CODEX_MONITOR_LOCAL_PORT=8765
+CODEX_MONITOR_COLLECTOR_INTERVAL=0.5
+CODEX_MONITOR_LOCAL_CACHE_SECONDS=0.05
+```
+
+聚合地址和上报 Token 为必填项；Token 必须与聚合端接受的写入 Token 一致，保存在
+环境中，不进入进程命令行。其余字段可省略：服务器 ID 和名称默认使用主机名，其他
+默认值如上。`CODEX_MONITOR_COLLECTOR_ENABLED=0` 会拒绝启动，`CODEX_MONITOR_PYTHON`
+可以覆盖默认的 `python3`。配置文件使用 shell 赋值语法，名称包含空格时加引号。
+
+```bash
+chmod 600 ~/.config/codex-cli-monitor/collector.env
+./start-local-collector.sh
+curl http://127.0.0.1:8765/healthz
+```
+
+PID 和日志保存在 `~/.local/state/codex-cli-monitor/`，跟随 `XDG_STATE_HOME`。
+确认 `/healthz` 存在 `collector` 字段且 `healthy=true`，再检查聚合端出现本机服务器。
+只有本地 `/api/sessions` 返回会话，不代表上报已启用。
+
 ### 5. 配置和信任 Codex Hook
 
 聚合服务和采集器安装脚本默认都会为 `SERVICE_USER` 执行 Hook 安装。安装器只修改带
@@ -906,6 +952,9 @@ git pull --ff-only
 sudo systemctl restart codex-monitor-collector.service
 sudo systemctl status codex-monitor-collector.service
 ```
+
+没有 systemd 的本机采集器更新源码后，执行 `./start-local-collector.sh`，继续使用原来的
+`collector.env`。验证本地 `collector` 健康信息及聚合端的本机会话。
 
 Windows 悬浮窗：退出正在运行的旧程序，保留现有 `CodexMonitorWidget.ini`，用重新构
 建的 `CodexMonitorWidget.exe` 覆盖旧文件后再次双击。只有配置字段发生变化时才需要

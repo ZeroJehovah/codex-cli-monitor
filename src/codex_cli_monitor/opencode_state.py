@@ -11,8 +11,8 @@ lifecycle (running / success / failure) from minimal structural records:
   ``time.completed``, plus ``finish`` and the presence of a structured
   ``error`` for assistant messages. Completion closes one model step;
   ``tool-calls``, ``unknown``, and a missing finish keep the turn open.
-* ``part`` rows carry tool-call state, including ``running`` obstacles that
-  prove a turn is still in flight.
+* ``part`` rows belonging to the latest assistant message carry tool-call
+  state. Orphaned ``running`` tools in older messages cannot reopen a turn.
 
 A session is displayed for a live ``opencode`` process only when that process
 holds the database open (or the directory matches and a hook marker exists).
@@ -300,7 +300,7 @@ def _read_session_states(
             directory_limit=directory_limit,
         )
         messages = _query_messages(connection, sessions)
-        tools = _query_running_tools(connection, sessions)
+        tools = _query_running_tools(connection, sessions, messages)
     except sqlite3.Error:
         return ()
     finally:
@@ -376,12 +376,13 @@ def _query_messages(
     safe_data = "CASE WHEN json_valid(data) THEN data ELSE '{}' END"
     query = (
         "SELECT json_object("
+        "'id', id, "
         f"'role', json_extract({safe_data}, '$.role'), "
         f"'time', json_object('created', json_extract({safe_data}, '$.time.created'), "
         f"'completed', json_extract({safe_data}, '$.time.completed')), "
         f"'finish', json_extract({safe_data}, '$.finish'), "
         f"'failed', json_type({safe_data}, '$.error') IS NOT NULL AND "
-        f"json_type({safe_data}, '$.error') != 'null'), time_created FROM message "
+        f"json_type({safe_data}, '$.error') != 'null'), time_created, time_updated FROM message "
         "WHERE session_id = ? AND "
         f"json_extract({safe_data}, '$.role') = ? "
         "ORDER BY time_created DESC, id DESC LIMIT 1"
@@ -392,7 +393,7 @@ def _query_messages(
             row = connection.execute(query, (session_id, role)).fetchone()
             if row is None:
                 continue
-            parsed = _parse_message_data(str(row[0]), row[1])
+            parsed = _parse_message_data(str(row[0]), row[1], row[2])
             if parsed is not None:
                 result[session_id].append(parsed)
     return {session_id: tuple(items) for session_id, items in result.items()}
@@ -401,26 +402,37 @@ def _query_messages(
 def _query_running_tools(
     connection: sqlite3.Connection,
     sessions: tuple[dict, ...],
-) -> dict[str, tuple[str, ...]]:
-    if not sessions:
+    messages: dict[str, tuple[dict, ...]],
+) -> dict[str, tuple[int, ...]]:
+    assistant_ids = tuple(
+        item["id"]
+        for items in messages.values()
+        for item in items
+        if item["role"] == "assistant" and item["id"] is not None
+    )
+    if not assistant_ids:
         return {}
-    ids = tuple(session["id"] for session in sessions)
-    placeholders = ",".join("?" for _ in ids)
+    placeholders = ",".join("?" for _ in assistant_ids)
+    safe_data = "CASE WHEN json_valid(part.data) THEN part.data ELSE '{}' END"
     query = (
-        "SELECT session_id, MAX(time_updated) FROM part "
-        "WHERE session_id IN ({}) AND "
-        "json_extract(CASE WHEN json_valid(data) THEN data ELSE '{{}}' END, "
-        "'$.state.status') = 'running' "
-        "GROUP BY session_id"
-    ).format(placeholders)
-    rows = connection.execute(query, ids).fetchall()
-    result: dict[str, list[str]] = {session["id"]: [] for session in sessions}
+        "SELECT part.session_id, MAX(part.time_updated) FROM part "
+        "JOIN message ON message.id = part.message_id "
+        "AND message.session_id = part.session_id "
+        f"WHERE part.message_id IN ({placeholders}) AND "
+        f"json_extract({safe_data}, '$.type') = 'tool' AND "
+        f"json_extract({safe_data}, '$.state.status') = 'running' "
+        "GROUP BY part.session_id"
+    )
+    rows = connection.execute(query, assistant_ids).fetchall()
+    result: dict[str, list[int]] = {session["id"]: [] for session in sessions}
     for session_id, time_updated in rows:
-        result[session_id].append(str(time_updated))
-    return {session_id: tuple(sorted(items, reverse=True)) for session_id, items in result.items()}
+        updated = _optional_positive_int(time_updated)
+        if updated is not None:
+            result[session_id].append(updated)
+    return {session_id: tuple(items) for session_id, items in result.items()}
 
 
-def _parse_message_data(raw: str, time_created: int) -> dict | None:
+def _parse_message_data(raw: str, time_created: int, time_updated: int) -> dict | None:
     try:
         data = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -432,42 +444,54 @@ def _parse_message_data(raw: str, time_created: int) -> dict | None:
     if not isinstance(role, str) or not isinstance(msg_time, dict):
         return None
     return {
+        "id": _optional_str(data.get("id")),
         "role": role,
         "created": _optional_positive_int(msg_time.get("created")),
         "completed": _optional_positive_int(msg_time.get("completed")),
         "finish": _optional_str(data.get("finish")),
         "failed": bool(data.get("failed")),
         "message_time_created": _optional_positive_int(time_created),
+        "message_time_updated": _optional_positive_int(time_updated),
     }
 
 
 def _build_state(
     session: dict,
     messages: tuple[dict, ...],
-    running_tools: tuple[str, ...],
+    running_tools: tuple[int, ...],
 ) -> tuple[OpenCodeSessionState | None, tuple[dict, ...]]:
     created = _ms_to_seconds(session["time_created"])
     updated = _ms_to_seconds(session["time_updated"])
     assistant_messages = [item for item in messages if item["role"] == "assistant"]
     user_messages = [item for item in messages if item["role"] == "user"]
 
-    last_activity = updated
+    activity_times = [value for value in (created, updated) if value is not None]
     for item in messages:
-        candidate = item["completed"] or item["created"] or item["message_time_created"]
-        if candidate is not None:
-            last_activity = max(last_activity, candidate)
+        for field in ("completed", "created", "message_time_created", "message_time_updated"):
+            candidate = _ms_to_seconds(item[field])
+            if candidate is not None:
+                activity_times.append(candidate)
+    activity_times.extend(value / 1000.0 for value in running_tools)
+    last_activity = max(activity_times, default=None)
 
-    turn_started = None
-    if user_messages:
-        turn_started = user_messages[-1]["created"]
-    if last_activity is None:
-        last_activity = created
+    current_user = user_messages[-1] if user_messages else None
+    user_created = (
+        current_user["created"] or current_user["message_time_created"]
+        if current_user else None
+    )
+    turn_started = _ms_to_seconds(user_created)
 
     current_assistant = assistant_messages[-1] if assistant_messages else None
+    if current_assistant is not None and user_created is not None:
+        assistant_created = current_assistant["created"] or current_assistant["message_time_created"]
+        if assistant_created is not None and user_created > assistant_created:
+            # The next prompt has arrived but its first assistant message has
+            # not. The preceding turn's completion or error no longer applies.
+            current_assistant = None
     current_completed = current_assistant["completed"] if current_assistant else None
     current_finish = current_assistant["finish"] if current_assistant else None
     current_failed = bool(current_assistant and current_assistant["failed"])
-    last_running_tool = running_tools[0] if running_tools else None
+    last_running_tool = running_tools[0] if running_tools and current_assistant else None
 
     # OpenCode completes each model step before starting the next one. There
     # need not be a running tool during that handoff, even in a healthy turn.
