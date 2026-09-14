@@ -905,6 +905,75 @@ class WaitingDecisionTests(unittest.TestCase):
                 self.assertEqual(sessions[0].display_status, "失败" if outcome == "failure" else "成功")
                 self.assertIn(OPENCODE_SESSION_ID, sessions[0].inference.evidence[0].detail)
 
+    def test_unanchored_completed_rows_follow_latest_activity(self) -> None:
+        # A long-lived process can create several completed conversations in
+        # one directory.  The newest activity is the best available evidence
+        # for the row currently shown by OpenCode; creation-time proximity
+        # alone would incorrectly retain the older failure.
+        with _opencode_runtime("failure") as (proc, _):
+            database = Path(os.environ["OPENCODE_DATA"]) / "opencode.db"
+            _age_opencode_session(database)
+            import sqlite3
+
+            now_ms = int(time.time() * 1000)
+            connection = sqlite3.connect(database)
+            try:
+                for session_id, age_ms, failed in (
+                    ("ses_old_failure", 150_000, True),
+                    ("ses_new_success", 30_000, False),
+                ):
+                    created = now_ms - age_ms
+                    completed = created + 5_000
+                    connection.execute(
+                        "INSERT INTO session VALUES (?,?,?,?,?,?,?,?)",
+                        (
+                            session_id,
+                            "global",
+                            "s",
+                            OPENCODE_CWD,
+                            session_id,
+                            "1.0.0",
+                            created,
+                            completed,
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT INTO message VALUES (?,?,?,?,?)",
+                        (
+                            f"user-{session_id}",
+                            session_id,
+                            created,
+                            created,
+                            json.dumps({"role": "user", "time": {"created": created}}),
+                        ),
+                    )
+                    assistant = {
+                        "role": "assistant",
+                        "time": {"created": created + 1_000, "completed": completed},
+                        "finish": "stop",
+                    }
+                    if failed:
+                        assistant["error"] = {"name": "APIError"}
+                    connection.execute(
+                        "INSERT INTO message VALUES (?,?,?,?,?)",
+                        (
+                            f"assistant-{session_id}",
+                            session_id,
+                            created + 1_000,
+                            completed,
+                            json.dumps(assistant),
+                        ),
+                    )
+                connection.commit()
+            finally:
+                connection.close()
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertIn("ses_new_success", sessions[0].inference.evidence[0].detail)
+
     def test_unanchored_opencode_cannot_inherit_only_historical_activity(self) -> None:
         with _opencode_runtime("running") as (proc, _):
             _age_opencode_session(Path(os.environ["OPENCODE_DATA"]) / "opencode.db")

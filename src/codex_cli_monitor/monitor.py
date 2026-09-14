@@ -481,19 +481,26 @@ def _opencode_state_for_root(
         return None
     candidates = tuple(owned)
 
-    def gap(state) -> float:
-        if state.created_at is None or root.started_at is None:
-            return float("inf")
-        return abs(state.created_at - root.started_at)
+    def activity_key(state) -> tuple[float, float, float]:
+        """Rank rows by the most recent structural activity they contain.
+
+        Creation-time proximity is not enough once one process has started
+        several conversations in the same directory: a newer conversation
+        may be the one currently shown by OpenCode even when an older row was
+        created closer to the process start.  The latest message/tool/session
+        activity is the strongest available unanchored ownership signal.
+        """
+        return tuple(
+            value if value is not None else float("-inf")
+            for value in (state.last_activity_at, state.updated_at, state.created_at)
+        )
     open_turns = [
         state for state in candidates
         if state.turn_active or state.status in OPEN_TURN_STATUSES
     ]
     if open_turns:
-        return min(open_turns, key=gap)
-    if bound is not None and bound in candidates:
-        return bound
-    return min(candidates, key=gap)
+        return max(open_turns, key=activity_key)
+    return max(candidates, key=activity_key)
 
 def _opencode_hook_session_id(
     root: ProcessInfo,
