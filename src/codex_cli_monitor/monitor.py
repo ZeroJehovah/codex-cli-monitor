@@ -105,8 +105,16 @@ def discover_sessions(
     if codex_roots:
         state_home = (codex_home or default_codex_home()).expanduser()
         grouped_hook_states = summarize_hook_events(load_hook_events(hook_log))
+        lifecycle_processes_by_pid = {
+            root.pid: _lifecycle_processes_for_root(root, processes)
+            for root in codex_roots
+        }
         hook_states_by_pid = {
-            root.pid: _hook_states_for_root(root, grouped_hook_states)
+            root.pid: _hook_states_for_root(
+                root,
+                grouped_hook_states,
+                lifecycle_processes_by_pid[root.pid],
+            )
             for root in codex_roots
         }
         launch_records = load_launch_records(shim_log or default_log_path())
@@ -117,6 +125,7 @@ def discover_sessions(
                 proc_root=proc_root,
                 codex_home=state_home,
                 allow_preexisting_fd_lifecycle=_is_tmux_hosted(root, processes),
+                lifecycle_processes=lifecycle_processes_by_pid[root.pid],
             )
             if not candidates:
                 continue
@@ -582,7 +591,9 @@ def _lifecycle_candidates_for_root(
     proc_root: Path,
     codex_home: Path,
     allow_preexisting_fd_lifecycle: bool = False,
+    lifecycle_processes: tuple[ProcessInfo, ...] | None = None,
 ) -> tuple[_LifecycleCandidate, ...]:
+    lifecycle_processes = lifecycle_processes or (root,)
     displayable_hook_states = tuple(
         state for state in hook_states if state.has_turn_activity
     )
@@ -591,42 +602,43 @@ def _lifecycle_candidates_for_root(
         for state in displayable_hook_states
     ]
 
-    for activity in scan_process_terminal_activities(
-        root.pid,
-        proc_root=proc_root,
-        codex_home=codex_home,
-        cwd=root.cwd,
-    ):
-        if not _is_new_fd_lifecycle(
-            activity,
-            displayable_hook_states,
-            root,
-            allow_preexisting=allow_preexisting_fd_lifecycle,
+    for lifecycle_process in lifecycle_processes:
+        for activity in scan_process_terminal_activities(
+            lifecycle_process.pid,
+            proc_root=proc_root,
+            codex_home=codex_home,
+            cwd=root.cwd,
         ):
-            continue
-        binding_evidence = [
-            "session file bound by an open file descriptor on the Codex PID",
-            "lifecycle event bound by the file session_id and structured turn_id",
-        ]
-        if (
-            allow_preexisting_fd_lifecycle
-            and activity.turn_started_at is not None
-            and _is_before_process_start(activity.turn_started_at, root)
-        ):
-            binding_evidence.append(
-                "live tmux ancestry permits the exact open resumed lifecycle"
+            if not _is_new_fd_lifecycle(
+                activity,
+                displayable_hook_states,
+                root,
+                allow_preexisting=allow_preexisting_fd_lifecycle,
+            ):
+                continue
+            binding_evidence = [
+                "session file bound by an open file descriptor on the exact Codex lifecycle PID",
+                "lifecycle event bound by the file session_id and structured turn_id",
+            ]
+            if (
+                allow_preexisting_fd_lifecycle
+                and activity.turn_started_at is not None
+                and _is_before_process_start(activity.turn_started_at, root)
+            ):
+                binding_evidence.append(
+                    "live tmux ancestry permits the exact open resumed lifecycle"
+                )
+            candidates.append(
+                _LifecycleCandidate(
+                    hook_state=None,
+                    state_activity=activity,
+                    display_status=_lifecycle_display_status(None, activity),
+                    updated_at=activity.last_record_at or 0.0,
+                    binding_method="process_fd_session_id",
+                    binding_confidence=1.0,
+                    binding_evidence=tuple(binding_evidence),
+                )
             )
-        candidates.append(
-            _LifecycleCandidate(
-                hook_state=None,
-                state_activity=activity,
-                display_status=_lifecycle_display_status(None, activity),
-                updated_at=activity.last_record_at or 0.0,
-                binding_method="process_fd_session_id",
-                binding_confidence=1.0,
-                binding_evidence=tuple(binding_evidence),
-            )
-        )
     return tuple(candidates)
 
 
@@ -873,6 +885,45 @@ def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, .
     return tuple(sorted(roots, key=lambda process: process.pid))
 
 
+def _lifecycle_processes_for_root(
+    root: ProcessInfo,
+    processes: dict[int, ProcessInfo],
+) -> tuple[ProcessInfo, ...]:
+    """Include exact managed app-server children as lifecycle signal owners.
+
+    Recent Codex CLI versions keep the interactive TTY process as the user-facing
+    process, while a managed app-server child emits its Hooks and holds the
+    rollout file open. The child is not a separate displayed session: its exact
+    process identity and parent relationship bind those signals back to this
+    live TTY root.
+    """
+    root_cwd = _normalize_path(root.cwd)
+    if root_cwd is None:
+        return (root,)
+
+    lifecycle_processes = [root]
+    for child_pid in root.children:
+        child = processes.get(child_pid)
+        if (
+            child is None
+            or not _is_managed_codex_app_server(child)
+            or _normalize_path(child.cwd) != root_cwd
+        ):
+            continue
+        lifecycle_processes.append(child)
+    return tuple(lifecycle_processes)
+
+
+def _is_managed_codex_app_server(process: ProcessInfo) -> bool:
+    if not is_native_codex_process(process):
+        return False
+    try:
+        app_server_index = process.cmdline.index("app-server")
+    except ValueError:
+        return False
+    return "--managed-daemon" in process.cmdline[app_server_index + 1 :]
+
+
 def _is_tmux_hosted(
     process: ProcessInfo,
     processes: dict[int, ProcessInfo],
@@ -971,16 +1022,25 @@ def _collect_descendants(
 def _hook_states_for_root(
     root: ProcessInfo,
     states: dict[str, tuple[HookSessionState, ...]],
+    lifecycle_processes: tuple[ProcessInfo, ...] | None = None,
 ) -> tuple[HookSessionState, ...]:
     root_cwd = _normalize_path(root.cwd)
     if root_cwd is None:
         return ()
+    lifecycle_pids = {
+        process.pid: process
+        for process in (lifecycle_processes or (root,))
+        if _normalize_path(process.cwd) == root_cwd
+    }
     return tuple(
         state
         for state in states.get(root_cwd, ())
         if (
-            state.codex_pid == root.pid
-            and not _is_before_process_start(state.updated_at, root)
+            state.codex_pid in lifecycle_pids
+            and not _is_before_process_start(
+                state.updated_at,
+                lifecycle_pids[state.codex_pid],
+            )
         )
     )
 
