@@ -869,7 +869,9 @@ def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, .
     codex_pids = {
         pid
         for pid, process in processes.items()
-        if is_native_codex_process(process) and not is_codex_exec_process(process)
+        if is_native_codex_process(process)
+        and not is_codex_exec_process(process)
+        and not _is_managed_codex_app_server(process)
     }
     visible_codex_pids = {
         pid
