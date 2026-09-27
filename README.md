@@ -1219,23 +1219,30 @@ notepad .\dist\CodexMonitorWidget-win-x64\CodexMonitorWidget.ini
 构建 Windows x64 exe：
 
 ```bash
-rm -rf dist/CodexMonitorWidget-win-x64
-mkdir -p dist/CodexMonitorWidget-win-x64
-resource_obj="$(mktemp /tmp/codex-monitor-widget-resource.XXXXXX.o)"
-trap 'rm -f "$resource_obj"' EXIT
-x86_64-w64-mingw32-windres -I windows/CodexMonitorWidget/src \
-  windows/CodexMonitorWidget/src/resources.rc \
-  -O coff -o "$resource_obj"
-x86_64-w64-mingw32-gcc -Os -s -DUNICODE -D_UNICODE \
-  windows/CodexMonitorWidget/src/main.c \
-  windows/CodexMonitorWidget/src/websocket.c \
-  "$resource_obj" \
-  -o dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.exe \
-  -mwindows -municode -Wl,--subsystem,windows \
-  -lwinhttp -lcomctl32 -lshell32 -luser32 -lgdi32 -ladvapi32 -lwinmm -lmsimg32 -lws2_32
-cp windows/CodexMonitorWidget/CodexMonitorWidget.ini.example \
-  dist/CodexMonitorWidget-win-x64/CodexMonitorWidget.ini
+# 打包 Windows x64 悬浮窗，输出到 dist/CodexMonitorWidget-win-x64/
+windows/CodexMonitorWidget/build-widget.sh
 ```
+
+这条命令不需要 root 权限，也不要求在系统里预装 mingw-w64。脚本会把 Ubuntu 的
+`mingw-w64` 相关 deb 包下载并解包到私有目录（默认 `/tmp/codex-mingw`，可用
+`CODEX_MONITOR_MINGW_CACHE` 改到持久位置），随后用该目录里的
+`x86_64-w64-mingw32-gcc-posix`、binutils 和头文件调用仓库内的 Makefile。缓存已存在
+时会直接复用，因此后续重新打包只需数秒。也可以指定输出目录：
+
+```bash
+windows/CodexMonitorWidget/build-widget.sh dist/CodexMonitorWidget-win-x64
+```
+
+如果系统（或某个容器镜像）已经装好了 mingw-w64，也可以直接构建：
+
+```bash
+make -C windows/CodexMonitorWidget
+```
+
+产出的 `CodexMonitorWidget.exe` 会被复制到发布目录，同时写入与源文件字节一致的副本
+`windows/CodexMonitorWidget/CodexMonitorWidget.exe`；发行目录里已存在的
+`CodexMonitorWidget.ini` 不会被覆盖。部署到 Windows 时，只需要把新的 exe 放到已有
+INI 旁边替换旧文件，然后重新启动悬浮窗。exe 本身不进 git（见 `.gitignore`）。
 
 发布目录应当恰好包含：
 
