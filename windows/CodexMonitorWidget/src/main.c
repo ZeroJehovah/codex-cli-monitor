@@ -89,11 +89,17 @@ typedef struct Session {
 } Session;
 
 typedef struct FetchResult {
+    LONG transport_generation;
     int count;
     int ok;
     char error[256];
     Session sessions[MAX_SESSIONS];
 } FetchResult;
+
+typedef struct FetchThreadData {
+    HWND hwnd;
+    LONG transport_generation;
+} FetchThreadData;
 
 typedef struct GlyphVerticalMetrics {
     int black_box_y;
@@ -183,6 +189,7 @@ typedef struct AppState {
     int display_wheel_delta;
     int fetch_completed;
     LONG fetching;
+    LONG transport_generation;
     char last_error[256];
     IndicatorBitmapCacheEntry indicator_cache[INDICATOR_BITMAP_CACHE_CAPACITY];
     ULONGLONG indicator_cache_clock;
@@ -2227,13 +2234,17 @@ cleanup:
 }
 
 static DWORD WINAPI fetch_thread(LPVOID parameter) {
+    FetchThreadData *thread_data = (FetchThreadData *)parameter;
     FetchResult *result = (FetchResult *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(FetchResult));
     char *json = NULL;
-    HWND hwnd = (HWND)parameter;
+    HWND hwnd = thread_data->hwnd;
     if (result == NULL) {
         InterlockedExchange(&g_app.fetching, 0);
+        HeapFree(GetProcessHeap(), 0, thread_data);
         return 1;
     }
+    result->transport_generation = thread_data->transport_generation;
+    HeapFree(GetProcessHeap(), 0, thread_data);
     if (fetch_json(&json, result->error, sizeof(result->error))) {
         parse_sessions_json(json, result);
         HeapFree(GetProcessHeap(), 0, json);
@@ -2246,11 +2257,24 @@ static DWORD WINAPI fetch_thread(LPVOID parameter) {
 
 static void start_fetch(void) {
     HANDLE thread;
+    FetchThreadData *thread_data;
     if (InterlockedExchange(&g_app.fetching, 1) != 0) {
         return;
     }
-    thread = CreateThread(NULL, 0, fetch_thread, g_app.hwnd, 0, NULL);
+    thread_data = (FetchThreadData *)HeapAlloc(
+        GetProcessHeap(),
+        HEAP_ZERO_MEMORY,
+        sizeof(FetchThreadData)
+    );
+    if (thread_data == NULL) {
+        InterlockedExchange(&g_app.fetching, 0);
+        return;
+    }
+    thread_data->hwnd = g_app.hwnd;
+    thread_data->transport_generation = g_app.transport_generation;
+    thread = CreateThread(NULL, 0, fetch_thread, thread_data, 0, NULL);
     if (thread == NULL) {
+        HeapFree(GetProcessHeap(), 0, thread_data);
         InterlockedExchange(&g_app.fetching, 0);
         return;
     }
@@ -3875,6 +3899,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     switch (message) {
     case WM_CREATE:
         g_app.hwnd = hwnd;
+        g_app.transport_generation = 1;
         g_app.hovered_session = -1;
         g_app.static_buffer_dirty = 1;
         init_tooltip(hwnd);
@@ -3899,10 +3924,17 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return 0;
     case WM_TIMER:
         if (wparam == REFRESH_TIMER_ID) {
-            if (g_app.dragging) {
-                g_app.drag_refresh_pending = 1;
-            } else {
-                start_fetch();
+            /* A WebSocket sends an empty state only when the state changes.
+             * Keep polling solely while an old non-empty view is awaiting the
+             * consecutive empty confirmations; otherwise WebSocket remains
+             * the only live transport. */
+            if (!g_app.websocket_connected ||
+                (g_app.session_count > 0 && g_app.empty_success_count > 0)) {
+                if (g_app.dragging) {
+                    g_app.drag_refresh_pending = 1;
+                } else {
+                    start_fetch();
+                }
             }
         } else if (wparam == WEBSOCKET_TIMER_ID) {
             if (!g_app.websocket_connected && !g_app.websocket_connecting && g_app.websocket_enabled) {
@@ -3940,7 +3972,11 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return 1;
     case WM_FETCH_DONE: {
         FetchResult *result = (FetchResult *)lparam;
-        if (result != NULL) {
+        if (result != NULL &&
+            result->transport_generation == g_app.transport_generation &&
+            (!g_app.websocket_connected ||
+             (result->ok && result->count == 0 &&
+              g_app.session_count > 0 && g_app.empty_success_count > 0))) {
             g_app.fetch_completed = 1;
             if (result->ok) {
                 if (result->count > 0 || g_app.session_count == 0) {
@@ -3964,6 +4000,16 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             if (g_app.row_count <= 0) {
                 update_directory_column_width();
             }
+        } else if (result != NULL &&
+                   g_app.websocket_connected &&
+                   result->transport_generation == g_app.transport_generation &&
+                   !result->ok &&
+                   g_app.session_count > 0) {
+            /* A failed confirmation must not count toward clearing a
+             * previously visible row. */
+            g_app.empty_success_count = 0;
+        }
+        if (result != NULL) {
             HeapFree(GetProcessHeap(), 0, result);
         }
         InterlockedExchange(&g_app.fetching, 0);
@@ -3977,6 +4023,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     case WM_WEBSOCKET_CONNECTED: {
         g_app.websocket_connected = 1;
         g_app.websocket_connecting = 0;
+        InterlockedIncrement(&g_app.transport_generation);
         return 0;
     }
     case WM_WEBSOCKET_MESSAGE: {
@@ -4017,6 +4064,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     case WM_WEBSOCKET_CLOSED: {
         g_app.websocket_connected = 0;
         g_app.websocket_connecting = 0;
+        InterlockedIncrement(&g_app.transport_generation);
+        SetTimer(hwnd, REFRESH_TIMER_ID, REFRESH_INTERVAL_MS, NULL);
         return 0;
     }
     case WM_PAINT: {

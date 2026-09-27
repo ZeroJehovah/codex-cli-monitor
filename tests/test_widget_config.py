@@ -54,6 +54,41 @@ class WidgetConfigTests(unittest.TestCase):
         error_branch = fetch_done[error_branch_start:]
         self.assertIn("g_app.empty_success_count = 0;", error_branch)
 
+    def test_widget_confirms_stale_rows_after_websocket_reports_empty(self) -> None:
+        source = (
+            Path(__file__).parents[1]
+            / "windows"
+            / "CodexMonitorWidget"
+            / "src"
+            / "main.c"
+        ).read_text(encoding="utf-8")
+
+        timer_body = source[source.index("case WM_TIMER:") :]
+        timer_body = timer_body[: timer_body.index("case WM_ANIMATION_FRAME:")]
+        self.assertIn(
+            "g_app.session_count > 0 && g_app.empty_success_count > 0",
+            timer_body,
+        )
+
+        fetch_done = source[source.index("case WM_FETCH_DONE:") :]
+        fetch_done = fetch_done[: fetch_done.index("case WM_PAINT:")]
+        self.assertIn(
+            "result->transport_generation == g_app.transport_generation",
+            fetch_done,
+        )
+        self.assertIn("!g_app.websocket_connected", fetch_done)
+
+        connected_body = source[source.index("case WM_WEBSOCKET_CONNECTED:") :]
+        connected_body = connected_body[: connected_body.index("case WM_WEBSOCKET_MESSAGE:")]
+        self.assertNotIn("KillTimer(hwnd, REFRESH_TIMER_ID);", connected_body)
+
+        closed_body = source[source.index("case WM_WEBSOCKET_CLOSED:") :]
+        closed_body = closed_body[: closed_body.index("case WM_PAINT:")]
+        self.assertIn(
+            "SetTimer(hwnd, REFRESH_TIMER_ID, REFRESH_INTERVAL_MS, NULL);",
+            closed_body,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
