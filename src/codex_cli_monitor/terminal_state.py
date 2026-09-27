@@ -30,6 +30,7 @@ MAX_TERMINAL_EVENTS_PER_FILE = 64
 MAX_CACHE_ENTRIES = 256
 MAX_OPEN_FDS_PER_PROCESS = 4096
 MAX_BOUND_SESSION_FILES = 32
+MAX_SESSION_METADATA_BYTES = 64 * 1024
 TERMINAL_ACTIVE_TYPES = {"task_started"}
 TERMINAL_SUCCESS_TYPES = {"task_complete", "turn_complete", "turn_completed"}
 TERMINAL_FAILURE_TYPES = {
@@ -156,7 +157,7 @@ def _session_activity(
         relative_path=relative_path,
         session_id=session_id,
         turn_id=(event.turn_id if event is not None else fallback_turn_id),
-        cwd=cwd,
+        cwd=cwd or _session_cwd(path),
         size_bytes=stat.st_size,
         modified_at=stat.st_mtime,
         observed_at=observed_at,
@@ -218,6 +219,33 @@ def _open_session_paths(proc_root: Path, pid: int, home: Path) -> tuple[Path, ..
 def _session_id_from_path(path: Path) -> str | None:
     match = SESSION_ID_SUFFIX.search(path.name)
     return match.group(1) if match is not None else None
+
+
+def _session_cwd(path: Path) -> str | None:
+    """Read only the bounded session metadata needed for daemon binding."""
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_SESSION_METADATA_BYTES)
+    except OSError:
+        return None
+    for line in raw.splitlines():
+        if not line or b"\x00" in line:
+            continue
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            cwd = payload.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                return cwd
+        cwd = record.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            return cwd
+    return None
 
 
 def _session_path(home: Path, session_id: str | None) -> Path | None:

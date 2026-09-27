@@ -34,6 +34,12 @@
   文件，还会读取有上限的生命周期前缀，保证文件变大后开头的 `task_started` 仍可恢复。
   两个区域都只识别结构化 `task_started`、`task_complete.error`、
   `turn_complete.error`、`TurnAborted` 等生命周期记录。
+- 共享托管 app-server 的生命周期：新版 Codex CLI 可能把 agent 回合放在一个被多个 TTY
+  客户端共用的常驻 managed app-server 里，此时 rollout 文件和 Hook 都属于那个守护进程，
+  而不是交互进程。只有当该目录里只有这一个活跃 Codex 终端时，监控才会用 session 目录
+  加生命周期时间把它的事件绑回该终端；同目录出现第二个活跃终端时按失败关闭，两行都不
+  显示。`codex app-server --managed-daemon`、`codex app-server daemon ...` 这类守护
+  进程只作为信号来源，永远不会被当成用户会话显示。
 - OpenCode 的 `~/.local/share/opencode/opencode.db`（SQLite）。读取器以只读 URI 打开，
   仅查询 `session`/`message`/`part` 表的最小结构字段（目录、创建/更新时间、
   `role`、`time.completed`、`finish`、工具运行状态），从不清除、写入或锁库。
@@ -1048,6 +1054,9 @@ curl --noproxy '*' https://codex-monitor.aiof.top/healthz
 - 确认 Codex session 文件名包含 Hook 记录的 `session_id`，或 Goal session 文件仍由同一
   Codex PID 打开且包含结构化 `task_started`；终端读取器不会用同目录时间接近度猜测其他
   文件。
+- 若 `ps` 里只有交互 `codex` 和 `codex app-server --managed-daemon`，而 Hook 记录的
+  `$PPID` 是那个守护进程，说明该会话由共享 app-server 承载：确认这个目录下只有一个活跃
+  Codex 终端（同目录有两个活跃终端时按设计失败关闭，两行都不显示）。
 - 如果移动过仓库，重新安装 Hook。
 
 #### Claude Code 会话不显示

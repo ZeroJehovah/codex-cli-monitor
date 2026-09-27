@@ -61,6 +61,46 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].inference.status, "running_hook")
         self.assertEqual(sessions[0].connections, ())
 
+    def test_shared_managed_app_server_hook_binds_to_unique_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            _write_process(
+                proc,
+                900,
+                "codex",
+                "S",
+                1,
+                ["/opt/codex/bin/codex", "app-server", "--managed-daemon"],
+                "/home/coder/chat",
+            )
+            _hook(hook_log, "user_prompt_submit", "session-a", "turn-a", ppid=900)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].root.pid, 100)
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertEqual(sessions[0].binding_method, "shared_app_server_hook")
+
+    def test_shared_managed_app_server_fails_closed_for_two_same_directory_terminals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            _write_process(proc, 101, "codex", "S", 1, ["codex"], "/work/a")
+            _write_process(
+                proc,
+                900,
+                "codex",
+                "S",
+                1,
+                ["/opt/codex/bin/codex", "app-server", "--managed-daemon"],
+                "/home/coder/chat",
+            )
+            _hook(hook_log, "user_prompt_submit", "session-a", "turn-a", ppid=900)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(sessions, ())
+
     def test_stop_hook_displays_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _root, proc, home, hook_log = _runtime(tmp)

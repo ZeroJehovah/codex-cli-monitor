@@ -109,11 +109,20 @@ def discover_sessions(
             root.pid: _lifecycle_processes_for_root(root, processes)
             for root in codex_roots
         }
+        shared_lifecycle_processes_by_pid = {
+            root.pid: _shared_lifecycle_processes_for_root(
+                root,
+                codex_roots,
+                processes,
+            )
+            for root in codex_roots
+        }
         hook_states_by_pid = {
             root.pid: _hook_states_for_root(
                 root,
                 grouped_hook_states,
                 lifecycle_processes_by_pid[root.pid],
+                shared_lifecycle_processes=shared_lifecycle_processes_by_pid[root.pid],
             )
             for root in codex_roots
         }
@@ -126,6 +135,7 @@ def discover_sessions(
                 codex_home=state_home,
                 allow_preexisting_fd_lifecycle=_is_tmux_hosted(root, processes),
                 lifecycle_processes=lifecycle_processes_by_pid[root.pid],
+                shared_lifecycle_processes=shared_lifecycle_processes_by_pid[root.pid],
             )
             if not candidates:
                 continue
@@ -592,13 +602,20 @@ def _lifecycle_candidates_for_root(
     codex_home: Path,
     allow_preexisting_fd_lifecycle: bool = False,
     lifecycle_processes: tuple[ProcessInfo, ...] | None = None,
+    shared_lifecycle_processes: tuple[ProcessInfo, ...] | None = None,
 ) -> tuple[_LifecycleCandidate, ...]:
     lifecycle_processes = lifecycle_processes or (root,)
+    shared_lifecycle_processes = shared_lifecycle_processes or ()
     displayable_hook_states = tuple(
         state for state in hook_states if state.has_turn_activity
     )
+    shared_pids = {process.pid for process in shared_lifecycle_processes}
     candidates = [
-        _hook_lifecycle_candidate(state, scan_terminal_activity(state, codex_home))
+        _hook_lifecycle_candidate(
+            state,
+            scan_terminal_activity(state, codex_home),
+            shared=state.codex_pid in shared_pids,
+        )
         for state in displayable_hook_states
     ]
 
@@ -639,14 +656,64 @@ def _lifecycle_candidates_for_root(
                     binding_evidence=tuple(binding_evidence),
                 )
             )
+
+    # New Codex CLI versions can put the interactive TTY client in front of a
+    # long-lived, shared managed app-server. In that layout the app-server
+    # owns the rollout file and emits the Hook, while the TTY process is not
+    # its child. The caller only supplies this fallback when one live Codex
+    # root owns the directory, so a concurrent same-directory client is never
+    # given another client's lifecycle by cwd alone.
+    for lifecycle_process in shared_lifecycle_processes:
+        for activity in scan_process_terminal_activities(
+            lifecycle_process.pid,
+            proc_root=proc_root,
+            codex_home=codex_home,
+            cwd=None,
+        ):
+            if not _shared_activity_matches_root(
+                activity,
+                root,
+                displayable_hook_states,
+            ):
+                continue
+            if not _is_new_fd_lifecycle(
+                activity,
+                displayable_hook_states,
+                root,
+                allow_preexisting=allow_preexisting_fd_lifecycle,
+            ):
+                continue
+            candidates.append(
+                _LifecycleCandidate(
+                    hook_state=None,
+                    state_activity=activity,
+                    display_status=_lifecycle_display_status(None, activity),
+                    updated_at=activity.last_record_at or 0.0,
+                    binding_method="shared_app_server_session",
+                    binding_confidence=0.85,
+                    binding_evidence=(
+                        "session file bound by the shared managed Codex app-server",
+                        "session cwd and lifecycle time matched the only live Codex terminal in that directory",
+                    ),
+                )
+            )
     return tuple(candidates)
 
 
 def _hook_lifecycle_candidate(
     hook_state: HookSessionState,
     state_activity: SessionActivity | None,
+    *,
+    shared: bool = False,
 ) -> _LifecycleCandidate:
-    if state_activity is not None:
+    if shared:
+        binding_method = "shared_app_server_hook"
+        binding_confidence = 0.85
+        binding_evidence = (
+            "Hook was emitted by the shared managed Codex app-server",
+            "Hook cwd and lifecycle time matched the only live Codex terminal in that directory",
+        )
+    elif state_activity is not None:
         binding_method = "session_id"
         binding_confidence = 1.0
         binding_evidence = (
@@ -871,7 +938,7 @@ def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, .
         for pid, process in processes.items()
         if is_native_codex_process(process)
         and not is_codex_exec_process(process)
-        and not _is_managed_codex_app_server(process)
+        and not _is_codex_app_server_daemon(process)
     }
     visible_codex_pids = {
         pid
@@ -885,6 +952,39 @@ def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, .
         if processes[pid].ppid not in visible_codex_pids
     )
     return tuple(sorted(roots, key=lambda process: process.pid))
+
+
+def _shared_lifecycle_processes_for_root(
+    root: ProcessInfo,
+    roots: tuple[ProcessInfo, ...],
+    processes: dict[int, ProcessInfo],
+) -> tuple[ProcessInfo, ...]:
+    """Return shared managed daemons usable as a conservative lifecycle source.
+
+    A managed app-server normally appears as a child of the interactive Codex
+    process. Recent CLI builds may instead reuse one daemon for several TTY
+    clients, so its parent is unrelated to the client that owns a Hook. There
+    is no PID field in the rollout records; only a unique live root in the
+    Hook's cwd can make this fallback safe enough to use. With two live roots
+    in that cwd we fail closed and preserve the exact-PID behavior.
+    """
+    root_cwd = _normalize_path(root.cwd)
+    if root_cwd is None:
+        return ()
+    same_cwd_roots = tuple(
+        candidate
+        for candidate in roots
+        if _normalize_path(candidate.cwd) == root_cwd
+    )
+    if len(same_cwd_roots) != 1:
+        return ()
+    root_pids = {candidate.pid for candidate in roots}
+    return tuple(
+        process
+        for process in processes.values()
+        if _is_managed_codex_app_server(process)
+        and process.ppid not in root_pids
+    )
 
 
 def _lifecycle_processes_for_root(
@@ -924,6 +1024,20 @@ def _is_managed_codex_app_server(process: ProcessInfo) -> bool:
     except ValueError:
         return False
     return "--managed-daemon" in process.cmdline[app_server_index + 1 :]
+
+
+def _is_codex_app_server_daemon(process: ProcessInfo) -> bool:
+    """Return true for Codex's non-interactive app-server daemon processes."""
+    if not is_native_codex_process(process):
+        return False
+    try:
+        app_server_index = process.cmdline.index("app-server")
+    except ValueError:
+        return False
+    arguments = process.cmdline[app_server_index + 1 :]
+    return "--managed-daemon" in arguments or (
+        bool(arguments) and arguments[0] == "daemon"
+    )
 
 
 def _is_tmux_hosted(
@@ -1025,6 +1139,8 @@ def _hook_states_for_root(
     root: ProcessInfo,
     states: dict[str, tuple[HookSessionState, ...]],
     lifecycle_processes: tuple[ProcessInfo, ...] | None = None,
+    *,
+    shared_lifecycle_processes: tuple[ProcessInfo, ...] = (),
 ) -> tuple[HookSessionState, ...]:
     root_cwd = _normalize_path(root.cwd)
     if root_cwd is None:
@@ -1034,16 +1150,48 @@ def _hook_states_for_root(
         for process in (lifecycle_processes or (root,))
         if _normalize_path(process.cwd) == root_cwd
     }
+    shared_pids = {
+        process.pid: process for process in shared_lifecycle_processes
+    }
     return tuple(
         state
         for state in states.get(root_cwd, ())
-        if (
-            state.codex_pid in lifecycle_pids
-            and not _is_before_process_start(
-                state.updated_at,
-                lifecycle_pids[state.codex_pid],
-            )
+        if _hook_state_matches_root(state, root, lifecycle_pids, shared_pids)
+    )
+
+
+def _hook_state_matches_root(
+    state: HookSessionState,
+    root: ProcessInfo,
+    lifecycle_pids: dict[int, ProcessInfo],
+    shared_pids: dict[int, ProcessInfo],
+) -> bool:
+    if state.codex_pid in lifecycle_pids:
+        return not _is_before_process_start(
+            state.updated_at,
+            lifecycle_pids[state.codex_pid],
         )
+    if state.codex_pid in shared_pids:
+        # The shared daemon predates the terminal client. Its event must be
+        # newer than the client itself, otherwise a new process could inherit
+        # a completed turn from an older process in the same directory.
+        return not _is_before_process_start(state.updated_at, root)
+    return False
+
+
+def _shared_activity_matches_root(
+    activity: SessionActivity,
+    root: ProcessInfo,
+    hook_states: tuple[HookSessionState, ...],
+) -> bool:
+    activity_cwd = _normalize_path(activity.cwd)
+    root_cwd = _normalize_path(root.cwd)
+    if activity_cwd is not None:
+        return activity_cwd == root_cwd
+    return any(
+        state.session_id == activity.session_id
+        and _normalize_path(state.cwd) == root_cwd
+        for state in hook_states
     )
 
 
