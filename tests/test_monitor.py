@@ -101,6 +101,90 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual(sessions, ())
 
+    def test_shared_managed_app_server_binds_session_of_newest_client(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            _write_process(proc, 101, "codex", "S", 1, ["codex"], "/work/a", age_seconds=300)
+            _write_process(proc, 102, "codex", "S", 1, ["codex"], "/work/a", age_seconds=5)
+            _write_process(
+                proc,
+                900,
+                "codex",
+                "S",
+                1,
+                ["/opt/codex/bin/codex", "app-server", "--managed-daemon"],
+                "/home/coder/chat",
+            )
+            _write_session_meta(
+                home,
+                "session-b",
+                cwd="/work/a",
+                created_seconds_ago=3.5,
+            )
+            _hook(hook_log, "user_prompt_submit", "session-b", "turn-b", ppid=900)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].root.pid, 102)
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertEqual(sessions[0].binding_method, "shared_app_server_hook")
+
+    def test_shared_managed_app_server_binds_session_of_older_client(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            _write_process(proc, 101, "codex", "S", 1, ["codex"], "/work/a", age_seconds=150)
+            _write_process(proc, 102, "codex", "S", 1, ["codex"], "/work/a", age_seconds=5)
+            _write_process(
+                proc,
+                900,
+                "codex",
+                "S",
+                1,
+                ["/opt/codex/bin/codex", "app-server", "--managed-daemon"],
+                "/home/coder/chat",
+            )
+            _write_session_meta(
+                home,
+                "session-a",
+                cwd="/work/a",
+                created_seconds_ago=149.5,
+            )
+            _hook(hook_log, "user_prompt_submit", "session-a", "turn-a", ppid=900)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].root.pid, 101)
+        self.assertEqual(sessions[0].binding_method, "shared_app_server_hook")
+
+    def test_shared_managed_app_server_hides_unattributed_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            _write_process(proc, 101, "codex", "S", 1, ["codex"], "/work/a", age_seconds=300)
+            _write_process(proc, 102, "codex", "S", 1, ["codex"], "/work/a", age_seconds=5)
+            _write_process(
+                proc,
+                900,
+                "codex",
+                "S",
+                1,
+                ["/opt/codex/bin/codex", "app-server", "--managed-daemon"],
+                "/home/coder/chat",
+            )
+            # Created long before both live clients: not provably theirs.
+            _write_session_meta(
+                home,
+                "session-a",
+                cwd="/work/a",
+                created_seconds_ago=3600,
+            )
+            _hook(hook_log, "user_prompt_submit", "session-a", "turn-a", ppid=900)
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(sessions, ())
+
     def test_stop_hook_displays_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _root, proc, home, hook_log = _runtime(tmp)
@@ -1853,17 +1937,58 @@ def _write_process(
     ppid: int,
     cmdline: list[str],
     cwd: str,
+    *,
+    age_seconds: float = 199.0,
 ) -> None:
     pid_dir = proc / str(pid)
     (pid_dir / "fd").mkdir(parents=True, exist_ok=True)
-    (pid_dir / "stat").write_text(_stat_line(pid, comm, state, ppid), encoding="utf-8")
+    (pid_dir / "stat").write_text(
+        _stat_line(pid, comm, state, ppid, age_seconds=age_seconds),
+        encoding="utf-8",
+    )
     (pid_dir / "cmdline").write_bytes(b"\0".join(item.encode() for item in cmdline) + b"\0")
     (pid_dir / "cwd").symlink_to(cwd)
     (pid_dir / "exe").symlink_to(f"/usr/bin/{cmdline[0]}")
     (pid_dir / "fd" / "0").symlink_to("/dev/pts/3")
 
 
-def _stat_line(pid: int, comm: str, state: str, ppid: int) -> str:
+_PROC_UPTIME_SECONDS = 200.0
+
+
+def _start_ticks(age_seconds: float) -> int:
+    ticks_per_second = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+    return max(0, int((_PROC_UPTIME_SECONDS - age_seconds) * ticks_per_second))
+
+
+def _write_session_meta(
+    home: Path,
+    session_id: str,
+    *,
+    cwd: str,
+    created_seconds_ago: float,
+) -> Path:
+    """Write the bounded session metadata a shared daemon session exposes."""
+    created_at = time.time() - created_seconds_ago
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(created_at))
+    path = home / "sessions" / "2026" / "07" / "29" / f"rollout-{session_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": stamp,
+        "type": "session_meta",
+        "payload": {"session_id": session_id, "timestamp": stamp, "cwd": cwd},
+    }
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    return path
+
+
+def _stat_line(
+    pid: int,
+    comm: str,
+    state: str,
+    ppid: int,
+    *,
+    age_seconds: float = 199.0,
+) -> str:
     fields = [
         state,
         str(ppid),
@@ -1884,7 +2009,7 @@ def _stat_line(pid: int, comm: str, state: str, ppid: int) -> str:
         "0",
         "1",
         "0",
-        "100",
+        str(_start_ticks(age_seconds)),
     ]
     return f"{pid} ({comm}) {' '.join(fields)}\n"
 

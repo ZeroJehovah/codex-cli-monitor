@@ -41,7 +41,11 @@ from .opencode_state import (
 )
 from .procfs import read_processes
 from .shim import default_log_path, load_launch_records
-from .terminal_state import scan_process_terminal_activities, scan_terminal_activity
+from .terminal_state import (
+    scan_process_terminal_activities,
+    scan_terminal_activity,
+    session_creation_time,
+)
 from .models import CodexSession, CodexStateSummary
 
 
@@ -49,6 +53,16 @@ INACTIVE_ROOT_STATES = {"T", "t", "Z", "X", "x"}
 
 # Label used when Codex reports an approval prompt without naming the tool.
 DEFAULT_CODEX_WAITING_REASON = "approval prompt"
+
+# A Codex TUI client creates its session (thread) right after it starts.  When
+# several live Codex terminals share one directory, a session owned by the
+# shared managed app-server is attributed to the client that started shortly
+# before the session was created, and never to one that started later.
+SHARED_SESSION_START_WINDOW_SECONDS = 15.0
+
+# Older Codex builds record session metadata with whole-second precision, which
+# can land a moment before the millisecond process start it belongs to.
+SHARED_SESSION_CREATED_GRACE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -60,6 +74,21 @@ class _LifecycleCandidate:
     binding_method: str
     binding_confidence: float
     binding_evidence: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _SharedLifecycleSource:
+    """Managed app-server daemons allowed to supply lifecycle for one root.
+
+    ``session_ids`` is ``None`` when the directory holds a single live Codex
+    root, which is the unambiguous case where the cwd alone may bind the shared
+    daemon's sessions.  With several live roots the set names the sessions that
+    provably belong to this root, so a plain same-directory neighbour can never
+    inherit another client's running, success, or failure state.
+    """
+
+    processes: tuple[ProcessInfo, ...] = ()
+    session_ids: frozenset[str] | None = None
 
 
 def inspect_runtime(
@@ -109,11 +138,13 @@ def discover_sessions(
             root.pid: _lifecycle_processes_for_root(root, processes)
             for root in codex_roots
         }
-        shared_lifecycle_processes_by_pid = {
-            root.pid: _shared_lifecycle_processes_for_root(
+        shared_lifecycle_sources_by_pid = {
+            root.pid: _shared_lifecycle_source_for_root(
                 root,
                 codex_roots,
                 processes,
+                codex_home=state_home,
+                hook_states_by_cwd=grouped_hook_states,
             )
             for root in codex_roots
         }
@@ -122,7 +153,12 @@ def discover_sessions(
                 root,
                 grouped_hook_states,
                 lifecycle_processes_by_pid[root.pid],
-                shared_lifecycle_processes=shared_lifecycle_processes_by_pid[root.pid],
+                shared_lifecycle_processes=(
+                    shared_lifecycle_sources_by_pid[root.pid].processes
+                ),
+                shared_session_ids=(
+                    shared_lifecycle_sources_by_pid[root.pid].session_ids
+                ),
             )
             for root in codex_roots
         }
@@ -135,7 +171,12 @@ def discover_sessions(
                 codex_home=state_home,
                 allow_preexisting_fd_lifecycle=_is_tmux_hosted(root, processes),
                 lifecycle_processes=lifecycle_processes_by_pid[root.pid],
-                shared_lifecycle_processes=shared_lifecycle_processes_by_pid[root.pid],
+                shared_lifecycle_processes=(
+                    shared_lifecycle_sources_by_pid[root.pid].processes
+                ),
+                shared_session_ids=(
+                    shared_lifecycle_sources_by_pid[root.pid].session_ids
+                ),
             )
             if not candidates:
                 continue
@@ -603,6 +644,7 @@ def _lifecycle_candidates_for_root(
     allow_preexisting_fd_lifecycle: bool = False,
     lifecycle_processes: tuple[ProcessInfo, ...] | None = None,
     shared_lifecycle_processes: tuple[ProcessInfo, ...] | None = None,
+    shared_session_ids: frozenset[str] | None = None,
 ) -> tuple[_LifecycleCandidate, ...]:
     lifecycle_processes = lifecycle_processes or (root,)
     shared_lifecycle_processes = shared_lifecycle_processes or ()
@@ -660,9 +702,9 @@ def _lifecycle_candidates_for_root(
     # New Codex CLI versions can put the interactive TTY client in front of a
     # long-lived, shared managed app-server. In that layout the app-server
     # owns the rollout file and emits the Hook, while the TTY process is not
-    # its child. The caller only supplies this fallback when one live Codex
-    # root owns the directory, so a concurrent same-directory client is never
-    # given another client's lifecycle by cwd alone.
+    # its child. The caller only supplies this fallback with the sessions it
+    # proved belong to this root, so a concurrent same-directory client is
+    # never given another client's lifecycle by cwd alone.
     for lifecycle_process in shared_lifecycle_processes:
         for activity in scan_process_terminal_activities(
             lifecycle_process.pid,
@@ -670,6 +712,11 @@ def _lifecycle_candidates_for_root(
             codex_home=codex_home,
             cwd=None,
         ):
+            if (
+                shared_session_ids is not None
+                and activity.session_id not in shared_session_ids
+            ):
+                continue
             if not _shared_activity_matches_root(
                 activity,
                 root,
@@ -693,7 +740,7 @@ def _lifecycle_candidates_for_root(
                     binding_confidence=0.85,
                     binding_evidence=(
                         "session file bound by the shared managed Codex app-server",
-                        "session cwd and lifecycle time matched the only live Codex terminal in that directory",
+                        "session cwd, creation time, and lifecycle time matched this Codex terminal",
                     ),
                 )
             )
@@ -711,7 +758,7 @@ def _hook_lifecycle_candidate(
         binding_confidence = 0.85
         binding_evidence = (
             "Hook was emitted by the shared managed Codex app-server",
-            "Hook cwd and lifecycle time matched the only live Codex terminal in that directory",
+            "Hook cwd, session creation time, and lifecycle time matched this Codex terminal",
         )
     elif state_activity is not None:
         binding_method = "session_id"
@@ -954,37 +1001,90 @@ def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, .
     return tuple(sorted(roots, key=lambda process: process.pid))
 
 
-def _shared_lifecycle_processes_for_root(
+def _shared_lifecycle_source_for_root(
     root: ProcessInfo,
     roots: tuple[ProcessInfo, ...],
     processes: dict[int, ProcessInfo],
-) -> tuple[ProcessInfo, ...]:
-    """Return shared managed daemons usable as a conservative lifecycle source.
+    *,
+    codex_home: Path,
+    hook_states_by_cwd: Mapping[str, tuple[HookSessionState, ...]],
+) -> _SharedLifecycleSource:
+    """Return the shared managed daemons usable as lifecycle sources for a root.
 
     A managed app-server normally appears as a child of the interactive Codex
     process. Recent CLI builds may instead reuse one daemon for several TTY
     clients, so its parent is unrelated to the client that owns a Hook. There
-    is no PID field in the rollout records; only a unique live root in the
-    Hook's cwd can make this fallback safe enough to use. With two live roots
-    in that cwd we fail closed and preserve the exact-PID behavior.
+    is no PID field in the rollout records, so the daemon's sessions are bound
+    by directory and creation time: with one live root in the directory the cwd
+    already identifies the client, and with several live roots in the directory
+    only the sessions that were created right after this process started are
+    attributed to it. Anything else stays hidden instead of guessing.
     """
     root_cwd = _normalize_path(root.cwd)
     if root_cwd is None:
-        return ()
+        return _SharedLifecycleSource()
     same_cwd_roots = tuple(
         candidate
         for candidate in roots
         if _normalize_path(candidate.cwd) == root_cwd
     )
-    if len(same_cwd_roots) != 1:
-        return ()
     root_pids = {candidate.pid for candidate in roots}
-    return tuple(
+    shared_processes = tuple(
         process
         for process in processes.values()
         if _is_managed_codex_app_server(process)
         and process.ppid not in root_pids
     )
+    if not shared_processes:
+        return _SharedLifecycleSource()
+    if len(same_cwd_roots) == 1:
+        return _SharedLifecycleSource(shared_processes, None)
+    session_ids = _shared_session_ids_for_root(
+        root,
+        same_cwd_roots,
+        hook_states_by_cwd.get(root_cwd, ()),
+        codex_home,
+    )
+    if not session_ids:
+        return _SharedLifecycleSource()
+    return _SharedLifecycleSource(shared_processes, session_ids)
+
+
+def _shared_session_ids_for_root(
+    root: ProcessInfo,
+    same_cwd_roots: tuple[ProcessInfo, ...],
+    hook_states: tuple[HookSessionState, ...],
+    codex_home: Path,
+) -> frozenset[str]:
+    """Return the shared-daemon sessions that provably belong to this process.
+
+    A Codex TUI client creates its session immediately after it starts.  With
+    several live Codex roots in one directory, a session therefore belongs to
+    the root that started most recently before the session was created, and
+    only when that root started within a bounded window before it.  A session
+    created before every root, or long after all of them, stays unattributed
+    and keeps the row hidden.
+    """
+    owned: set[str] = set()
+    for state in hook_states:
+        created_at = session_creation_time(codex_home, state.session_id)
+        if created_at is None:
+            continue
+        candidates = tuple(
+            candidate
+            for candidate in same_cwd_roots
+            if candidate.started_at is not None
+            and candidate.started_at
+            <= created_at + SHARED_SESSION_CREATED_GRACE_SECONDS
+            and created_at - candidate.started_at
+            <= SHARED_SESSION_START_WINDOW_SECONDS
+        )
+        if not candidates:
+            continue
+        owner = max(candidates, key=lambda candidate: candidate.started_at or 0.0)
+        if owner.pid == root.pid:
+            owned.add(state.session_id)
+    return frozenset(owned)
 
 
 def _lifecycle_processes_for_root(
@@ -1141,6 +1241,7 @@ def _hook_states_for_root(
     lifecycle_processes: tuple[ProcessInfo, ...] | None = None,
     *,
     shared_lifecycle_processes: tuple[ProcessInfo, ...] = (),
+    shared_session_ids: frozenset[str] | None = None,
 ) -> tuple[HookSessionState, ...]:
     root_cwd = _normalize_path(root.cwd)
     if root_cwd is None:
@@ -1156,7 +1257,13 @@ def _hook_states_for_root(
     return tuple(
         state
         for state in states.get(root_cwd, ())
-        if _hook_state_matches_root(state, root, lifecycle_pids, shared_pids)
+        if _hook_state_matches_root(
+            state,
+            root,
+            lifecycle_pids,
+            shared_pids,
+            shared_session_ids,
+        )
     )
 
 
@@ -1165,6 +1272,7 @@ def _hook_state_matches_root(
     root: ProcessInfo,
     lifecycle_pids: dict[int, ProcessInfo],
     shared_pids: dict[int, ProcessInfo],
+    shared_session_ids: frozenset[str] | None,
 ) -> bool:
     if state.codex_pid in lifecycle_pids:
         return not _is_before_process_start(
@@ -1172,6 +1280,11 @@ def _hook_state_matches_root(
             lifecycle_pids[state.codex_pid],
         )
     if state.codex_pid in shared_pids:
+        if (
+            shared_session_ids is not None
+            and state.session_id not in shared_session_ids
+        ):
+            return False
         # The shared daemon predates the terminal client. Its event must be
         # newer than the client itself, otherwise a new process could inherit
         # a completed turn from an older process in the same directory.

@@ -36,10 +36,12 @@
   `turn_complete.error`、`TurnAborted` 等生命周期记录。
 - 共享托管 app-server 的生命周期：新版 Codex CLI 可能把 agent 回合放在一个被多个 TTY
   客户端共用的常驻 managed app-server 里，此时 rollout 文件和 Hook 都属于那个守护进程，
-  而不是交互进程。只有当该目录里只有这一个活跃 Codex 终端时，监控才会用 session 目录
-  加生命周期时间把它的事件绑回该终端；同目录出现第二个活跃终端时按失败关闭，两行都不
-  显示。`codex app-server --managed-daemon`、`codex app-server daemon ...` 这类守护
-  进程只作为信号来源，永远不会被当成用户会话显示。
+  而不是交互进程。监控用 session 目录加 session 创建时间把它的事件绑回对应的终端：目录
+  里只有一个活跃 Codex 终端时目录本身就够用；同目录有多个活跃终端时，该 session 属于
+  创建它之前最近启动、且启动时间不超过一个很窄窗口的那个终端。绑不上的 session 保持
+  隐藏，同目录的邻居永远不会继承别人的运行中/成功/失败状态。`codex app-server
+  --managed-daemon`、`codex app-server daemon ...` 这类守护进程只作为信号来源，永远不
+  会被当成用户会话显示。
 - OpenCode 的 `~/.local/share/opencode/opencode.db`（SQLite）。读取器以只读 URI 打开，
   仅查询 `session`/`message`/`part` 表的最小结构字段（目录、创建/更新时间、
   `role`、`time.completed`、`finish`、工具运行状态），从不清除、写入或锁库。
@@ -1055,8 +1057,8 @@ curl --noproxy '*' https://codex-monitor.aiof.top/healthz
   Codex PID 打开且包含结构化 `task_started`；终端读取器不会用同目录时间接近度猜测其他
   文件。
 - 若 `ps` 里只有交互 `codex` 和 `codex app-server --managed-daemon`，而 Hook 记录的
-  `$PPID` 是那个守护进程，说明该会话由共享 app-server 承载：确认这个目录下只有一个活跃
-  Codex 终端（同目录有两个活跃终端时按设计失败关闭，两行都不显示）。
+  `$PPID` 是那个守护进程，说明该会话由共享 app-server 承载：这类会话靠 session 目录加
+  session 创建时间归属到对应终端。同目录新开、还没提交过任何提示词的终端按设计保持隐藏。
 - 如果移动过仓库，重新安装 Hook。
 
 #### Claude Code 会话不显示

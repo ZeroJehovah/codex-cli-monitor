@@ -42,6 +42,9 @@ TIMESTAMP_GRACE_SECONDS = 5.0
 SESSION_ID_SUFFIX = re.compile(
     r"([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\.jsonl$"
 )
+SESSION_FILENAME_TIMESTAMP = re.compile(
+    r"rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-"
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,7 @@ class _TailCacheEntry:
 
 _TAIL_CACHE: dict[str, _TailCacheEntry] = {}
 _SESSION_PATH_CACHE: dict[tuple[str, str], Path] = {}
+_SESSION_CREATION_CACHE: dict[str, float] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -245,6 +249,80 @@ def _session_cwd(path: Path) -> str | None:
         cwd = record.get("cwd")
         if isinstance(cwd, str) and cwd:
             return cwd
+    return None
+
+
+def session_creation_time(
+    codex_home: Path,
+    session_id: str | None,
+) -> float | None:
+    """Return when a Codex session (thread) was created, if it is known.
+
+    The value is only ever used to attribute a shared managed app-server
+    session to the client that created it: a Codex TUI creates its thread
+    immediately after the process starts, and the app-server records that
+    creation time in the session metadata.  Reading it stays bounded and is
+    cached, because a session id never changes its creation time.
+    """
+    path = _session_path(codex_home, session_id)
+    if path is None:
+        return None
+    key = str(path)
+    with _CACHE_LOCK:
+        cached = _SESSION_CREATION_CACHE.get(key)
+    if cached is not None:
+        return cached
+    created_at = _session_creation_time_from(path)
+    if created_at is None:
+        return None
+    with _CACHE_LOCK:
+        _SESSION_CREATION_CACHE[key] = created_at
+        _prune_cache(_SESSION_CREATION_CACHE)
+    return created_at
+
+
+def _session_creation_time_from(path: Path) -> float | None:
+    created_at = _session_meta_timestamp(path)
+    if created_at is not None:
+        return created_at
+    match = SESSION_FILENAME_TIMESTAMP.search(path.name)
+    if match is None:
+        return None
+    try:
+        stamp = datetime(*[int(part) for part in match.groups()])
+    except ValueError:
+        return None
+    return stamp.astimezone().timestamp()
+
+
+def _session_meta_timestamp(path: Path) -> float | None:
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_SESSION_METADATA_BYTES)
+    except OSError:
+        return None
+    for line in raw.splitlines():
+        if not line or b"\x00" in line:
+            continue
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        payload = record.get("payload")
+        for container in (payload, record):
+            if not isinstance(container, dict):
+                continue
+            value = container.get("timestamp")
+            if not isinstance(value, str):
+                continue
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+            try:
+                return datetime.fromisoformat(value).timestamp()
+            except ValueError:
+                continue
     return None
 
 
