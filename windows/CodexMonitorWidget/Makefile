@@ -20,7 +20,7 @@ BUILDDIR = build
 SRCDIR = src
 
 SOURCES = $(SRCDIR)/main.c $(SRCDIR)/websocket.c
-OBJECTS = $(BUILDDIR)/main.o $(BUILDDIR)/websocket.o
+OBJECTS = $(BUILDDIR)/main.o $(BUILDDIR)/websocket.o $(BUILDDIR)/diagnostics.o
 
 ifneq ($(strip $(WINDRES)),)
 OBJECTS += $(BUILDDIR)/resources.o
@@ -31,10 +31,13 @@ all: $(BUILDDIR) $(TARGET)
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
 
-$(BUILDDIR)/main.o: $(SRCDIR)/main.c $(SRCDIR)/websocket.h
+$(BUILDDIR)/main.o: $(SRCDIR)/main.c $(SRCDIR)/websocket.h $(SRCDIR)/diagnostics.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILDDIR)/websocket.o: $(SRCDIR)/websocket.c $(SRCDIR)/websocket.h
+$(BUILDDIR)/websocket.o: $(SRCDIR)/websocket.c $(SRCDIR)/websocket.h $(SRCDIR)/diagnostics.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILDDIR)/diagnostics.o: $(SRCDIR)/diagnostics.c $(SRCDIR)/diagnostics.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 ifneq ($(strip $(WINDRES)),)

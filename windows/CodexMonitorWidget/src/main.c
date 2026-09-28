@@ -14,6 +14,7 @@
 
 #include "resource.h"
 #include "websocket.h"
+#include "diagnostics.h"
 
 #define APP_CLASS_NAME L"CodexMonitorWidget"
 #define DEFAULT_API_URL L"http://localhost:8765/api/sessions"
@@ -223,6 +224,21 @@ static const COLORREF SERVER_COLORS[SERVER_COLOR_COUNT] = {
 };
 
 static AppState g_app;
+static ULONGLONG last_ws_message_tick;
+static ULONGLONG last_http_result_tick;
+static ULONGLONG last_diagnostic_tick;
+
+static void log_display_state(const char *event) {
+    diagnostics_log("%s sessions=%d rows=%d ws_connected=%d ws_connecting=%d fetching=%ld generation=%ld empty_confirmations=%d dragging=%d",
+        event, g_app.session_count, g_app.row_count, g_app.websocket_connected,
+        g_app.websocket_connecting, g_app.fetching, g_app.transport_generation,
+        g_app.empty_success_count, g_app.dragging);
+    for (int i = 0; i < g_app.session_count; ++i) {
+        diagnostics_log("display_session server=%.128s pid=%d started=%.3f status=%.32s cli=%.32s",
+            g_app.sessions[i].server_id, g_app.sessions[i].pid, g_app.sessions[i].started_at,
+            g_app.sessions[i].status, g_app.sessions[i].cli_type);
+    }
+}
 
 static void set_tooltip_for_hover(int index);
 static void show_context_menu(HWND hwnd, POINT point);
@@ -2217,6 +2233,8 @@ static int fetch_json(char **json, char *error, int error_count) {
     ok = 1;
 
 cleanup:
+    diagnostics_log("http_response ok=%d status=%lu bytes=%lu win32_error=%lu",
+        ok, status_code, total, ok ? 0 : GetLastError());
     if (!ok && *json != NULL) {
         HeapFree(GetProcessHeap(), 0, *json);
         *json = NULL;
@@ -2234,6 +2252,7 @@ cleanup:
 }
 
 static DWORD WINAPI fetch_thread(LPVOID parameter) {
+    ULONGLONG started = GetTickCount64();
     FetchThreadData *thread_data = (FetchThreadData *)parameter;
     FetchResult *result = (FetchResult *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(FetchResult));
     char *json = NULL;
@@ -2251,7 +2270,13 @@ static DWORD WINAPI fetch_thread(LPVOID parameter) {
     } else {
         result->ok = 0;
     }
-    PostMessageW(hwnd, WM_FETCH_DONE, 0, (LPARAM)result);
+    diagnostics_log("http_result ok=%d sessions=%d generation=%ld duration_ms=%llu",
+        result->ok, result->count, result->transport_generation, GetTickCount64() - started);
+    if (!PostMessageW(hwnd, WM_FETCH_DONE, 0, (LPARAM)result)) {
+        diagnostics_log("http_post_failed win32_error=%lu", GetLastError());
+        HeapFree(GetProcessHeap(), 0, result);
+        InterlockedExchange(&g_app.fetching, 0);
+    }
     return 0;
 }
 
@@ -2272,6 +2297,7 @@ static void start_fetch(void) {
     }
     thread_data->hwnd = g_app.hwnd;
     thread_data->transport_generation = g_app.transport_generation;
+    diagnostics_log("http_start generation=%ld", thread_data->transport_generation);
     thread = CreateThread(NULL, 0, fetch_thread, thread_data, 0, NULL);
     if (thread == NULL) {
         HeapFree(GetProcessHeap(), 0, thread_data);
@@ -3924,6 +3950,14 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return 0;
     case WM_TIMER:
         if (wparam == REFRESH_TIMER_ID) {
+            ULONGLONG now = GetTickCount64();
+            if (!last_diagnostic_tick || now - last_diagnostic_tick >= 60000) {
+                diagnostics_log("heartbeat ws_message_seen=%d ws_message_age_ms=%llu http_result_seen=%d http_result_age_ms=%llu",
+                    last_ws_message_tick != 0, last_ws_message_tick ? now - last_ws_message_tick : 0,
+                    last_http_result_tick != 0, last_http_result_tick ? now - last_http_result_tick : 0);
+                log_display_state("heartbeat_display");
+                last_diagnostic_tick = now;
+            }
             /* A WebSocket sends an empty state only when the state changes.
              * Keep polling solely while an old non-empty view is awaiting the
              * consecutive empty confirmations; otherwise WebSocket remains
@@ -3972,6 +4006,10 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return 1;
     case WM_FETCH_DONE: {
         FetchResult *result = (FetchResult *)lparam;
+        last_http_result_tick = GetTickCount64();
+        diagnostics_log("http_dispatch result_generation=%ld current_generation=%ld ws_connected=%d ok=%d sessions=%d",
+            result ? result->transport_generation : -1L, g_app.transport_generation,
+            g_app.websocket_connected, result ? result->ok : 0, result ? result->count : 0);
         if (result != NULL &&
             result->transport_generation == g_app.transport_generation &&
             (!g_app.websocket_connected ||
@@ -4009,6 +4047,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
              * previously visible row. */
             g_app.empty_success_count = 0;
         }
+        log_display_state("http_display_after_dispatch");
         if (result != NULL) {
             HeapFree(GetProcessHeap(), 0, result);
         }
@@ -4024,12 +4063,16 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         g_app.websocket_connected = 1;
         g_app.websocket_connecting = 0;
         InterlockedIncrement(&g_app.transport_generation);
+        diagnostics_log("ws_connected generation=%ld", g_app.transport_generation);
         return 0;
     }
     case WM_WEBSOCKET_MESSAGE: {
         char *json_data = (char *)lparam;
+        last_ws_message_tick = GetTickCount64();
         if (json_data != NULL) {
             FetchResult *result = parse_json_response(json_data);
+            diagnostics_log("ws_dispatch bytes=%llu parse_ok=%d sessions=%d",
+                (unsigned long long)strlen(json_data), result ? result->ok : 0, result ? result->count : 0);
             if (result != NULL && result->ok) {
                 if (result->count > 0 || g_app.session_count == 0) {
                     g_app.session_count = result->count;
@@ -4057,11 +4100,13 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
             if (result != NULL) {
                 HeapFree(GetProcessHeap(), 0, result);
             }
+            log_display_state("ws_display_after_dispatch");
             free(json_data);
         }
         return 0;
     }
     case WM_WEBSOCKET_CLOSED: {
+        diagnostics_log("ws_closed fallback=http");
         g_app.websocket_connected = 0;
         g_app.websocket_connecting = 0;
         InterlockedIncrement(&g_app.transport_generation);
@@ -4178,6 +4223,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         apply_display_font_wheel_delta(GET_WHEEL_DELTA_WPARAM(wparam));
         return 0;
     case WM_DESTROY:
+        diagnostics_log("shutdown reason=window_destroy");
         save_widget_placement();
         KillTimer(hwnd, REFRESH_TIMER_ID);
         KillTimer(hwnd, WEBSOCKET_TIMER_ID);
@@ -4338,6 +4384,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
         return 0;
     }
 
+    diagnostics_init();
     ZeroMemory(&g_app, sizeof(g_app));
     if (!QueryPerformanceFrequency(&g_app.performance_frequency) ||
         g_app.performance_frequency.QuadPart <= 0) {

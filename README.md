@@ -459,6 +459,16 @@ curl -s http://127.0.0.1:8765/healthz | python3 -m json.tool | grep -A 6 claude_
 
 ## 多服务器部署
 
+Windows 悬浮窗自动记录诊断日志，位置为
+`%LOCALAPPDATA%\CodexMonitorWidget\logs`（可直接粘贴到资源管理器地址栏）。
+日志采用 UTC 时间，按分钟分文件；运行中及启动时清理 24 小时前的分钟文件，
+保留精度为一分钟。程序关闭期间不会执行清理，下次启动会补清。
+每分钟最多 64 KiB，超过上限的记录丢弃；磁盘不可写不会阻止悬浮窗运行。
+日志记录 HTTP 状态码/错误码、WebSocket 握手/收包/断开、界面处理结果、
+显示会话的服务器 ID/PID/状态，以及每分钟的连接标记和最后收包距今时间。
+不记录 Token、URL、响应正文、工作目录或对话内容。排查漏显示时，可对比
+`ws_message_received`、`ws_dispatch`、`display_session` 和 `heartbeat`。
+
 多服务器部署包含三个端：
 
 ```text

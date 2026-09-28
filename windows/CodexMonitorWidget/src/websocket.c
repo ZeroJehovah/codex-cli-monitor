@@ -1,4 +1,5 @@
 #include "websocket.h"
+#include "diagnostics.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,6 +79,7 @@ int websocket_connect_async(HWND hwnd, const wchar_t *url, const wchar_t *token)
     WebSocketThreadData *data;
     HANDLE thread;
 
+    diagnostics_log("ws_connect_start");
     data = (WebSocketThreadData *)calloc(1, sizeof(*data));
     if (data == NULL) {
         return 0;
@@ -98,6 +100,7 @@ int websocket_connect_async(HWND hwnd, const wchar_t *url, const wchar_t *token)
     }
     thread = CreateThread(NULL, 0, websocket_thread_proc, data, 0, NULL);
     if (thread == NULL) {
+        diagnostics_log("ws_thread_failed win32_error=%lu", GetLastError());
         free(data);
         return 0;
     }
@@ -219,6 +222,7 @@ static DWORD WINAPI websocket_thread_proc(LPVOID param) {
         request = NULL;
     }
     if (websocket != NULL) {
+        diagnostics_log("ws_upgrade_complete");
         PostMessage(data->hwnd, WM_WEBSOCKET_CONNECTED, 0, 0);
         websocket_receive_loop(websocket, data->hwnd);
         WinHttpCloseHandle(websocket);
@@ -229,6 +233,7 @@ static DWORD WINAPI websocket_thread_proc(LPVOID param) {
     if (session != NULL) {
         WinHttpCloseHandle(session);
     }
+    diagnostics_log("ws_worker_exit win32_error=%lu", GetLastError());
     PostMessage(data->hwnd, WM_WEBSOCKET_CLOSED, 0, 0);
     free(data);
     return 0;
@@ -257,10 +262,12 @@ static HINTERNET websocket_handshake(HINTERNET request, const wchar_t *token) {
             &status_size,
             NULL) ||
         status_code != 101) {
+        diagnostics_log("ws_handshake_failed http_status=%lu win32_error=%lu", status_code, GetLastError());
         return NULL;
     }
     websocket = WinHttpWebSocketCompleteUpgrade(request, 0);
     if (websocket == NULL) {
+        diagnostics_log("ws_upgrade_failed win32_error=%lu", GetLastError());
         return NULL;
     }
     if (token != NULL && token[0] != L'\0') {
@@ -314,6 +321,7 @@ static HINTERNET websocket_handshake(HINTERNET request, const wchar_t *token) {
                 WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
                 auth,
                 (DWORD)auth_length) != ERROR_SUCCESS) {
+            diagnostics_log("ws_auth_send_failed encoding_ok=%d", auth_ok);
             WinHttpWebSocketClose(
                 websocket,
                 WINHTTP_WEB_SOCKET_ENDPOINT_TERMINATED_CLOSE_STATUS,
@@ -343,6 +351,12 @@ static void websocket_receive_loop(HINTERNET websocket, HWND hwnd) {
             &buffer_type
         );
         if (error != ERROR_SUCCESS || buffer_type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
+            USHORT close_status = 0;
+            DWORD consumed = 0;
+            if (error == ERROR_SUCCESS)
+                WinHttpWebSocketQueryCloseStatus(websocket, &close_status, NULL, 0, &consumed);
+            diagnostics_log("ws_receive_end error=%lu close_status=%u partial_bytes=%llu",
+                error, close_status, (unsigned long long)message_length);
             break;
         }
         if (buffer_type != WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE &&
@@ -350,6 +364,7 @@ static void websocket_receive_loop(HINTERNET websocket, HWND hwnd) {
             continue;
         }
         if (bytes_read > MAX_WS_MESSAGE_BYTES - message_length) {
+            diagnostics_log("ws_message_limit_exceeded");
             break;
         }
         {
@@ -363,10 +378,14 @@ static void websocket_receive_loop(HINTERNET websocket, HWND hwnd) {
         message_length += bytes_read;
         message[message_length] = '\0';
         if (buffer_type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
+            diagnostics_log("ws_message_received bytes=%llu", (unsigned long long)message_length);
             char *copy = (char *)malloc(message_length + 1);
             if (copy != NULL) {
                 memcpy(copy, message, message_length + 1);
-                PostMessage(hwnd, WM_WEBSOCKET_MESSAGE, 0, (LPARAM)copy);
+                if (!PostMessage(hwnd, WM_WEBSOCKET_MESSAGE, 0, (LPARAM)copy)) {
+                    diagnostics_log("ws_post_failed win32_error=%lu", GetLastError());
+                    free(copy);
+                }
             }
             free(message);
             message = NULL;
