@@ -44,6 +44,7 @@ from .shim import default_log_path, load_launch_records
 from .terminal_state import (
     scan_process_terminal_activities,
     scan_terminal_activity,
+    session_attach_time,
     session_creation_time,
 )
 from .models import CodexSession, CodexStateSummary
@@ -56,14 +57,16 @@ DEFAULT_CODEX_WAITING_REASON = "approval prompt"
 
 # A shared managed app-server records no client in its rollout files, so the
 # Codex terminal that created a session cannot be read back.  What is
-# structural is that a client can only create a session while it is running and
-# can only run one turn at a time: sessions are handed to the newest live client
-# that already existed when they were created, an open turn prefers a client
-# that is not running another one, and a session created before every live
-# client is never inherited.  Older Codex builds record session metadata with
-# whole-second precision, which can land a moment before the millisecond
+# structural is that a client can only run one turn at a time, and that Codex
+# takes a per-thread writer lock under ``thread-writer-locks`` when a TUI
+# client attaches to a thread: that lock dates the current attachment, so a
+# session is handed to the newest live client that was already running when it
+# was attached (falling back to session creation time), an open turn prefers a
+# client that is not running another one, and a session that predates every
+# live client is never inherited.  Older Codex builds record session metadata
+# with whole-second precision, which can land a moment before the millisecond
 # process start it belongs to.
-SHARED_SESSION_CREATED_GRACE_SECONDS = 1.0
+SHARED_SESSION_REFERENCE_GRACE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -98,8 +101,13 @@ class _SharedSessionRecord:
 
     session_id: str
     cwd: str
-    created_at: float
+    created_at: float | None
     open_turn: bool
+    attached_at: float | None = None
+
+    @property
+    def reference_at(self) -> float | None:
+        return self.attached_at if self.attached_at is not None else self.created_at
 
 
 def inspect_runtime(
@@ -1092,7 +1100,8 @@ def _shared_session_records_by_cwd(
         if normalized is None or not session_id:
             return
         created_at = session_creation_time(codex_home, session_id)
-        if created_at is None:
+        attached_at = session_attach_time(codex_home, session_id)
+        if created_at is None and attached_at is None:
             return
         bucket = buckets.setdefault(normalized, {})
         previous = bucket.get(session_id)
@@ -1102,6 +1111,7 @@ def _shared_session_records_by_cwd(
                 cwd=normalized,
                 created_at=created_at,
                 open_turn=open_turn,
+                attached_at=attached_at,
             )
 
     for cwd, states in hook_states_by_cwd.items():
@@ -1135,15 +1145,17 @@ def _allocate_shared_sessions(
 ) -> dict[int, frozenset[str]]:
     """Hand the shared daemon's sessions to the live clients in one directory.
 
-    Sessions are allocated newest first, so a client keeps the sessions it most
-    recently created: each one goes to the newest live client that already
-    existed when the session was created, an open turn prefers a client that is
-    not already running one, because a single terminal can only run a single
-    turn at a time, and an idle client is served before a client that already
-    has a session. Newest-first order and that spread are what let a live client
-    pick up a session it created long after it started, such as a new
-    conversation or a retried prompt, instead of leaving the live turn invisible
-    or starving a second live terminal of its own row.
+    Sessions are allocated newest first by when the current client attached to
+    them (the thread-writer lock date, falling back to session creation time),
+    so a client keeps the sessions it most recently opened: each one goes to the
+    newest live client that already existed when the session was created or
+    resumed, an open turn prefers a client that is not already running one,
+    because a single terminal can only run a single turn at a time, and an idle
+    client is served before a client that already has a session. Newest-first
+    order and that spread are what let a live client pick up a session it
+    created long after it started or a conversation it resumed from another
+    terminal, without leaving the live turn invisible or starving a second live
+    terminal of its own row.
     """
     ordered_roots = sorted(
         same_cwd_roots,
@@ -1152,13 +1164,17 @@ def _allocate_shared_sessions(
     )
     assigned: dict[int, set[str]] = {root.pid: set() for root in same_cwd_roots}
     open_turn_owners: set[int] = set()
-    for item in sorted(records, key=lambda record: record.created_at, reverse=True):
+    for item in sorted(
+        (record for record in records if record.reference_at is not None),
+        key=lambda record: record.reference_at or 0.0,
+        reverse=True,
+    ):
         eligible = [
             root
             for root in ordered_roots
             if root.started_at is not None
             and root.started_at
-            <= item.created_at + SHARED_SESSION_CREATED_GRACE_SECONDS
+            <= item.reference_at + SHARED_SESSION_REFERENCE_GRACE_SECONDS
         ]
         if not eligible:
             continue

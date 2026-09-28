@@ -18,6 +18,21 @@ from codex_cli_monitor.monitor import discover_sessions, inspect_runtime
 from codex_cli_monitor.terminal_state import MAX_INITIAL_TAIL_BYTES
 
 
+def _write_writer_lock(
+    home: Path,
+    session_id: str,
+    *,
+    attached_seconds_ago: float,
+) -> Path:
+    """Write the Codex thread-writer lock that marks a client attachment."""
+    lock = home / "thread-writer-locks" / f"{session_id}.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("", encoding="utf-8")
+    stamped = time.time() - attached_seconds_ago
+    os.utime(lock, (stamped, stamped))
+    return lock
+
+
 CLAUDE_SESSION_ID = "c578535a-e73e-4f74-86dd-af2273c5375b"
 CLAUDE_CWD = "/work/claude"
 
@@ -222,6 +237,43 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sessions[0].root.pid, 102)
         self.assertEqual(sessions[0].display_status, "运行中")
         self.assertEqual(sessions[0].binding_method, "shared_app_server_hook")
+
+    def test_shared_managed_app_server_binds_resumed_session_to_resuming_client(self) -> None:
+        # A new client resumes an older conversation in the same directory.
+        # The thread predates the new client, so only the writer-lock attach
+        # time (not the session creation time) can prove which terminal owns
+        # it now; the older client keeps its own long-running session.
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            _write_process(proc, 101, "codex", "S", 1, ["codex"], "/work/shared", age_seconds=180)
+            _write_process(proc, 102, "codex", "S", 1, ["codex"], "/work/shared", age_seconds=30)
+            _write_process(
+                proc,
+                900,
+                "codex",
+                "S",
+                1,
+                ["/opt/codex/bin/codex", "app-server", "--managed-daemon"],
+                "/home/coder/chat",
+            )
+            _write_session_meta(home, "session-old", cwd="/work/shared", created_seconds_ago=170)
+            _write_writer_lock(home, "session-old", attached_seconds_ago=170)
+            _hook(hook_log, "user_prompt_submit", "session-old", "turn-old", ppid=900, cwd="/work/shared")
+            _write_session_meta(home, "session-resumed", cwd="/work/shared", created_seconds_ago=120)
+            _write_writer_lock(home, "session-resumed", attached_seconds_ago=25)
+            _hook(hook_log, "user_prompt_submit", "session-resumed", "turn-resumed", ppid=900, cwd="/work/shared")
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        by_pid = {session.root.pid: session for session in sessions}
+        self.assertEqual(sorted(by_pid), [101, 102])
+        self.assertEqual(by_pid[101].display_status, "运行中")
+        self.assertEqual(by_pid[102].display_status, "运行中")
+        self.assertEqual(
+            {session.state_activity.session_id for session in sessions},
+            {"session-old", "session-resumed"},
+        )
+
 
     def test_shared_managed_app_server_keeps_clients_on_their_own_sessions(self) -> None:
         # The idle client keeps its own finished session while the busy client

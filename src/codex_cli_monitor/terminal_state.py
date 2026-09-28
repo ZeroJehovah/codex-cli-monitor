@@ -294,6 +294,32 @@ def _session_creation_time_from(path: Path) -> float | None:
         return None
     return stamp.astimezone().timestamp()
 
+def session_attach_time(
+    codex_home: Path,
+    session_id: str | None,
+) -> float | None:
+    """Return when a client last attached to a Codex session (thread).
+
+    A shared managed app-server never records which terminal owns a rollout, so
+    the thread-writer lock that Codex keeps under ``codex_home/thread-writer-locks``
+    is the only structural record of the client driving a thread: the file exists
+    while a client is attached to it, and its modification time marks that
+    attachment.  A client that resumes an existing conversation therefore claims
+    the session it attached to, instead of losing it to the older client that
+    created the session earlier.
+
+    Unlike a session's creation time the answer is deliberately not cached: a
+    later attachment recreates the lock and moves the modification time forward.
+    """
+    home = codex_home.expanduser()
+    if not _safe_session_id(session_id) or not home.is_dir():
+        return None
+    lock = home / "thread-writer-locks" / f"{session_id}.lock"
+    try:
+        return lock.stat().st_mtime
+    except OSError:
+        return None
+
 
 def _session_meta_timestamp(path: Path) -> float | None:
     try:

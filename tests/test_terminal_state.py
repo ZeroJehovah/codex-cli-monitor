@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -15,6 +16,7 @@ from codex_cli_monitor.terminal_state import (
     _merge_lifecycle_events,
     scan_process_terminal_activities,
     scan_terminal_activity,
+    session_attach_time,
 )
 
 
@@ -363,6 +365,29 @@ def _terminal_line(
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+class SessionAttachTimeTests(unittest.TestCase):
+    def test_session_attach_time_reads_writer_lock_mtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            locks = home / "thread-writer-locks"
+            locks.mkdir()
+            stamp = time.time() - 30.0
+            lock = locks / "session-a.lock"
+            lock.write_text("", encoding="utf-8")
+            os.utime(lock, (stamp, stamp))
+            self.assertAlmostEqual(
+                session_attach_time(home, "session-a"),
+                stamp,
+                delta=0.01,
+            )
+
+    def test_session_attach_time_absent_lock_is_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self.assertIsNone(session_attach_time(home, "session-a"))
+            self.assertIsNone(session_attach_time(home, None))
 
 
 if __name__ == "__main__":
