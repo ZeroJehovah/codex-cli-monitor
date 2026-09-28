@@ -185,6 +185,225 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual(sessions, ())
 
+    def test_shared_managed_app_server_binds_session_created_mid_life(self) -> None:
+        # A client that starts a fresh conversation or retries a prompt long
+        # after launch must not lose that session to the launch-time window.
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            _write_process(proc, 101, "codex", "S", 1, ["codex"], "/work/shared", age_seconds=180)
+            _write_process(proc, 102, "codex", "S", 1, ["codex"], "/work/shared", age_seconds=100)
+            _write_process(
+                proc,
+                900,
+                "codex",
+                "S",
+                1,
+                ["/opt/codex/bin/codex", "app-server", "--managed-daemon"],
+                "/home/coder/chat",
+            )
+            _write_session_meta(
+                home,
+                "session-new",
+                cwd="/work/shared",
+                created_seconds_ago=20,
+            )
+            _hook(
+                hook_log,
+                "user_prompt_submit",
+                "session-new",
+                "turn-new",
+                ppid=900,
+                cwd="/work/shared",
+            )
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].root.pid, 102)
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertEqual(sessions[0].binding_method, "shared_app_server_hook")
+
+    def test_shared_managed_app_server_keeps_clients_on_their_own_sessions(self) -> None:
+        # The idle client keeps its own finished session while the busy client
+        # shows the running session it created later in the same directory.
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            _write_process(proc, 101, "codex", "S", 1, ["codex"], "/work/shared", age_seconds=180)
+            _write_process(proc, 102, "codex", "S", 1, ["codex"], "/work/shared", age_seconds=100)
+            _write_process(
+                proc,
+                900,
+                "codex",
+                "S",
+                1,
+                ["/opt/codex/bin/codex", "app-server", "--managed-daemon"],
+                "/home/coder/chat",
+            )
+            _write_session_meta(
+                home,
+                "session-old",
+                cwd="/work/shared",
+                created_seconds_ago=175,
+            )
+            _hook(
+                hook_log,
+                "user_prompt_submit",
+                "session-old",
+                "turn-old",
+                ppid=900,
+                cwd="/work/shared",
+            )
+            _hook(hook_log, "stop", "session-old", "turn-old", ppid=900, cwd="/work/shared")
+            _write_session_meta(
+                home,
+                "session-done",
+                cwd="/work/shared",
+                created_seconds_ago=60,
+            )
+            _hook(
+                hook_log,
+                "user_prompt_submit",
+                "session-done",
+                "turn-done",
+                ppid=900,
+                cwd="/work/shared",
+            )
+            _hook(
+                hook_log,
+                "stop",
+                "session-done",
+                "turn-done",
+                ppid=900,
+                cwd="/work/shared",
+            )
+            _write_session_meta(
+                home,
+                "session-live",
+                cwd="/work/shared",
+                created_seconds_ago=20,
+            )
+            _hook(
+                hook_log,
+                "user_prompt_submit",
+                "session-live",
+                "turn-live",
+                ppid=900,
+                cwd="/work/shared",
+            )
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        by_pid = {session.root.pid: session for session in sessions}
+        self.assertEqual(sorted(by_pid), [101, 102])
+        self.assertEqual(by_pid[101].display_status, "成功")
+        self.assertEqual(by_pid[102].display_status, "运行中")
+        self.assertEqual(by_pid[102].binding_method, "shared_app_server_hook")
+
+    def test_shared_managed_app_server_gives_two_open_turns_two_clients(self) -> None:
+        # One terminal can only run one turn, so two live turns in one
+        # directory have to be shown on two different clients.
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            _write_process(proc, 101, "codex", "S", 1, ["codex"], "/work/shared", age_seconds=180)
+            _write_process(proc, 102, "codex", "S", 1, ["codex"], "/work/shared", age_seconds=100)
+            _write_process(
+                proc,
+                900,
+                "codex",
+                "S",
+                1,
+                ["/opt/codex/bin/codex", "app-server", "--managed-daemon"],
+                "/home/coder/chat",
+            )
+            _write_session_meta(
+                home,
+                "session-old",
+                cwd="/work/shared",
+                created_seconds_ago=60,
+            )
+            _hook(
+                hook_log,
+                "user_prompt_submit",
+                "session-old",
+                "turn-old",
+                ppid=900,
+                cwd="/work/shared",
+            )
+            _write_session_meta(
+                home,
+                "session-new",
+                cwd="/work/shared",
+                created_seconds_ago=20,
+            )
+            _hook(
+                hook_log,
+                "user_prompt_submit",
+                "session-new",
+                "turn-new",
+                ppid=900,
+                cwd="/work/shared",
+            )
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        by_pid = {session.root.pid: session for session in sessions}
+        self.assertEqual(sorted(by_pid), [101, 102])
+        self.assertEqual(by_pid[101].display_status, "运行中")
+        self.assertEqual(by_pid[102].display_status, "运行中")
+
+    def test_shared_managed_app_server_releases_superseded_open_turn(self) -> None:
+        # A prompt whose turn was already aborted is not an open turn, so it
+        # cannot hide the client that is actually working now.
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, proc, home, hook_log = _runtime(tmp)
+            _write_process(proc, 101, "codex", "S", 1, ["codex"], "/work/shared", age_seconds=180)
+            _write_process(proc, 102, "codex", "S", 1, ["codex"], "/work/shared", age_seconds=100)
+            _write_process(
+                proc,
+                900,
+                "codex",
+                "S",
+                1,
+                ["/opt/codex/bin/codex", "app-server", "--managed-daemon"],
+                "/home/coder/chat",
+            )
+            aborted = _write_session_meta(
+                home,
+                "session-aborted",
+                cwd="/work/shared",
+                created_seconds_ago=60,
+            )
+            _append_terminal(aborted, "turn-aborted", "turn_aborted")
+            _hook(
+                hook_log,
+                "user_prompt_submit",
+                "session-aborted",
+                "turn-aborted",
+                ppid=900,
+                cwd="/work/shared",
+            )
+            _write_session_meta(
+                home,
+                "session-live",
+                cwd="/work/shared",
+                created_seconds_ago=20,
+            )
+            _hook(
+                hook_log,
+                "user_prompt_submit",
+                "session-live",
+                "turn-live",
+                ppid=900,
+                cwd="/work/shared",
+            )
+
+            sessions = discover_sessions(proc, codex_home=home, hook_log=hook_log)
+
+        by_pid = {session.root.pid: session for session in sessions}
+        self.assertEqual(sorted(by_pid), [101, 102])
+        self.assertEqual(by_pid[101].display_status, "失败")
+        self.assertEqual(by_pid[102].display_status, "运行中")
+
     def test_stop_hook_displays_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _root, proc, home, hook_log = _runtime(tmp)
@@ -1830,10 +2049,11 @@ def _hook(
     *,
     ppid: int = 100,
     timestamp: float | None = None,
+    cwd: str = "/work/a",
 ) -> None:
     append_hook_event(
         event,
-        cwd="/work/a",
+        cwd=cwd,
         ppid=ppid,
         timestamp=timestamp,
         path=path,

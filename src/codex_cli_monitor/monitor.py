@@ -54,14 +54,15 @@ INACTIVE_ROOT_STATES = {"T", "t", "Z", "X", "x"}
 # Label used when Codex reports an approval prompt without naming the tool.
 DEFAULT_CODEX_WAITING_REASON = "approval prompt"
 
-# A Codex TUI client creates its session (thread) right after it starts.  When
-# several live Codex terminals share one directory, a session owned by the
-# shared managed app-server is attributed to the client that started shortly
-# before the session was created, and never to one that started later.
-SHARED_SESSION_START_WINDOW_SECONDS = 15.0
-
-# Older Codex builds record session metadata with whole-second precision, which
-# can land a moment before the millisecond process start it belongs to.
+# A shared managed app-server records no client in its rollout files, so the
+# Codex terminal that created a session cannot be read back.  What is
+# structural is that a client can only create a session while it is running and
+# can only run one turn at a time: sessions are handed to the newest live client
+# that already existed when they were created, an open turn prefers a client
+# that is not running another one, and a session created before every live
+# client is never inherited.  Older Codex builds record session metadata with
+# whole-second precision, which can land a moment before the millisecond
+# process start it belongs to.
 SHARED_SESSION_CREATED_GRACE_SECONDS = 1.0
 
 
@@ -89,6 +90,16 @@ class _SharedLifecycleSource:
 
     processes: tuple[ProcessInfo, ...] = ()
     session_ids: frozenset[str] | None = None
+
+
+@dataclass(frozen=True)
+class _SharedSessionRecord:
+    """One shared-daemon session that may belong to a live Codex client."""
+
+    session_id: str
+    cwd: str
+    created_at: float
+    open_turn: bool
 
 
 def inspect_runtime(
@@ -138,16 +149,13 @@ def discover_sessions(
             root.pid: _lifecycle_processes_for_root(root, processes)
             for root in codex_roots
         }
-        shared_lifecycle_sources_by_pid = {
-            root.pid: _shared_lifecycle_source_for_root(
-                root,
-                codex_roots,
-                processes,
-                codex_home=state_home,
-                hook_states_by_cwd=grouped_hook_states,
-            )
-            for root in codex_roots
-        }
+        shared_lifecycle_sources_by_pid = _shared_lifecycle_sources_for_roots(
+            codex_roots,
+            processes,
+            codex_home=state_home,
+            hook_states_by_cwd=grouped_hook_states,
+            proc_root=proc_root,
+        )
         hook_states_by_pid = {
             root.pid: _hook_states_for_root(
                 root,
@@ -1001,34 +1009,26 @@ def _find_codex_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, .
     return tuple(sorted(roots, key=lambda process: process.pid))
 
 
-def _shared_lifecycle_source_for_root(
-    root: ProcessInfo,
+def _shared_lifecycle_sources_for_roots(
     roots: tuple[ProcessInfo, ...],
     processes: dict[int, ProcessInfo],
     *,
     codex_home: Path,
     hook_states_by_cwd: Mapping[str, tuple[HookSessionState, ...]],
-) -> _SharedLifecycleSource:
-    """Return the shared managed daemons usable as lifecycle sources for a root.
+    proc_root: Path,
+) -> dict[int, _SharedLifecycleSource]:
+    """Return the shared managed daemon sessions usable by each live Codex root.
 
     A managed app-server normally appears as a child of the interactive Codex
     process. Recent CLI builds may instead reuse one daemon for several TTY
-    clients, so its parent is unrelated to the client that owns a Hook. There
-    is no PID field in the rollout records, so the daemon's sessions are bound
-    by directory and creation time: with one live root in the directory the cwd
-    already identifies the client, and with several live roots in the directory
-    only the sessions that were created right after this process started are
-    attributed to it. Anything else stays hidden instead of guessing.
+    clients, so its parent is unrelated to the client that owns a Hook, and the
+    rollout records carry no client field at all. The daemon's sessions are
+    therefore allocated inside each directory by session creation time and by
+    open-turn exclusivity, which is the only structural evidence available. A
+    session that predates every live client stays unattributed, so a freshly
+    opened process can never inherit an older client's outcome.
     """
-    root_cwd = _normalize_path(root.cwd)
-    if root_cwd is None:
-        return _SharedLifecycleSource()
-    same_cwd_roots = tuple(
-        candidate
-        for candidate in roots
-        if _normalize_path(candidate.cwd) == root_cwd
-    )
-    root_pids = {candidate.pid for candidate in roots}
+    root_pids = {root.pid for root in roots}
     shared_processes = tuple(
         process
         for process in processes.values()
@@ -1036,55 +1036,144 @@ def _shared_lifecycle_source_for_root(
         and process.ppid not in root_pids
     )
     if not shared_processes:
-        return _SharedLifecycleSource()
-    if len(same_cwd_roots) == 1:
-        return _SharedLifecycleSource(shared_processes, None)
-    session_ids = _shared_session_ids_for_root(
-        root,
-        same_cwd_roots,
-        hook_states_by_cwd.get(root_cwd, ()),
-        codex_home,
+        return {root.pid: _SharedLifecycleSource() for root in roots}
+    records_by_cwd = _shared_session_records_by_cwd(
+        shared_processes,
+        hook_states_by_cwd=hook_states_by_cwd,
+        codex_home=codex_home,
+        proc_root=proc_root,
     )
-    if not session_ids:
-        return _SharedLifecycleSource()
-    return _SharedLifecycleSource(shared_processes, session_ids)
-
-
-def _shared_session_ids_for_root(
-    root: ProcessInfo,
-    same_cwd_roots: tuple[ProcessInfo, ...],
-    hook_states: tuple[HookSessionState, ...],
-    codex_home: Path,
-) -> frozenset[str]:
-    """Return the shared-daemon sessions that provably belong to this process.
-
-    A Codex TUI client creates its session immediately after it starts.  With
-    several live Codex roots in one directory, a session therefore belongs to
-    the root that started most recently before the session was created, and
-    only when that root started within a bounded window before it.  A session
-    created before every root, or long after all of them, stays unattributed
-    and keeps the row hidden.
-    """
-    owned: set[str] = set()
-    for state in hook_states:
-        created_at = session_creation_time(codex_home, state.session_id)
-        if created_at is None:
+    roots_by_cwd: dict[str, list[ProcessInfo]] = {}
+    for root in roots:
+        root_cwd = _normalize_path(root.cwd)
+        if root_cwd is not None:
+            roots_by_cwd.setdefault(root_cwd, []).append(root)
+    sources: dict[int, _SharedLifecycleSource] = {}
+    for root in roots:
+        root_cwd = _normalize_path(root.cwd)
+        same_cwd_roots = tuple(roots_by_cwd.get(root_cwd or "", ()))
+        if root_cwd is None or not same_cwd_roots:
+            sources[root.pid] = _SharedLifecycleSource()
             continue
-        candidates = tuple(
-            candidate
-            for candidate in same_cwd_roots
-            if candidate.started_at is not None
-            and candidate.started_at
-            <= created_at + SHARED_SESSION_CREATED_GRACE_SECONDS
-            and created_at - candidate.started_at
-            <= SHARED_SESSION_START_WINDOW_SECONDS
+        if len(same_cwd_roots) == 1:
+            # A single live client in the directory owns every session in it.
+            sources[root.pid] = _SharedLifecycleSource(shared_processes, None)
+            continue
+        allocated = _allocate_shared_sessions(
+            same_cwd_roots,
+            records_by_cwd.get(root_cwd, ()),
+        ).get(root.pid, frozenset())
+        sources[root.pid] = (
+            _SharedLifecycleSource(shared_processes, allocated)
+            if allocated
+            else _SharedLifecycleSource()
         )
-        if not candidates:
+    return sources
+
+
+def _shared_session_records_by_cwd(
+    shared_processes: tuple[ProcessInfo, ...],
+    *,
+    hook_states_by_cwd: Mapping[str, tuple[HookSessionState, ...]],
+    codex_home: Path,
+    proc_root: Path,
+) -> dict[str, tuple[_SharedSessionRecord, ...]]:
+    """Collect the shared daemon's sessions with their creation and turn state.
+
+    Hook state names the sessions a client submitted work into, while the
+    daemon's own open rollout files also cover a session that entered a Goal
+    directly, without a prompt Hook. A turn that a terminal event already
+    superseded is not open, so an interrupted session cannot claim exclusivity.
+    """
+    buckets: dict[str, dict[str, _SharedSessionRecord]] = {}
+
+    def record(cwd: str | None, session_id: str | None, open_turn: bool) -> None:
+        normalized = _normalize_path(cwd)
+        if normalized is None or not session_id:
+            return
+        created_at = session_creation_time(codex_home, session_id)
+        if created_at is None:
+            return
+        bucket = buckets.setdefault(normalized, {})
+        previous = bucket.get(session_id)
+        if previous is None or (open_turn and not previous.open_turn):
+            bucket[session_id] = _SharedSessionRecord(
+                session_id=session_id,
+                cwd=normalized,
+                created_at=created_at,
+                open_turn=open_turn,
+            )
+
+    for cwd, states in hook_states_by_cwd.items():
+        for state in states:
+            if not state.has_turn_activity:
+                continue
+            activity = scan_terminal_activity(state, codex_home)
+            record(
+                cwd,
+                state.session_id,
+                _lifecycle_display_status(state, activity) in OPEN_TURN_STATUSES,
+            )
+    for process in shared_processes:
+        for activity in scan_process_terminal_activities(
+            process.pid,
+            proc_root=proc_root,
+            codex_home=codex_home,
+            cwd=None,
+        ):
+            record(
+                activity.cwd,
+                activity.session_id,
+                _lifecycle_display_status(None, activity) in OPEN_TURN_STATUSES,
+            )
+    return {cwd: tuple(bucket.values()) for cwd, bucket in buckets.items()}
+
+
+def _allocate_shared_sessions(
+    same_cwd_roots: tuple[ProcessInfo, ...],
+    records: tuple[_SharedSessionRecord, ...],
+) -> dict[int, frozenset[str]]:
+    """Hand the shared daemon's sessions to the live clients in one directory.
+
+    Sessions are allocated newest first, so a client keeps the sessions it most
+    recently created: each one goes to the newest live client that already
+    existed when the session was created, an open turn prefers a client that is
+    not already running one, because a single terminal can only run a single
+    turn at a time, and an idle client is served before a client that already
+    has a session. Newest-first order and that spread are what let a live client
+    pick up a session it created long after it started, such as a new
+    conversation or a retried prompt, instead of leaving the live turn invisible
+    or starving a second live terminal of its own row.
+    """
+    ordered_roots = sorted(
+        same_cwd_roots,
+        key=lambda root: (root.started_at or 0.0, root.pid),
+        reverse=True,
+    )
+    assigned: dict[int, set[str]] = {root.pid: set() for root in same_cwd_roots}
+    open_turn_owners: set[int] = set()
+    for item in sorted(records, key=lambda record: record.created_at, reverse=True):
+        eligible = [
+            root
+            for root in ordered_roots
+            if root.started_at is not None
+            and root.started_at
+            <= item.created_at + SHARED_SESSION_CREATED_GRACE_SECONDS
+        ]
+        if not eligible:
             continue
-        owner = max(candidates, key=lambda candidate: candidate.started_at or 0.0)
-        if owner.pid == root.pid:
-            owned.add(state.session_id)
-    return frozenset(owned)
+        if item.open_turn:
+            free = [root for root in eligible if root.pid not in open_turn_owners]
+            if free:
+                eligible = free
+        unclaimed = [root for root in eligible if not assigned[root.pid]]
+        if unclaimed:
+            eligible = unclaimed
+        owner = eligible[0]
+        assigned[owner.pid].add(item.session_id)
+        if item.open_turn:
+            open_turn_owners.add(owner.pid)
+    return {pid: frozenset(ids) for pid, ids in assigned.items()}
 
 
 def _lifecycle_processes_for_root(
