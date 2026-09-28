@@ -36,9 +36,13 @@
   `turn_complete.error`、`TurnAborted` 等生命周期记录。
 - 共享托管 app-server 的生命周期：新版 Codex CLI 可能把 agent 回合放在一个被多个 TTY
   客户端共用的常驻 managed app-server 里，此时 rollout 文件和 Hook 都属于那个守护进程，
-  而不是交互进程。监控用 session 目录加 session 创建时间把它的事件绑回对应的终端：目录
-  里只有一个活跃 Codex 终端时目录本身就够用；同目录有多个活跃终端时，session 按创建
-  时间从新到旧分配给创建时已经存在的终端，运行中的回合优先分给没有其他运行回合的终端，
+  而不是交互进程。监控用 session 目录加 Codex 的 thread-writer 锁把它的事件绑回对应
+  的终端（锁位于 `~/.codex/thread-writer-locks/<session_id>.lock`，仅在某客户端挂接该会
+  话时存在，修改时间即挂接时间，能识别“恢复旧会话”的新终端；没有锁时回退到 session 创
+  建时间）。目录
+ 里只有一个活跃 Codex 终端时目录本身就够用；同目录有多个活跃终端时，session 按创建
+  时间（无锁则按挂接时间）从新到旧分配给该时间点已经存在的终端，运行中的回合优先分给没
+  有其他运行回合的终端，
   再优先分给尚未获分配 session 的终端。早于所有活跃终端的 session 保持隐藏，因此新开的
   同目录终端不会继承旧会话的运行中/成功/失败；同时一个已运行很久的终端在稍后新建会话或
   重试时，也不会因启动时间窗口而丢失正在运行的状态。`codex app-server --managed-daemon`、
