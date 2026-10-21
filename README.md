@@ -1,26 +1,28 @@
 # codex-cli-monitor
 
-`codex-cli-monitor` 是一个用于观察本机 Codex CLI、OpenCode CLI 和 Claude Code CLI 运行状态的小工具。它的目标是低侵入地显示当前打开了多少个会话，并把每个会话归类为少量可直接使用的状态。
+`codex-cli-monitor` 是一个用于观察本机 Codex CLI、OpenCode CLI、Claude Code CLI 和 Qoder CLI 运行状态的小工具。它的目标是低侵入地显示当前打开了多少个会话，并把每个会话归类为少量可直接使用的状态。
 
 ## 功能
 
-- 扫描当前系统里的 Codex CLI、OpenCode CLI 和 Claude Code CLI 进程，显示会话数量、PID、TTY、工作目录、运行时长等信息。
+- 扫描当前系统里的 Codex CLI、OpenCode CLI、Claude Code CLI 和 Qoder CLI 进程，显示会话数量、PID、TTY、工作目录、运行时长等信息。
 - 使用 Codex 低频 hooks 驱动状态流转，并用最小化结构化终端事件补足失败结果。
 - 把「回合已停下、必须由人回答才能继续」（方案选择、权限授权、确认提示）单独显示为
   `待确认`，而不是继续显示 `运行中`，避免漏掉需要手动操作的会话。
 - 对 OpenCode 会话通过只读 SQLite 旁路读取 `~/.local/share/opencode/opencode.db` 推理状态（运行中/成功/失败），可选安装生命周期 hook 增强绑定，可选安装决策插件识别 `待确认`（OpenCode 只把待回答的提示留在内存里）。
 - 对 Claude Code 会话通过只读读取 `~/.claude/sessions/<PID>.json` 注册文件和绑定的会话
   transcript 推理状态（运行中/待确认/成功/失败），零配置、不安装任何 hook。
+- 对 Qoder CLI 会话通过只读读取由确切 PID 以写方式持有的 run segment JSONL，从结构化
+  `turn`/`permission` 事件推理状态（运行中/待确认/成功/失败），零配置、不安装任何 hook。
 - 保留轻量进程存活检查，用于清理未触发 Hook 就意外退出的会话。
 - 支持 JSON 输出，方便接入脚本或面板。
 - 支持常驻后台 HTTP API，供桌面前端轮询当前会话状态。
-- 支持多服务器采集与聚合：每台服务器本地采集，VPS 聚合服务同时监控自身 Codex/OpenCode/Claude Code 并合并远端状态。
-- 提供轻量原生 Win32 小型悬浮窗前端，用状态圆点展示每个进程，可区分 Codex/OpenCode/Claude Code 并同时显示。
+- 支持多服务器采集与聚合：每台服务器本地采集，VPS 聚合服务同时监控自身 Codex/OpenCode/Claude Code/Qoder 并合并远端状态。
+- 提供轻量原生 Win32 小型悬浮窗前端，用状态圆点展示每个进程，可区分 Codex/OpenCode/Claude Code/Qoder 并同时显示。
 - 提供可选的同名 `codex` shim，用来记录启动元数据后再透明执行真正的 Codex CLI。
 
 ## 大概原理
 
-默认方式是 Hook 状态机加轻量 sidecar：工具独立运行，不修改 Codex/OpenCode/Claude Code，也不要求改变正常使用习惯。它只读取这些必要信号：
+默认方式是 Hook 状态机加轻量 sidecar：工具独立运行，不修改 Codex/OpenCode/Claude Code/Qoder，也不要求改变正常使用习惯。它只读取这些必要信号：
 
 - `/proc` 里的进程、父子关系、命令行、TTY、当前工作目录、进程启动时间，以及由准确
   Codex PID 持有的 session JSONL 文件描述符。
@@ -56,12 +58,17 @@
   `~/.claude/projects/<编码后的 cwd>/<sessionId>.jsonl` transcript 的有界尾部。
   transcript 只识别记录 `type` 和 `isSidechain`、`isApiErrorMessage`、
   `isAbortedMidStream`、`isMeta`、`origin.kind` 这些结构化标记。
+- Qoder CLI 写出的 run segment
+  `<Qoder home>/logs/sessions/<编码后的 cwd>/<session-id>/segments/<run>.jsonl`。监控
+  只接受由确切 Qoder PID 以写方式持有的 segment 文件，并只识别 `turn.started`、
+  `turn.finished`、`permission.requested`/`permission.resolved`、`AskUserQuestion`/
+  `ExitPlanMode` 工具请求等生命周期字段；Qoder 的 transcript 与消息正文完全不读取。
 - 可选 shim 写入的启动记录。
 
 常驻扫描不做 CPU 差值采样，不读取进程网络连接，不扫描运行时诊断数据库，也不根据
 assistant 文本、工具输出或错误关键词推断状态。监控不会输出 session JSONL 的消息正文，
-不会输出 OpenCode 的对话/工具内容，也不会读取或输出 Claude Code transcript 里的提示词、
-回复和工具内容。
+不会输出 OpenCode 的对话/工具内容，也不会读取或输出 Claude Code transcript 或 Qoder
+segment 里的提示词、回复、工具输入输出和错误正文。
 
 监控还会读取 Linux 进程的会话 ID、进程组和终端前台进程组。若 Codex 仍残留在
 `/proc` 中，但其 TTY 已删除、终端前台进程组已失效，或者原终端会话 leader 已经不存
@@ -80,9 +87,10 @@ assistant 文本、工具输出或错误关键词推断状态。监控不会输�
 - `成功`：已显示会话的最近一轮通过 `Stop` 或结构化终端事件完成成功。
 - `失败`：从运行中结束，且最近一轮出现 API/模型错误，或被手动 Ctrl+C 中断。
 
-三种 CLI 共用同一条规则：一个已经停下、没有人回答就无法继续的回合显示为 `待确认`。
+四种 CLI 共用同一条规则：一个已经停下、没有人回答就无法继续的回合显示为 `待确认`。
 它的正向信号分别是 Codex 的 `PermissionRequest` hook、Claude Code 注册文件里的
-`waiting` 状态，以及 OpenCode 决策插件写下的 ask/answer 标记。
+`waiting` 状态、OpenCode 决策插件写下的 ask/answer 标记，以及 Qoder segment 里尚未
+配对的 `permission.requested` 或未完成的 `AskUserQuestion`/`ExitPlanMode` 工具请求。
 
 新打开但尚未提交提示词、也没有进程启动后的准确 PID-open `task_started` 的 Codex 进程
 不会显示；`SessionStart` 本身也不创建状态行。直接 `/goal` 和后续无提交 Hook 的 Goal
@@ -214,6 +222,38 @@ Claude Code 与 Codex/OpenCode 共存显示，使用相同的四种主状态。�
 - 失败不粘连：下一轮成功完成后状态会回到 `成功`。
 
 所有 Claude Code 会话在聚合层、采集快照和 Windows 前端中带 `cli_type=claude` 标识。
+
+### Qoder CLI 状态判定
+
+Qoder CLI 与 Codex/OpenCode/Claude Code 共存显示，使用相同的四种主状态。这条路径同样
+零配置：不安装 hook、不修改 Qoder 本体或它的配置目录，也不读取 `projects/` 下的
+transcript。
+
+- Qoder 为每次交互式运行在
+  `<Qoder home>/logs/sessions/<编码后的 cwd>/<session-id>/segments/<run>.jsonl` 写一份
+  结构化事件流，并在整个运行期间以可写方式持有该文件。监控扫描 `/proc/<pid>/fd`，只
+  接受由这个确切 Qoder PID 以写方式打开的 segment；只读继承的旧 segment 会被忽略，因此
+  同目录多个 Qoder 进程（包括恢复的会话）各自绑定自己的回合，不会互相继承状态。
+- 主线 `turn.started`（`data.is_subagent` 不为 true）证明会话已经真正提交工作；只有
+  启动、MCP 刷新、hook 或子代理事件的进程保持隐藏，与全新 Codex/Claude 会话一致。
+- 主线 `turn.finished` 的 `reason=end_turn` → `成功`；`reason=error` 或带非空
+  `data.error` → `失败`（覆盖 API/模型错误、拒绝、异常工具调用和中断的请求）。没有
+  错误字段的未知完成原因按正常完成处理。失败不粘连：下一轮成功会回到 `成功`。
+- `permission.requested` 与 `permission.resolved` 按 `tool_call_id` 配对；仍有未回答
+  的授权请求时 → `待确认`，`waiting_reason` 只使用 Qoder 的工具名（例如 `Bash`）。
+- 未完成的 `AskUserQuestion` 或 `ExitPlanMode` 工具调用表示会话停在提问或方案批准上
+  → `待确认`；用户回答后工具完成，或下一轮模型请求开始，即自动回到 `运行中`。
+- 子代理回合（`turn.started.data.is_subagent=true`）及其后续事件不参与主线状态，因此
+  子代理成功或失败不会覆盖主会话。
+- 一次性非交互调用（`qoder -p`/`--print`）、没有 TTY 的 headless/remote worker，以及
+  没有任何主线回合的启动阶段都不显示。
+- 只读取 segment 中上述生命周期字段，不读取提示词、assistant 文本、工具输入/输出、
+  权限提示正文或错误正文。segment 解析从上次偏移增量进行，单次读取有上限，坏行与截断
+  行跳过。
+- 自定义 Qoder 配置目录时，把同一个 `QODER_CONFIG_DIR` 提供给监控进程；如果 Qoder 是用
+  `--config-dir <dir>` 启动的，监控也会从命令行识别该目录。未设置时依次尝试
+  `~/.qoder-cn` 和 `~/.qoder`。
+- 所有 Qoder 会话在聚合层、采集快照和 Windows 前端中带 `cli_type=qoder` 标识。
 
 ## 使用方法
 
@@ -350,7 +390,7 @@ PYTHONPATH=src python3 -m codex_cli_monitor --codex-home ~/.codex
 PYTHONPATH=src python3 -m codex_cli_monitor
 ```
 
-表格会多出一列 `CLI`（`codex`、`opencode` 或 `claude`）和一列 `WAITING FOR`：只有
+表格会多出一列 `CLI`（`codex`、`opencode`、`claude` 或 `qoder`）和一列 `WAITING FOR`：只有
 `待确认` 的行会在这里显示它在等什么，其余行显示 `-`。
 
 会话优先由当前进程的 Hook 或 `-s <session-id>` 绑定。按工作目录推断时，候选会话必须
@@ -410,7 +450,7 @@ OpenCode 的 hook 配置在其 `~/.config/opencode/opencode.json` 中，与 Code
 
 同一个二进制也会自动监测 Claude Code CLI，**无需任何安装或配置步骤**。只要
 `claude` 进程在运行、且它已经提交过至少一轮提示词，`codex-monitor --json` 和 HTTP API
-就会把 Claude Code 会话与 Codex/OpenCode 会话一同返回（带 `cli_type: "claude"`）：
+就会把 Claude Code 会话与 Codex/OpenCode/Qoder 会话一同返回（带 `cli_type: "claude"`）：
 
 ```json
 {
@@ -457,6 +497,52 @@ curl -s http://127.0.0.1:8765/healthz | python3 -m json.tool | grep -A 6 claude_
 > 会话退出时注册文件由 Claude Code 自己清理，残留的过期文件也会因 `procStart` 不匹配而
 > 被拒绝，不会产生幽灵状态行。
 
+### 监测 Qoder CLI
+
+同一个二进制也会自动监测 Qoder CLI，**无需任何安装或配置步骤**。只要交互式 `qoder`
+进程在运行、持有自己的 run segment，并且已经提交过至少一轮提示词，`codex-monitor
+--json` 和 HTTP API 就会把 Qoder 会话与 Codex/OpenCode/Claude Code 会话一同返回
+（带 `cli_type: "qoder"`）：
+
+```json
+{
+  "session_count": 1,
+  "sessions": [
+    {
+      "pid": 56681,
+      "status": "待确认",
+      "waiting_reason": "Bash",
+      "cli_type": "qoder",
+      "directory": "/opt/dev/projects/personal/codex-cli-monitor",
+      "started_at": 1782475200.0
+    }
+  ]
+}
+```
+
+Qoder 会话的 `binding_method` 固定为 `qoder_session_segment`，`binding_confidence` 为
+`1.0`——绑定来自 `/proc/<pid>/fd` 中由该确切 PID 以写方式持有的 run segment，不依赖
+工作目录接近度或任何启发式。同一目录下的多个 Qoder 进程因此完全独立。
+
+Qoder 默认使用 `~/.qoder-cn`（CN 构建）或 `~/.qoder`（国际构建），监控会依次尝试。
+如果 Qoder 用 `--config-dir` 启动，监控会自动识别；如果通过环境变量自定义，把同一个
+变量提供给监控进程（systemd 部署时写进 `collector.env` 或 `aggregator.env`）：
+
+```bash
+QODER_CONFIG_DIR=/custom/qoder PYTHONPATH=src python3 -m codex_cli_monitor
+```
+
+`/healthz` 中的 `qoder_state` 字段用于排查这条路径，包含解析出的 home 路径、`logs`/
+`sessions` 目录是否存在、会话目录数量与 segment 文件数量——不含任何会话内容：
+
+```bash
+curl -s http://127.0.0.1:8765/healthz | python3 -m json.tool | grep -A 7 qoder_state
+```
+
+> 说明：不需要给 Qoder 安装 hook，也不读取 Qoder 的 `projects/` transcript。监控只读取
+> Qoder 自己写出的 segment 生命周期事件；`qoder -p` 一次性调用和无 TTY 的后台 worker
+> 按设计排除。进程退出后 segment 不再被持有，对应状态行随之消失。
+
 ## 多服务器部署
 
 Windows 悬浮窗自动记录诊断日志，位置为
@@ -477,8 +563,8 @@ Linux 采集服务器 ─┼─ HTTP(S)/Tailscale ─ VPS 聚合服务 ─ Windo
 VPS 本机 Codex  ──┘                     （同时采集 VPS 本机）
 ```
 
-- VPS 聚合服务接收远端快照，并使用相同的本地采集逻辑显示 VPS 自己的 Codex/OpenCode/Claude Code。
-- 每台 Linux 采集服务器只读取本机 `/proc`、Hook 日志、Hook 精确绑定的 Codex session 文件尾、OpenCode 只读 SQLite 和 Claude Code 的 PID 注册文件与 transcript 尾部，然后异步推送最小状态快照。
+- VPS 聚合服务接收远端快照，并使用相同的本地采集逻辑显示 VPS 自己的 Codex/OpenCode/Claude Code/Qoder。
+- 每台 Linux 采集服务器只读取本机 `/proc`、Hook 日志、Hook 精确绑定的 Codex session 文件尾、OpenCode 只读 SQLite、Claude Code 的 PID 注册文件与 transcript 尾部，以及 Qoder PID 写持有的 segment 事件流，然后异步推送最小状态快照。
 - Hook 始终只写本地文件，不直接访问 VPS；VPS 离线不会阻塞 Codex。
 - Windows 悬浮窗只访问聚合服务，不直接连接每台采集服务器。
 
@@ -1093,6 +1179,22 @@ Claude Code 这条路径不涉及 hook，排查顺序如下：
 - `claude_state.registered_sessions` 为 0 但确有交互式会话在跑，说明监控读到的是另一个
   home 目录。
 
+#### Qoder CLI 会话不显示
+
+Qoder 这条路径同样不涉及 hook，排查顺序如下：
+
+- 确认 `qoder` 进程确实在运行：`pgrep -a -x qoder`。
+- 确认它已经提交过至少一轮提示词。全新打开、仍停在启动/MCP 刷新阶段的会话按设计不显示。
+- 确认进程以写方式持有 run segment：
+  `ls -l /proc/<pid>/fd | grep 'logs/sessions/.*/segments/.*\\.jsonl'`。输出应指向
+  `<Qoder home>/logs/sessions/.../segments/<run>.jsonl`；只有只读的旧 segment 不会显示。
+- 确认运行监控的用户与运行 Qoder 的用户一致；`/healthz` 的 `qoder_state.home`、
+  `sessions_dir_exists`、`session_directories`、`segments` 会显示监控实际看到的状态。
+- 自定义过 Qoder 配置目录时，把 `QODER_CONFIG_DIR` 加进 systemd 的
+  `/etc/codex-cli-monitor/collector.env`（或 `aggregator.env`）并重启服务；用
+  `--config-dir` 启动的 Qoder 无需额外配置。
+- `qoder -p`/`--print` 一次性调用、没有 TTY 的 headless/remote worker 按设计排除。
+
 #### 会话卡在提示上，但仍显示 `运行中`
 
 `待确认` 只来自明确的结构化信号，缺信号时按设计退回 `运行中`。按 CLI 分别检查：
@@ -1106,6 +1208,10 @@ Claude Code 这条路径不涉及 hook，排查顺序如下：
 - Claude Code：无需任何安装。`/healthz` 的 `claude_state.waiting_sessions` 为 0 但确有会话
   停在选择提示上时，通常是监控读到了另一个 home 目录（对比 `claude_state.home`），或该版
   本的 Claude Code 还不会把 `status` 写成 `waiting`。
+- Qoder：无需任何安装。`待确认` 来自 segment 里尚未配对的 `permission.requested` 或未完成
+  的 `AskUserQuestion`/`ExitPlanMode` 工具请求；如果提示已经出现但仍显示 `运行中`，先确认
+  `/healthz` 的 `qoder_state.segments` 大于 0，并确认监控读到的是 Qoder 进程实际使用的
+  home 目录。
 
 反过来，某一行长时间停在 `待确认`：Codex 侧最可能是被批准的命令跑得很久且期间不写
 rollout 记录（见「Codex 待确认判定」的已知取舍）；OpenCode 侧的遗留标记会在 6 小时后
@@ -1166,9 +1272,10 @@ Windows 前端在 `windows/CodexMonitorWidget`。它是一个轻量原生 Win32 
 桌面悬浮窗，同一 Windows 登录会话内只允许启动一个实例；如果已经运行，再次启动
 exe 会直接退出，不会打开第二个悬浮窗。它会轮询 `/api/sessions`，并按目录分组显示
 无表头表格：每行第一列是
-目录名，第二列是该目录下一个或多个带柔化边缘的进程状态圆点。Codex、OpenCode 与
-Claude Code 会话会并列显示在同一张表里，圆点颜色语义相同（蓝色运行中 / 琥珀色待确认 /
-绿色成功 / 红色失败），悬停详情的 `CLI` 行（`codex`、`opencode` 或 `claude`）用于区分。前端按
+目录名，第二列是该目录下一个或多个带柔化边缘的进程状态圆点。Codex、OpenCode、
+Claude Code 与 Qoder 会话会并列显示在同一张表里，圆点颜色语义相同（蓝色运行中 /
+琥珀色待确认 / 绿色成功 / 红色失败），悬停详情的 `CLI` 行（`codex`、`opencode`、
+`claude` 或 `qoder`）用于区分。前端按
 `cli_type` 字段透传显示，新增 CLI 类型无需重新编译 exe。它不依赖
 .NET Runtime 或 Electron。
 
@@ -1306,8 +1413,9 @@ ${XDG_STATE_HOME:-~/.local/state}/codex-cli-monitor/launches.jsonl
 ## 测试
 
 运行后端单元测试（包含 OpenCode SQLite 解析、OpenCode hook 日志与安装器测试、OpenCode
-决策日志与插件安装器测试、Codex `PermissionRequest` 待确认判定，以及 Claude Code 注册绑定
-与 transcript 结局判定测试）：
+决策日志与插件安装器测试、Codex `PermissionRequest` 待确认判定、Claude Code 注册绑定
+与 transcript 结局判定测试，以及 Qoder segment 增量解析、待确认判定与同目录进程独立绑定
+测试）：
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v

@@ -251,6 +251,22 @@ def is_claude_process(process: ProcessInfo) -> bool:
     return bool(_process_names(process).intersection({"claude", "claude.exe"}))
 
 
+def is_qoder_process(process: ProcessInfo) -> bool:
+    """True for a native Qoder CLI process (``qoder``/``qoderclicn``).
+
+    Qoder's launcher is named ``qoder`` or ``qodercn``, while the installed
+    runtime executable is ``qoderclicn-<version>``.  An unrelated process that
+    happens to share a name still stays hidden unless it holds an exact Qoder
+    run segment open.
+    """
+    names = _process_names(process)
+    if names.intersection(
+        {"qoder", "qoder.exe", "qodercn", "qodercn.exe", "qoder-cn", "qoder-cn.exe"}
+    ):
+        return True
+    return any(name.startswith("qoderclicn-") for name in names)
+
+
 def _process_names(process: ProcessInfo) -> set[str]:
     names = {
         _clean_process_name(Path(value).name)

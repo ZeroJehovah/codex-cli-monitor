@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codex-cli-monitor"
 version = "0.2.0"
-description = "Low-intrusion local collector and multi-server Codex monitor."
+description = "Low-intrusion local collector and multi-server monitor for Codex, OpenCode, Claude Code, and Qoder CLI."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

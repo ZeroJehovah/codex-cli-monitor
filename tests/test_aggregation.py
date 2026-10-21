@@ -77,7 +77,7 @@ class AggregationTests(unittest.TestCase):
 
     def test_remote_snapshot_preserves_known_cli_types(self) -> None:
         identity = ServerIdentity("server-a", "Server A", "boot-a")
-        for cli_type in ("codex", "opencode", "claude"):
+        for cli_type in ("codex", "opencode", "claude", "qoder"):
             with self.subTest(cli_type=cli_type):
                 snapshot = build_collector_snapshot(
                     (_session(100, cli_type=cli_type),),
@@ -386,6 +386,17 @@ class AggregationTests(unittest.TestCase):
                 "projects_dir_exists",
                 "registered_sessions",
                 "waiting_sessions",
+            },
+        )
+        self.assertEqual(
+            set(payload["qoder_state"]),
+            {
+                "home",
+                "home_exists",
+                "logs_dir_exists",
+                "sessions_dir_exists",
+                "session_directories",
+                "segments",
             },
         )
         self.assertNotIn("token", json.dumps(payload).lower())

@@ -13,6 +13,7 @@ from codex_cli_monitor.claude_state import (
     encode_project_dir,
     reset_caches as reset_claude_caches,
 )
+from codex_cli_monitor.qoder_state import reset_caches as reset_qoder_caches
 from codex_cli_monitor.hook_state import append_hook_event
 from codex_cli_monitor.monitor import discover_sessions, inspect_runtime
 from codex_cli_monitor.terminal_state import MAX_INITIAL_TAIL_BYTES
@@ -35,6 +36,9 @@ def _write_writer_lock(
 
 CLAUDE_SESSION_ID = "c578535a-e73e-4f74-86dd-af2273c5375b"
 CLAUDE_CWD = "/work/claude"
+
+QODER_SESSION_ID = "543b24ff-c716-440b-83e8-1ccaf2762337"
+QODER_CWD = "/work/qoder"
 
 
 class MonitorTests(unittest.TestCase):
@@ -955,6 +959,182 @@ class ClaudeMonitorTests(unittest.TestCase):
         self.assertEqual(
             [session.cli_type for session in sessions],
             ["codex", "claude"],
+        )
+
+
+class QoderMonitorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_qoder_caches()
+
+    def test_qoder_main_turn_displays_running(self) -> None:
+        with _qoder_runtime() as (proc, _home, segment):
+            _write_qoder_events(
+                segment,
+                [
+                    _qoder_event("turn.started", data={"is_subagent": False}),
+                    _qoder_event("model.request.started"),
+                ],
+            )
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].cli_type, "qoder")
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertEqual(sessions[0].binding_method, "qoder_session_segment")
+        self.assertEqual(sessions[0].inference.status, "running_terminal")
+        self.assertEqual(sessions[0].inference.evidence[0].signal, "qoder_session")
+
+    def test_qoder_without_a_main_turn_is_not_displayed(self) -> None:
+        with _qoder_runtime() as (proc, _home, segment):
+            _write_qoder_events(
+                segment,
+                [
+                    _qoder_event(
+                        "session.phase.finished",
+                        turn_id=None,
+                        data={"phase": "mcp_context.refresh"},
+                    )
+                ],
+            )
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(sessions, ())
+
+    def test_qoder_print_mode_is_not_displayed(self) -> None:
+        with _qoder_runtime(cmdline=["qoder", "-p", "hello"]) as (
+            proc,
+            _home,
+            segment,
+        ):
+            _write_qoder_events(
+                segment,
+                [
+                    _qoder_event("turn.started", data={"is_subagent": False}),
+                    _qoder_event("turn.finished", data={"reason": "end_turn"}),
+                ],
+            )
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(sessions, ())
+
+    def test_qoder_completed_turn_displays_success(self) -> None:
+        with _qoder_runtime() as (proc, _home, segment):
+            _write_qoder_events(
+                segment,
+                [
+                    _qoder_event("turn.started", data={"is_subagent": False}),
+                    _qoder_event("turn.finished", data={"reason": "end_turn"}),
+                ],
+            )
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertEqual(sessions[0].inference.status, "success_terminal")
+
+    def test_qoder_error_finish_displays_failure(self) -> None:
+        with _qoder_runtime() as (proc, _home, segment):
+            _write_qoder_events(
+                segment,
+                [
+                    _qoder_event("turn.started", data={"is_subagent": False}),
+                    _qoder_event("turn.finished", data={"reason": "error"}),
+                ],
+            )
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "失败")
+        self.assertEqual(sessions[0].inference.status, "failure_terminal")
+
+    def test_qoder_permission_request_displays_waiting(self) -> None:
+        with _qoder_runtime() as (proc, _home, segment):
+            _write_qoder_events(
+                segment,
+                [
+                    _qoder_event("turn.started", data={"is_subagent": False}),
+                    _qoder_event(
+                        "permission.requested",
+                        tool_call_id="call-1",
+                        data={"tool_name": "Bash"},
+                    ),
+                ],
+            )
+
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].display_status, "待确认")
+        self.assertEqual(sessions[0].waiting_reason, "Bash")
+        self.assertEqual(
+            sessions[0].inference.status,
+            "waiting_decision_segment",
+        )
+
+    def test_two_qoder_processes_in_one_directory_stay_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "qoder-home"
+            proc.mkdir()
+            _write_common_proc(proc)
+            with patch.dict(os.environ, {"QODER_CONFIG_DIR": str(home)}):
+                _write_process(
+                    proc,
+                    500,
+                    "qoder",
+                    "S",
+                    1,
+                    ["qoder"],
+                    QODER_CWD,
+                )
+                _write_process(
+                    proc,
+                    501,
+                    "qoder",
+                    "S",
+                    1,
+                    ["qoder"],
+                    QODER_CWD,
+                )
+                first = _qoder_segment_path(home, "11111111-1111-1111-1111-111111111111")
+                second = _qoder_segment_path(home, "22222222-2222-2222-2222-222222222222")
+                _write_qoder_events(
+                    first,
+                    [
+                        _qoder_event("turn.started", data={"is_subagent": False}),
+                        _qoder_event(
+                            "permission.requested",
+                            tool_call_id="call-a",
+                            data={"tool_name": "Bash"},
+                        ),
+                    ],
+                )
+                _write_qoder_events(
+                    second,
+                    [
+                        _qoder_event("turn.started", data={"is_subagent": False}),
+                        _qoder_event("turn.finished", data={"reason": "end_turn"}),
+                    ],
+                )
+                _open_qoder_segment(proc, 500, first)
+                _open_qoder_segment(proc, 501, second)
+
+                sessions = discover_sessions(proc)
+
+        self.assertEqual([session.root.pid for session in sessions], [500, 501])
+        self.assertEqual(
+            [session.display_status for session in sessions],
+            ["待确认", "成功"],
+        )
+        self.assertEqual(
+            [session.root.cwd for session in sessions],
+            [QODER_CWD, QODER_CWD],
         )
 
 
@@ -2010,6 +2190,80 @@ def _claude_runtime():
         _write_process(proc, 300, "claude", "S", 1, ["claude"], CLAUDE_CWD)
         with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude_home)}):
             yield proc, claude_home
+
+
+@contextmanager
+def _qoder_runtime(cmdline: list[str] | None = None, pid: int = 500):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        proc = root / "proc"
+        qoder_home = root / "qoder-home"
+        proc.mkdir()
+        _write_common_proc(proc)
+        _write_process(
+            proc,
+            pid,
+            "qoder",
+            "S",
+            1,
+            cmdline or ["qoder"],
+            QODER_CWD,
+        )
+        segment = _qoder_segment_path(qoder_home, QODER_SESSION_ID)
+        _open_qoder_segment(proc, pid, segment)
+        with patch.dict(os.environ, {"QODER_CONFIG_DIR": str(qoder_home)}):
+            yield proc, qoder_home, segment
+
+
+def _qoder_segment_path(home: Path, session_id: str) -> Path:
+    return (
+        home
+        / "logs"
+        / "sessions"
+        / "-work-qoder"
+        / session_id
+        / "segments"
+        / "2026-10-21T12-00-00-000+00-00-run-p500.jsonl"
+    )
+
+
+def _write_qoder_events(path: Path, events: list[dict], *, mode: str = "w") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open(mode, encoding="utf-8") as handle:
+        for event in events:
+            handle.write(json.dumps(event) + "\n")
+
+
+def _qoder_event(
+    event_type: str,
+    *,
+    turn_id: str | None = "turn-qoder",
+    data: dict | None = None,
+    tool_call_id: str | None = None,
+) -> dict:
+    event = {
+        "type": event_type,
+        "ts": "2026-10-21T12:00:00+00:00",
+        "level": "info",
+        "data": data or {},
+    }
+    if turn_id is not None:
+        event["turn_id"] = turn_id
+    if tool_call_id is not None:
+        event["tool_call_id"] = tool_call_id
+    return event
+
+
+def _open_qoder_segment(
+    proc: Path,
+    pid: int,
+    segment: Path,
+    *,
+    fd: int = 5,
+) -> None:
+    fd_dir = proc / str(pid) / "fd"
+    fd_dir.mkdir(parents=True, exist_ok=True)
+    (fd_dir / str(fd)).symlink_to(segment)
 
 
 def _write_claude_registration(

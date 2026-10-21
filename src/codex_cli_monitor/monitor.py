@@ -10,8 +10,10 @@ from .classify import (
     is_codex_exec_process,
     is_native_codex_process,
     is_opencode_process,
+    is_qoder_process,
 )
 from .claude_state import ClaudeSessionState, claude_session_state
+from .qoder_state import QoderSessionState, qoder_session_state
 from .codex_state import default_codex_home
 from .hook_state import HookSessionState, load_hook_events, summarize_hook_events
 from .models import (
@@ -146,7 +148,8 @@ def discover_sessions(
     codex_roots = _find_codex_roots(processes)
     opencode_roots = _find_opencode_roots(processes)
     claude_roots = _find_claude_roots(processes)
-    if not codex_roots and not opencode_roots and not claude_roots:
+    qoder_roots = _find_qoder_roots(processes)
+    if not codex_roots and not opencode_roots and not claude_roots and not qoder_roots:
         return ()
 
     sessions: list[CodexSession] = []
@@ -226,6 +229,10 @@ def discover_sessions(
         )
     if claude_roots:
         sessions.extend(_discover_claude_sessions(claude_roots, processes))
+    if qoder_roots:
+        sessions.extend(
+            _discover_qoder_sessions(qoder_roots, processes, proc_root=proc_root)
+        )
     return tuple(sorted(sessions, key=lambda session: session.root.pid))
 
 
@@ -315,6 +322,100 @@ def _claude_inference(state: ClaudeSessionState) -> Inference:
                 "claude_transcript",
                 f"Claude Code session {state.session_id} completed its last turn; "
                 f"last activity {_age_description(state.last_activity_at)}.",
+            ),
+        ),
+    )
+
+
+def _discover_qoder_sessions(
+    roots: tuple[ProcessInfo, ...],
+    processes: dict[int, ProcessInfo],
+    proc_root: Path = Path("/proc"),
+) -> tuple[CodexSession, ...]:
+    sessions: list[CodexSession] = []
+    for root in roots:
+        state = qoder_session_state(root, proc_root=proc_root)
+        if state is None:
+            continue
+        sessions.append(
+            CodexSession(
+                root=root,
+                descendants=tuple(_collect_descendants(root.pid, processes)),
+                connections=(),
+                inference=_qoder_inference(state),
+                state_activity=None,
+                hook_state=None,
+                launch_record=None,
+                display_status=state.status,
+                binding_method="qoder_session_segment",
+                binding_confidence=1.0,
+                binding_ambiguous=False,
+                binding_candidate_count=1,
+                binding_evidence=(
+                    "process bound by a Qoder run segment JSONL held open for "
+                    "writing by the exact CLI PID",
+                    "lifecycle status read read-only from the segment's "
+                    "structured turn and permission events; no message or "
+                    "tool bodies are read",
+                ),
+                cli_type="qoder",
+                waiting_reason=state.waiting_reason,
+            )
+        )
+    return tuple(sessions)
+
+
+def _qoder_inference(state: QoderSessionState) -> Inference:
+    if state.status == STATUS_WAITING:
+        return Inference(
+            status="waiting_decision_segment",
+            confidence=1.0,
+            evidence=(
+                Evidence(
+                    "qoder_session",
+                    f"Qoder CLI session {state.session_id} has an open turn "
+                    f"blocked on {state.waiting_reason or 'a user decision'} "
+                    "according to its structured permission/question events.",
+                ),
+            ),
+            limitations=(
+                "the session cannot advance until the prompt is answered in "
+                "the Qoder terminal",
+            ),
+        )
+    if state.status == STATUS_RUNNING:
+        return Inference(
+            status="running_terminal",
+            confidence=1.0,
+            evidence=(
+                Evidence(
+                    "qoder_session",
+                    f"Qoder CLI session {state.session_id} has a main turn "
+                    "that has not finished.",
+                ),
+            ),
+        )
+    if state.status == STATUS_FAILURE:
+        return Inference(
+            status="failure_terminal",
+            confidence=1.0,
+            evidence=(
+                Evidence(
+                    "qoder_segment",
+                    f"Qoder CLI session {state.session_id} finished its last "
+                    "turn with a structured error reason.",
+                ),
+            ),
+        )
+    return Inference(
+        status="success_terminal",
+        confidence=1.0,
+        evidence=(
+            Evidence(
+                "qoder_segment",
+                f"Qoder CLI session {state.session_id} completed its last turn "
+                f"successfully; last activity "
+                f"{_age_description(state.last_activity_at)}.",
             ),
         ),
     )
@@ -1300,6 +1401,24 @@ def _find_claude_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, 
         processes[pid]
         for pid in visible_claude_pids
         if processes[pid].ppid not in visible_claude_pids
+    )
+    return tuple(sorted(roots, key=lambda process: process.pid))
+
+
+def _find_qoder_roots(processes: dict[int, ProcessInfo]) -> tuple[ProcessInfo, ...]:
+    qoder_pids = {
+        pid for pid, process in processes.items() if is_qoder_process(process)
+    }
+    visible_qoder_pids = {
+        pid
+        for pid in qoder_pids
+        if processes[pid].state not in INACTIVE_ROOT_STATES
+        and not _is_confirmed_detached_terminal_root(processes[pid], processes)
+    }
+    roots = (
+        processes[pid]
+        for pid in visible_qoder_pids
+        if processes[pid].ppid not in visible_qoder_pids
     )
     return tuple(sorted(roots, key=lambda process: process.pid))
 

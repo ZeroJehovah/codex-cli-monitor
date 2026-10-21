@@ -6,6 +6,7 @@ from codex_cli_monitor.classify import (
     infer_status,
     is_claude_process,
     is_codex_process,
+    is_qoder_process,
 )
 from codex_cli_monitor.hook_state import HookSessionState
 from codex_cli_monitor.models import NetworkConnection, ProcessInfo, SessionActivity
@@ -240,6 +241,26 @@ class ClassifyTests(unittest.TestCase):
     def test_unrelated_process_is_not_claude(self) -> None:
         self.assertFalse(is_claude_process(_process(100, "node", tty="/dev/pts/1")))
         self.assertFalse(is_claude_process(_process(101, "codex", tty="/dev/pts/1")))
+
+    def test_qoder_cli_process_is_recognized(self) -> None:
+        self.assertTrue(is_qoder_process(_process(100, "qoder", tty="/dev/pts/1")))
+        self.assertTrue(
+            is_qoder_process(_process(101, "qodercn", tty="/dev/pts/1"))
+        )
+
+    def test_versioned_qoder_runtime_is_recognized(self) -> None:
+        process = _process(
+            100,
+            "qoderclicn",
+            cmdline=("/home/user/.qoder-cn/bin/qoderclicn/qoderclicn-1.1.75",),
+            tty="/dev/pts/1",
+        )
+
+        self.assertTrue(is_qoder_process(process))
+
+    def test_unrelated_process_is_not_qoder(self) -> None:
+        self.assertFalse(is_qoder_process(_process(100, "node", tty="/dev/pts/1")))
+        self.assertFalse(is_qoder_process(_process(101, "qodersec", tty="/dev/pts/1")))
 
 
 def _process(

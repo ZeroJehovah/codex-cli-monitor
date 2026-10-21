@@ -301,7 +301,7 @@ def _remote_session_payload(
     )
     started_at = _optional_float(item.get("started_at"))
     cli_type = _optional_limited_str(item.get("cli_type"), "session cli_type", 32)
-    if cli_type not in {"codex", "opencode", "claude"}:
+    if cli_type not in {"codex", "opencode", "claude", "qoder"}:
         cli_type = "codex"
     # The waiting reason is a short CLI-authored label, so it is clamped at the
     # source: an oversized one is rejected here rather than silently truncated,
