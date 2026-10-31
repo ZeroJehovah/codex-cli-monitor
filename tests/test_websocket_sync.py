@@ -9,7 +9,11 @@ import threading
 import time
 import unittest
 
-from codex_cli_monitor.aggregation import RemoteSnapshot, ServerIdentity
+from codex_cli_monitor.aggregation import (
+    PROCESS_INSTANCE_ID,
+    RemoteSnapshot,
+    ServerIdentity,
+)
 from codex_cli_monitor.api import ApiConfig, ReusableThreadingHTTPServer, make_api_handler
 from codex_cli_monitor.websocket_sync import SyncWebSocketClient, WebSocketBroadcaster
 
@@ -93,6 +97,10 @@ class WebSocketTests(unittest.TestCase):
             [item["sessions"][0]["status"] for item in client.messages],
             ["运行中", "成功", "失败", "待确认"],
         )
+        self.assertTrue(all(
+            item["instance_id"] == PROCESS_INSTANCE_ID
+            for item in client.messages
+        ))
 
     def test_register_queues_initial_snapshot_before_future_broadcasts(self) -> None:
         class Client:
@@ -188,7 +196,9 @@ class WebSocketTests(unittest.TestCase):
                 self.assertEqual((opcode, json.loads(payload)), (0x1, {"ok": True}))
                 opcode, payload = _read_server_frame(client)
                 self.assertEqual(opcode, 0x1)
-                self.assertEqual(json.loads(payload)["session_count"], 0)
+                initial = json.loads(payload)
+                self.assertEqual(initial["session_count"], 0)
+                self.assertEqual(initial["instance_id"], PROCESS_INSTANCE_ID)
                 client.sendall(_masked_frame(b"", opcode=0x8))
         finally:
             server.shutdown()

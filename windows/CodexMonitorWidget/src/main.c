@@ -28,6 +28,9 @@
 #define WEBSOCKET_TIMER_ID 3
 #define REFRESH_INTERVAL_MS 500
 #define WEBSOCKET_RECONNECT_INTERVAL_MS 5000
+#define WEBSOCKET_CONNECT_TIMEOUT_MS 30000
+#define WEBSOCKET_MAX_AGE_MS 60000
+#define REST_RECONCILE_INTERVAL_MS 5000
 #define EMPTY_RESULT_CONFIRMATIONS 6
 #define ANIMATION_INTERVAL_MS 16
 #define ANIMATION_FRAME_INTERVAL_MS 8
@@ -90,16 +93,17 @@ typedef struct Session {
 } Session;
 
 typedef struct FetchResult {
-    LONG transport_generation;
+    LONG fetch_generation;
     int count;
     int ok;
     char error[256];
+    char instance_id[65];
     Session sessions[MAX_SESSIONS];
 } FetchResult;
 
 typedef struct FetchThreadData {
     HWND hwnd;
-    LONG transport_generation;
+    LONG fetch_generation;
 } FetchThreadData;
 
 typedef struct GlyphVerticalMetrics {
@@ -190,7 +194,14 @@ typedef struct AppState {
     int display_wheel_delta;
     int fetch_completed;
     LONG fetching;
-    LONG transport_generation;
+    LONG fetch_generation;
+    LONG websocket_generation;
+    LONG active_websocket_generation;
+    ULONGLONG websocket_connect_started_tick;
+    ULONGLONG websocket_connected_tick;
+    char authoritative_instance_id[65];
+    char websocket_instance_id[65];
+    int http_identity_resolved;
     char last_error[256];
     IndicatorBitmapCacheEntry indicator_cache[INDICATOR_BITMAP_CACHE_CAPACITY];
     ULONGLONG indicator_cache_clock;
@@ -229,10 +240,10 @@ static ULONGLONG last_http_result_tick;
 static ULONGLONG last_diagnostic_tick;
 
 static void log_display_state(const char *event) {
-    diagnostics_log("%s sessions=%d rows=%d ws_connected=%d ws_connecting=%d fetching=%ld generation=%ld empty_confirmations=%d dragging=%d",
+    diagnostics_log("%s sessions=%d rows=%d ws_connected=%d ws_connecting=%d fetching=%ld ws_generation=%ld http_generation=%ld empty_confirmations=%d dragging=%d",
         event, g_app.session_count, g_app.row_count, g_app.websocket_connected,
-        g_app.websocket_connecting, g_app.fetching, g_app.transport_generation,
-        g_app.empty_success_count, g_app.dragging);
+        g_app.websocket_connecting, g_app.fetching, g_app.websocket_generation,
+        g_app.fetch_generation, g_app.empty_success_count, g_app.dragging);
     for (int i = 0; i < g_app.session_count; ++i) {
         diagnostics_log("display_session server=%.128s pid=%d started=%.3f status=%.32s cli=%.32s",
             g_app.sessions[i].server_id, g_app.sessions[i].pid, g_app.sessions[i].started_at,
@@ -262,6 +273,8 @@ static void resume_edge_tuck_after_drag(void);
 static void settle_dragged_window(void);
 static void clear_indicator_bitmap_cache(void);
 static void release_widget_buffer(WidgetBuffer *buffer);
+static int start_websocket_connection(HWND hwnd, const char *reason);
+static void apply_successful_fetch_result(const FetchResult *result);
 
 /* The HTTP API URL is also the source of the WebSocket authority.  Keep this
  * conversion independent of the configured API path: users may configure the
@@ -2070,6 +2083,12 @@ static void parse_sessions_json(const char *json, FetchResult *result) {
     const char *sessions = strstr(json, "\"sessions\"");
     const char *p;
     result->count = 0;
+    parse_json_string(
+        find_top_level_key(json, end, "instance_id"),
+        end,
+        result->instance_id,
+        sizeof(result->instance_id)
+    );
     if (sessions == NULL) {
         copy_ascii(result->error, sizeof(result->error), "missing sessions");
         result->ok = 0;
@@ -2262,7 +2281,7 @@ static DWORD WINAPI fetch_thread(LPVOID parameter) {
         HeapFree(GetProcessHeap(), 0, thread_data);
         return 1;
     }
-    result->transport_generation = thread_data->transport_generation;
+    result->fetch_generation = thread_data->fetch_generation;
     HeapFree(GetProcessHeap(), 0, thread_data);
     if (fetch_json(&json, result->error, sizeof(result->error))) {
         parse_sessions_json(json, result);
@@ -2271,7 +2290,7 @@ static DWORD WINAPI fetch_thread(LPVOID parameter) {
         result->ok = 0;
     }
     diagnostics_log("http_result ok=%d sessions=%d generation=%ld duration_ms=%llu",
-        result->ok, result->count, result->transport_generation, GetTickCount64() - started);
+        result->ok, result->count, result->fetch_generation, GetTickCount64() - started);
     if (!PostMessageW(hwnd, WM_FETCH_DONE, 0, (LPARAM)result)) {
         diagnostics_log("http_post_failed win32_error=%lu", GetLastError());
         HeapFree(GetProcessHeap(), 0, result);
@@ -2296,8 +2315,8 @@ static void start_fetch(void) {
         return;
     }
     thread_data->hwnd = g_app.hwnd;
-    thread_data->transport_generation = g_app.transport_generation;
-    diagnostics_log("http_start generation=%ld", thread_data->transport_generation);
+    thread_data->fetch_generation = InterlockedIncrement(&g_app.fetch_generation);
+    diagnostics_log("http_start generation=%ld", thread_data->fetch_generation);
     thread = CreateThread(NULL, 0, fetch_thread, thread_data, 0, NULL);
     if (thread == NULL) {
         HeapFree(GetProcessHeap(), 0, thread_data);
@@ -2305,6 +2324,93 @@ static void start_fetch(void) {
         return;
     }
     CloseHandle(thread);
+}
+
+static int session_lists_equal(const FetchResult *result) {
+    int index;
+    if (result->count != g_app.session_count) {
+        return 0;
+    }
+    for (index = 0; index < result->count; index++) {
+        const Session *left = &g_app.sessions[index];
+        const Session *right = &result->sessions[index];
+        if (
+            left->pid != right->pid ||
+            left->started_at != right->started_at ||
+            strcmp(left->status, right->status) != 0 ||
+            strcmp(left->waiting_reason, right->waiting_reason) != 0 ||
+            strcmp(left->directory, right->directory) != 0 ||
+            strcmp(left->started_at_iso, right->started_at_iso) != 0 ||
+            strcmp(left->server_id, right->server_id) != 0 ||
+            strcmp(left->server_name, right->server_name) != 0 ||
+            strcmp(left->cli_type, right->cli_type) != 0
+        ) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void apply_successful_fetch_result(const FetchResult *result) {
+    if (result->count > 0 || g_app.session_count == 0) {
+        if (!session_lists_equal(result)) {
+            g_app.session_count = result->count;
+            memcpy(
+                g_app.sessions,
+                result->sessions,
+                sizeof(Session) * result->count
+            );
+            rebuild_directory_rows();
+        }
+        g_app.empty_success_count = 0;
+    } else {
+        g_app.empty_success_count++;
+        if (g_app.empty_success_count >= EMPTY_RESULT_CONFIRMATIONS) {
+            g_app.session_count = 0;
+            rebuild_directory_rows();
+            g_app.empty_success_count = 0;
+        }
+    }
+    g_app.last_error[0] = '\0';
+    if (g_app.row_count <= 0) {
+        update_directory_column_width();
+    }
+}
+
+static int start_websocket_connection(HWND hwnd, const char *reason) {
+    wchar_t ws_url[1024];
+    LONG generation;
+    if (!g_app.websocket_enabled) {
+        return 0;
+    }
+    if (!build_websocket_url(
+            g_app.api_url,
+            ws_url,
+            (int)(sizeof(ws_url) / sizeof(ws_url[0])))) {
+        diagnostics_log("ws_connect_url_failed reason=%.32s", reason);
+        return 0;
+    }
+    generation = InterlockedIncrement(&g_app.websocket_generation);
+    g_app.websocket_connected = 0;
+    g_app.websocket_connecting = 1;
+    g_app.active_websocket_generation = 0;
+    g_app.websocket_connect_started_tick = GetTickCount64();
+    g_app.websocket_connected_tick = 0;
+    g_app.websocket_instance_id[0] = '\0';
+    diagnostics_log(
+        "ws_connect_request reason=%.32s generation=%ld",
+        reason,
+        generation
+    );
+    if (!websocket_connect_async(
+            hwnd,
+            ws_url,
+            g_app.api_token,
+            generation)) {
+        g_app.websocket_connecting = 0;
+        return 0;
+    }
+    return 1;
 }
 
 static void update_window_region(int actual_width, int visible_width, int height) {
@@ -3925,7 +4031,6 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     switch (message) {
     case WM_CREATE:
         g_app.hwnd = hwnd;
-        g_app.transport_generation = 1;
         g_app.hovered_session = -1;
         g_app.static_buffer_dirty = 1;
         init_tooltip(hwnd);
@@ -3933,15 +4038,17 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         refresh_widget_view();
         SetTimer(hwnd, REFRESH_TIMER_ID, REFRESH_INTERVAL_MS, NULL);
 
-        // Try WebSocket first, fallback to polling
+        // WebSocket is the low-latency transport; REST remains an independent
+        // authority and fallback.
         {
-            wchar_t ws_url[1024];
-            if (build_websocket_url(g_app.api_url, ws_url, (int)(sizeof(ws_url) / sizeof(ws_url[0])))) {
-                g_app.websocket_enabled = 1;
-                g_app.websocket_connecting = 1;
-                if (!websocket_connect_async(hwnd, ws_url, g_app.api_token)) {
-                    g_app.websocket_connecting = 0;
-                }
+            wchar_t probe_url[1024];
+            g_app.websocket_enabled = build_websocket_url(
+                g_app.api_url,
+                probe_url,
+                (int)(sizeof(probe_url) / sizeof(probe_url[0]))
+            );
+            if (g_app.websocket_enabled) {
+                start_websocket_connection(hwnd, "startup");
             }
         }
         SetTimer(hwnd, WEBSOCKET_TIMER_ID, WEBSOCKET_RECONNECT_INTERVAL_MS, NULL);
@@ -3951,6 +4058,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
     case WM_TIMER:
         if (wparam == REFRESH_TIMER_ID) {
             ULONGLONG now = GetTickCount64();
+            int fetch_due;
             if (!last_diagnostic_tick || now - last_diagnostic_tick >= 60000) {
                 diagnostics_log("heartbeat ws_message_seen=%d ws_message_age_ms=%llu http_result_seen=%d http_result_age_ms=%llu",
                     last_ws_message_tick != 0, last_ws_message_tick ? now - last_ws_message_tick : 0,
@@ -3958,12 +4066,26 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
                 log_display_state("heartbeat_display");
                 last_diagnostic_tick = now;
             }
-            /* A WebSocket sends an empty state only when the state changes.
-             * Keep polling solely while an old non-empty view is awaiting the
-             * consecutive empty confirmations; otherwise WebSocket remains
-             * the only live transport. */
-            if (!g_app.websocket_connected ||
-                (g_app.session_count > 0 && g_app.empty_success_count > 0)) {
+            /* REST periodically reconciles the live WebSocket.  This catches
+             * a socket pinned to an old upstream even when it still appears
+             * connected, while WS keeps normal status latency at one second.
+             * Empty results are confirmed faster before clearing visible rows. */
+            if (g_app.websocket_connected) {
+                fetch_due = last_http_result_tick == 0 ||
+                    now - last_http_result_tick >= REST_RECONCILE_INTERVAL_MS;
+            } else {
+                /* A pending handshake is not a live transport.  Poll it at
+                 * reconciliation cadence so startup does not create a burst
+                 * of HTTP threads while giving an immediate polling fallback
+                 * once the handshake has conclusively closed. */
+                fetch_due = !g_app.websocket_connecting ||
+                    last_http_result_tick == 0 ||
+                    now - last_http_result_tick >= REST_RECONCILE_INTERVAL_MS;
+            }
+            if (g_app.session_count > 0 && g_app.empty_success_count > 0) {
+                fetch_due = 1;
+            }
+            if (fetch_due) {
                 if (g_app.dragging) {
                     g_app.drag_refresh_pending = 1;
                 } else {
@@ -3971,14 +4093,21 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
                 }
             }
         } else if (wparam == WEBSOCKET_TIMER_ID) {
-            if (!g_app.websocket_connected && !g_app.websocket_connecting && g_app.websocket_enabled) {
-                // Try reconnect
-                wchar_t ws_url[1024];
-                if (build_websocket_url(g_app.api_url, ws_url, (int)(sizeof(ws_url) / sizeof(ws_url[0])))) {
-                    g_app.websocket_connecting = 1;
-                    if (!websocket_connect_async(hwnd, ws_url, g_app.api_token)) {
-                        g_app.websocket_connecting = 0;
-                    }
+            ULONGLONG now = GetTickCount64();
+            if (g_app.websocket_enabled) {
+                if (g_app.websocket_connected &&
+                    g_app.websocket_connected_tick != 0 &&
+                    now - g_app.websocket_connected_tick >=
+                        WEBSOCKET_MAX_AGE_MS) {
+                    start_websocket_connection(hwnd, "max_age");
+                } else if (g_app.websocket_connecting &&
+                           g_app.websocket_connect_started_tick != 0 &&
+                           now - g_app.websocket_connect_started_tick >=
+                               WEBSOCKET_CONNECT_TIMEOUT_MS) {
+                    start_websocket_connection(hwnd, "connect_timeout");
+                } else if (!g_app.websocket_connected &&
+                           !g_app.websocket_connecting) {
+                    start_websocket_connection(hwnd, "reconnect");
                 }
             }
         } else if (wparam == ANIMATION_TIMER_ID) {
@@ -4008,44 +4137,55 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         FetchResult *result = (FetchResult *)lparam;
         last_http_result_tick = GetTickCount64();
         diagnostics_log("http_dispatch result_generation=%ld current_generation=%ld ws_connected=%d ok=%d sessions=%d",
-            result ? result->transport_generation : -1L, g_app.transport_generation,
+            result ? result->fetch_generation : -1L, g_app.fetch_generation,
             g_app.websocket_connected, result ? result->ok : 0, result ? result->count : 0);
         if (result != NULL &&
-            result->transport_generation == g_app.transport_generation &&
-            (!g_app.websocket_connected ||
-             (result->ok && result->count == 0 &&
-              g_app.session_count > 0 && g_app.empty_success_count > 0))) {
+            result->fetch_generation == g_app.fetch_generation) {
             g_app.fetch_completed = 1;
             if (result->ok) {
-                if (result->count > 0 || g_app.session_count == 0) {
-                    g_app.session_count = result->count;
-                    memcpy(g_app.sessions, result->sessions, sizeof(Session) * result->count);
-                    rebuild_directory_rows();
-                    g_app.empty_success_count = 0;
-                } else {
-                    g_app.empty_success_count++;
-                    if (g_app.empty_success_count >= EMPTY_RESULT_CONFIRMATIONS) {
-                        g_app.session_count = 0;
-                        rebuild_directory_rows();
-                        g_app.empty_success_count = 0;
+                int apply_http_result = 1;
+                g_app.http_identity_resolved = 1;
+                if (result->instance_id[0] != '\0') {
+                    if (strcmp(
+                            g_app.authoritative_instance_id,
+                            result->instance_id) != 0) {
+                        diagnostics_log(
+                            "http_instance authoritative=%.64s previous=%.64s",
+                            result->instance_id,
+                            g_app.authoritative_instance_id);
+                        copy_ascii(
+                            g_app.authoritative_instance_id,
+                            sizeof(g_app.authoritative_instance_id),
+                            result->instance_id
+                        );
                     }
+                    if (g_app.websocket_connected &&
+                        g_app.websocket_instance_id[0] != '\0' &&
+                        strcmp(
+                            g_app.websocket_instance_id,
+                            g_app.authoritative_instance_id) != 0) {
+                        diagnostics_log(
+                            "ws_instance_mismatch source=http ws=%.64s authority=%.64s",
+                            g_app.websocket_instance_id,
+                            g_app.authoritative_instance_id);
+                        start_websocket_connection(
+                            hwnd,
+                            "rest_instance_mismatch"
+                        );
+                    }
+                } else if (g_app.authoritative_instance_id[0] != '\0') {
+                    /* Once identity validation is active, an unversioned
+                     * response is indistinguishable from an old upstream. */
+                    diagnostics_log("http_instance_missing_ignored");
+                    apply_http_result = 0;
                 }
-                g_app.last_error[0] = '\0';
+                if (apply_http_result) {
+                    apply_successful_fetch_result(result);
+                }
             } else {
                 g_app.empty_success_count = 0;
                 copy_ascii(g_app.last_error, sizeof(g_app.last_error), result->error);
             }
-            if (g_app.row_count <= 0) {
-                update_directory_column_width();
-            }
-        } else if (result != NULL &&
-                   g_app.websocket_connected &&
-                   result->transport_generation == g_app.transport_generation &&
-                   !result->ok &&
-                   g_app.session_count > 0) {
-            /* A failed confirmation must not count toward clearing a
-             * previously visible row. */
-            g_app.empty_success_count = 0;
         }
         log_display_state("http_display_after_dispatch");
         if (result != NULL) {
@@ -4060,41 +4200,96 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return 0;
     }
     case WM_WEBSOCKET_CONNECTED: {
+        LONG generation = (LONG)wparam;
+        if (generation != g_app.websocket_generation) {
+            diagnostics_log(
+                "ws_connected_ignored generation=%ld current=%ld",
+                generation,
+                g_app.websocket_generation
+            );
+            return 0;
+        }
         g_app.websocket_connected = 1;
         g_app.websocket_connecting = 0;
-        InterlockedIncrement(&g_app.transport_generation);
-        diagnostics_log("ws_connected generation=%ld", g_app.transport_generation);
+        g_app.active_websocket_generation = generation;
+        g_app.websocket_connected_tick = GetTickCount64();
+        g_app.websocket_instance_id[0] = '\0';
+        diagnostics_log("ws_connected generation=%ld", generation);
+        /* Resolve the authoritative backend identity immediately instead of
+         * trusting whichever upstream happened to accept the socket. */
+        start_fetch();
         return 0;
     }
     case WM_WEBSOCKET_MESSAGE: {
         char *json_data = (char *)lparam;
+        LONG generation = (LONG)wparam;
+        if (generation != g_app.websocket_generation ||
+            generation != g_app.active_websocket_generation) {
+            diagnostics_log(
+                "ws_message_ignored generation=%ld current=%ld active=%ld",
+                generation,
+                g_app.websocket_generation,
+                g_app.active_websocket_generation
+            );
+            free(json_data);
+            return 0;
+        }
         last_ws_message_tick = GetTickCount64();
         if (json_data != NULL) {
             FetchResult *result = parse_json_response(json_data);
-            diagnostics_log("ws_dispatch bytes=%llu parse_ok=%d sessions=%d",
-                (unsigned long long)strlen(json_data), result ? result->ok : 0, result ? result->count : 0);
+            int apply_result = 1;
+            diagnostics_log("ws_dispatch bytes=%llu parse_ok=%d sessions=%d generation=%ld",
+                (unsigned long long)strlen(json_data), result ? result->ok : 0,
+                result ? result->count : 0, generation);
             if (result != NULL && result->ok) {
-                if (result->count > 0 || g_app.session_count == 0) {
-                    g_app.session_count = result->count;
-                    memcpy(g_app.sessions, result->sessions, sizeof(Session) * result->count);
-                    rebuild_directory_rows();
-                    g_app.empty_success_count = 0;
-                } else {
-                    g_app.empty_success_count++;
-                    if (g_app.empty_success_count >= EMPTY_RESULT_CONFIRMATIONS) {
-                        g_app.session_count = 0;
-                        rebuild_directory_rows();
-                        g_app.empty_success_count = 0;
+                if (!g_app.http_identity_resolved) {
+                    diagnostics_log("ws_dispatch_waiting_for_http_identity");
+                    apply_result = 0;
+                } else if (g_app.authoritative_instance_id[0] != '\0') {
+                    if (result->instance_id[0] == '\0' ||
+                        strcmp(
+                            result->instance_id,
+                            g_app.authoritative_instance_id) != 0) {
+                        diagnostics_log(
+                            "ws_instance_mismatch source=ws ws=%.64s authority=%.64s",
+                            result->instance_id,
+                            g_app.authoritative_instance_id);
+                        apply_result = 0;
+                        start_websocket_connection(
+                            hwnd,
+                            "ws_instance_mismatch"
+                        );
                     }
                 }
-                g_app.last_error[0] = '\0';
-                if (g_app.row_count <= 0) {
-                    update_directory_column_width();
+                if (apply_result && result->instance_id[0] != '\0') {
+                    if (g_app.websocket_instance_id[0] != '\0' &&
+                        strcmp(
+                            g_app.websocket_instance_id,
+                            result->instance_id) != 0) {
+                        diagnostics_log(
+                            "ws_instance_changed previous=%.64s current=%.64s",
+                            g_app.websocket_instance_id,
+                            result->instance_id);
+                        apply_result = 0;
+                        start_websocket_connection(
+                            hwnd,
+                            "ws_instance_changed"
+                        );
+                    } else {
+                        copy_ascii(
+                            g_app.websocket_instance_id,
+                            sizeof(g_app.websocket_instance_id),
+                            result->instance_id
+                        );
+                    }
                 }
-                if (g_app.dragging) {
-                    g_app.drag_refresh_pending = 1;
-                } else {
-                    refresh_widget_view();
+                if (apply_result) {
+                    apply_successful_fetch_result(result);
+                    if (g_app.dragging) {
+                        g_app.drag_refresh_pending = 1;
+                    } else {
+                        refresh_widget_view();
+                    }
                 }
             }
             if (result != NULL) {
@@ -4106,10 +4301,24 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         return 0;
     }
     case WM_WEBSOCKET_CLOSED: {
-        diagnostics_log("ws_closed fallback=http");
+        LONG generation = (LONG)wparam;
+        if (generation != g_app.websocket_generation) {
+            diagnostics_log(
+                "ws_closed_ignored generation=%ld current=%ld",
+                generation,
+                g_app.websocket_generation
+            );
+            return 0;
+        }
+        diagnostics_log(
+            "ws_closed generation=%ld fallback=http",
+            generation
+        );
         g_app.websocket_connected = 0;
         g_app.websocket_connecting = 0;
-        InterlockedIncrement(&g_app.transport_generation);
+        g_app.active_websocket_generation = 0;
+        g_app.websocket_connected_tick = 0;
+        g_app.websocket_instance_id[0] = '\0';
         SetTimer(hwnd, REFRESH_TIMER_ID, REFRESH_INTERVAL_MS, NULL);
         return 0;
     }

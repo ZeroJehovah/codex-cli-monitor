@@ -9,6 +9,7 @@ from codex_cli_monitor.api import (
     build_hook_health,
     build_sessions_payload,
 )
+from codex_cli_monitor.aggregation import PROCESS_INSTANCE_ID
 from codex_cli_monitor.install_hooks import install_hooks
 from codex_cli_monitor.models import CodexSession, Inference, ProcessInfo
 
@@ -71,6 +72,7 @@ class ApiTests(unittest.TestCase):
 
         payload = build_sessions_payload((session,), observed_at=1_782_454_000.0)
 
+        self.assertEqual(payload["instance_id"], PROCESS_INSTANCE_ID)
         self.assertEqual(payload["session_count"], 1)
         item = payload["sessions"][0]
         self.assertEqual(item["status"], "成功")
@@ -82,6 +84,18 @@ class ApiTests(unittest.TestCase):
         full = session.to_dict()
         self.assertIn("binding_method", full)
         self.assertIn("binding_evidence", full)
+
+    def test_sessions_payload_instance_identity_is_stable_and_overridable(self) -> None:
+        first = build_sessions_payload((), observed_at=1.0)
+        second = build_sessions_payload((), observed_at=2.0)
+        overridden = build_sessions_payload(
+            (),
+            observed_at=3.0,
+            instance_id="test-instance",
+        )
+
+        self.assertEqual(first["instance_id"], second["instance_id"])
+        self.assertEqual(overridden["instance_id"], "test-instance")
 
 
 if __name__ == "__main__":

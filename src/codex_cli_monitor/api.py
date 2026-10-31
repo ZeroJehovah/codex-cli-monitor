@@ -112,12 +112,14 @@ def build_sessions_payload(
     observed_at: float | None = None,
     identity: ServerIdentity | None = None,
     remote_snapshots: Iterable[RemoteSnapshot] = (),
+    instance_id: str | None = None,
 ) -> dict:
     return _build_sessions_payload(
         sessions,
         identity or resolve_server_identity(),
         remote_snapshots=remote_snapshots,
         observed_at=observed_at,
+        instance_id=instance_id,
     )
 
 
@@ -331,6 +333,7 @@ def make_api_handler(
                 return
             if servers_only:
                 payload = {
+                    "instance_id": payload["instance_id"],
                     "observed_at": payload["observed_at"],
                     "observed_at_iso": payload["observed_at_iso"],
                     "server_count": payload["server_count"],

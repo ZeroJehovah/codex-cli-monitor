@@ -339,10 +339,12 @@ API 会返回每个 Codex 进程的主状态、目录和启动时间，示例字
 
 启用 `--ws-enabled` 后，前端可通过同一 HTTP 端口的 `/ws` 路径建立 WebSocket 连接；
 连接完成后发送 `{"token":"..."}`，服务端先返回鉴权确认，再发送初始快照和后续状态
-变化。Cloudflare Tunnel 只需要继续反代原来的 HTTP 端口。
+变化。REST 与 WebSocket 响应都带有非敏感的服务进程级 `instance_id`，客户端可据此
+识别仍能响应请求但已经过期的上游。Cloudflare Tunnel 只需要继续反代原来的 HTTP 端口。
 
 ```json
 {
+  "instance_id": "0d6b7f6a4dd14db49f6b2e2f9c93c650",
   "session_count": 1,
   "sessions": [
     {
@@ -1270,7 +1272,9 @@ sudo systemctl status codex-monitor-collector.service
 
 Windows 前端在 `windows/CodexMonitorWidget`。它是一个轻量原生 Win32 小型矩形
 桌面悬浮窗，同一 Windows 登录会话内只允许启动一个实例；如果已经运行，再次启动
-exe 会直接退出，不会打开第二个悬浮窗。它会轮询 `/api/sessions`，并按目录分组显示
+exe 会直接退出，不会打开第二个悬浮窗。它通过 WebSocket 接收秒级状态变化，同时每
+5 秒用 `/api/sessions` 做一次权威对账；连接超过 60 秒会主动轮换，来自旧连接或旧
+后端实例的消息会被丢弃。它按目录分组显示
 无表头表格：每行第一列是
 目录名，第二列是该目录下一个或多个带柔化边缘的进程状态圆点。Codex、OpenCode、
 Claude Code 与 Qoder 会话会并列显示在同一张表里，圆点颜色语义相同（蓝色运行中 /

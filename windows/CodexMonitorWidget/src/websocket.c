@@ -10,12 +10,17 @@
 
 typedef struct {
     HWND hwnd;
+    LONG connection_generation;
     wchar_t host[256];
     wchar_t path[768];
     wchar_t token[512];
     INTERNET_PORT port;
     int use_ssl;
 } WebSocketThreadData;
+
+static SRWLOCK websocket_state_lock = SRWLOCK_INIT;
+static HINTERNET active_websocket = NULL;
+static LONG current_connection_generation = 0;
 
 static DWORD WINAPI websocket_thread_proc(LPVOID param);
 static int parse_websocket_url(
@@ -28,7 +33,71 @@ static int parse_websocket_url(
     int *use_ssl
 );
 static HINTERNET websocket_handshake(HINTERNET request, const wchar_t *token);
-static void websocket_receive_loop(HINTERNET websocket, HWND hwnd);
+static void websocket_receive_loop(
+    HINTERNET websocket,
+    HWND hwnd,
+    LONG connection_generation
+);
+
+static void websocket_replace_generation(LONG connection_generation) {
+    HINTERNET previous;
+    AcquireSRWLockExclusive(&websocket_state_lock);
+    current_connection_generation = connection_generation;
+    previous = active_websocket;
+    active_websocket = NULL;
+    if (previous != NULL) {
+        diagnostics_log(
+            "ws_shutdown_superseded generation=%ld",
+            connection_generation
+        );
+        WinHttpWebSocketShutdown(
+            previous,
+            WINHTTP_WEB_SOCKET_ENDPOINT_TERMINATED_CLOSE_STATUS,
+            NULL,
+            0
+        );
+    }
+    ReleaseSRWLockExclusive(&websocket_state_lock);
+}
+
+static int websocket_generation_is_current(LONG connection_generation) {
+    int current;
+    AcquireSRWLockShared(&websocket_state_lock);
+    current = current_connection_generation == connection_generation;
+    ReleaseSRWLockShared(&websocket_state_lock);
+    return current;
+}
+
+static int websocket_register_active(
+    HINTERNET websocket,
+    LONG connection_generation
+) {
+    int accepted = 0;
+    AcquireSRWLockExclusive(&websocket_state_lock);
+    if (
+        current_connection_generation == connection_generation &&
+        active_websocket == NULL
+    ) {
+        active_websocket = websocket;
+        accepted = 1;
+    }
+    ReleaseSRWLockExclusive(&websocket_state_lock);
+    return accepted;
+}
+
+static void websocket_clear_active(
+    HINTERNET websocket,
+    LONG connection_generation
+) {
+    AcquireSRWLockExclusive(&websocket_state_lock);
+    if (
+        active_websocket == websocket &&
+        current_connection_generation == connection_generation
+    ) {
+        active_websocket = NULL;
+    }
+    ReleaseSRWLockExclusive(&websocket_state_lock);
+}
 
 static int append_json_escaped_utf8(
     char *output,
@@ -75,7 +144,12 @@ static int append_json_escaped_utf8(
     return 1;
 }
 
-int websocket_connect_async(HWND hwnd, const wchar_t *url, const wchar_t *token) {
+int websocket_connect_async(
+    HWND hwnd,
+    const wchar_t *url,
+    const wchar_t *token,
+    LONG connection_generation
+) {
     WebSocketThreadData *data;
     HANDLE thread;
 
@@ -85,6 +159,7 @@ int websocket_connect_async(HWND hwnd, const wchar_t *url, const wchar_t *token)
         return 0;
     }
     data->hwnd = hwnd;
+    data->connection_generation = connection_generation;
     wcsncpy(data->token, token != NULL ? token : L"", 511);
     data->token[511] = L'\0';
     if (!parse_websocket_url(
@@ -98,6 +173,7 @@ int websocket_connect_async(HWND hwnd, const wchar_t *url, const wchar_t *token)
         free(data);
         return 0;
     }
+    websocket_replace_generation(connection_generation);
     thread = CreateThread(NULL, 0, websocket_thread_proc, data, 0, NULL);
     if (thread == NULL) {
         diagnostics_log("ws_thread_failed win32_error=%lu", GetLastError());
@@ -199,6 +275,9 @@ static DWORD WINAPI websocket_thread_proc(LPVOID param) {
         0
     );
     if (session != NULL) {
+        /* Do not expire a healthy idle socket from the receive timeout.  The
+         * widget explicitly shuts it down on generation changes and max age. */
+        WinHttpSetTimeouts(session, 3000, 3000, 5000, 0);
         connection = WinHttpConnect(session, data->host, data->port, 0);
     }
     if (connection != NULL) {
@@ -222,9 +301,38 @@ static DWORD WINAPI websocket_thread_proc(LPVOID param) {
         request = NULL;
     }
     if (websocket != NULL) {
-        diagnostics_log("ws_upgrade_complete");
-        PostMessage(data->hwnd, WM_WEBSOCKET_CONNECTED, 0, 0);
-        websocket_receive_loop(websocket, data->hwnd);
+        if (!websocket_register_active(
+                websocket,
+                data->connection_generation)) {
+            diagnostics_log(
+                "ws_upgrade_superseded generation=%ld",
+                data->connection_generation
+            );
+            WinHttpCloseHandle(websocket);
+            websocket = NULL;
+        } else {
+            diagnostics_log(
+                "ws_upgrade_complete generation=%ld",
+                data->connection_generation
+            );
+            PostMessage(
+                data->hwnd,
+                WM_WEBSOCKET_CONNECTED,
+                (WPARAM)data->connection_generation,
+                0
+            );
+            websocket_receive_loop(
+                websocket,
+                data->hwnd,
+                data->connection_generation
+            );
+            websocket_clear_active(
+                websocket,
+                data->connection_generation
+            );
+        }
+    }
+    if (websocket != NULL) {
         WinHttpCloseHandle(websocket);
     }
     if (connection != NULL) {
@@ -233,8 +341,17 @@ static DWORD WINAPI websocket_thread_proc(LPVOID param) {
     if (session != NULL) {
         WinHttpCloseHandle(session);
     }
-    diagnostics_log("ws_worker_exit win32_error=%lu", GetLastError());
-    PostMessage(data->hwnd, WM_WEBSOCKET_CLOSED, 0, 0);
+    diagnostics_log(
+        "ws_worker_exit generation=%ld win32_error=%lu",
+        data->connection_generation,
+        GetLastError()
+    );
+    PostMessage(
+        data->hwnd,
+        WM_WEBSOCKET_CLOSED,
+        (WPARAM)data->connection_generation,
+        0
+    );
     free(data);
     return 0;
 }
@@ -335,7 +452,11 @@ static HINTERNET websocket_handshake(HINTERNET request, const wchar_t *token) {
     return websocket;
 }
 
-static void websocket_receive_loop(HINTERNET websocket, HWND hwnd) {
+static void websocket_receive_loop(
+    HINTERNET websocket,
+    HWND hwnd,
+    LONG connection_generation
+) {
     char buffer[8192];
     char *message = NULL;
     size_t message_length = 0;
@@ -343,6 +464,13 @@ static void websocket_receive_loop(HINTERNET websocket, HWND hwnd) {
     for (;;) {
         DWORD bytes_read = 0;
         WINHTTP_WEB_SOCKET_BUFFER_TYPE buffer_type;
+        if (!websocket_generation_is_current(connection_generation)) {
+            diagnostics_log(
+                "ws_receive_superseded generation=%ld",
+                connection_generation
+            );
+            break;
+        }
         DWORD error = WinHttpWebSocketReceive(
             websocket,
             buffer,
@@ -382,7 +510,11 @@ static void websocket_receive_loop(HINTERNET websocket, HWND hwnd) {
             char *copy = (char *)malloc(message_length + 1);
             if (copy != NULL) {
                 memcpy(copy, message, message_length + 1);
-                if (!PostMessage(hwnd, WM_WEBSOCKET_MESSAGE, 0, (LPARAM)copy)) {
+                if (!PostMessage(
+                        hwnd,
+                        WM_WEBSOCKET_MESSAGE,
+                        (WPARAM)connection_generation,
+                        (LPARAM)copy)) {
                     diagnostics_log("ws_post_failed win32_error=%lu", GetLastError());
                     free(copy);
                 }

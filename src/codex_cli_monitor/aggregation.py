@@ -5,6 +5,7 @@ import re
 import socket
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,10 @@ SNAPSHOT_SCHEMA_VERSION = 1
 VALID_DISPLAY_STATUSES = set(DISPLAY_STATUSES)
 MAX_REMOTE_SESSIONS = 1024
 SERVER_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+# A fresh process ID lets clients distinguish a newly deployed backend from a
+# stale upstream that can still answer REST or WebSocket requests.  It is not a
+# secret and intentionally changes on every monitor process start.
+PROCESS_INSTANCE_ID = uuid.uuid4().hex
 
 
 class SnapshotValidationError(ValueError):
@@ -94,6 +99,7 @@ def build_sessions_payload(
     identity: ServerIdentity,
     remote_snapshots: Iterable[RemoteSnapshot] = (),
     observed_at: float | None = None,
+    instance_id: str | None = None,
 ) -> dict:
     observed_at = time.time() if observed_at is None else observed_at
     sessions = [
@@ -139,6 +145,7 @@ def build_sessions_payload(
     )
     servers.sort(key=lambda item: (not item["local"], item["name"], item["id"]))
     return {
+        "instance_id": PROCESS_INSTANCE_ID if instance_id is None else instance_id,
         "observed_at": observed_at,
         "observed_at_iso": _timestamp_iso(observed_at),
         "server_count": len(servers),

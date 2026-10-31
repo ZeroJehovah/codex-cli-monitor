@@ -9,8 +9,15 @@
 #define WM_WEBSOCKET_MESSAGE (WM_APP + 4)
 #define WM_WEBSOCKET_CLOSED (WM_APP + 5)
 
-// Connect and authenticate on a worker thread. The thread handle is closed
-// internally; the return value only reports whether it could be started.
-int websocket_connect_async(HWND hwnd, const wchar_t *url, const wchar_t *token);
+// Connect and authenticate on a worker thread. Every callback carries the
+// caller-provided connection generation in WPARAM so delayed events from a
+// superseded socket can be discarded. The thread handle is closed internally;
+// the return value only reports whether it could be started.
+int websocket_connect_async(
+    HWND hwnd,
+    const wchar_t *url,
+    const wchar_t *token,
+    LONG connection_generation
+);
 
 #endif // WEBSOCKET_H
