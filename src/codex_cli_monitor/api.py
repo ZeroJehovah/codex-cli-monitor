@@ -34,6 +34,7 @@ from .opencode_decisions import opencode_decision_log_health
 from .opencode_hook_state import opencode_hook_log_health
 from .opencode_state import opencode_db_path
 from .websocket_sync import SyncWebSocketClient, WebSocketBroadcaster
+from .web import serve_web
 
 
 DEFAULT_API_HOST = "127.0.0.1"
@@ -255,6 +256,8 @@ def make_api_handler(
 
 
             parsed = urlparse(self.path)
+            if serve_web(self, parsed, config.api_token):
+                return
             if parsed.path in {"/api/sessions", "/api/status", "/api/servers"}:
                 if not self._authorize(config.api_token):
                     return
@@ -274,7 +277,7 @@ def make_api_handler(
                     payload["collector"] = collector_status_provider()
                 self._send_json(payload)
                 return
-            if parsed.path == "/":
+            if parsed.path == "/api":
                 self._send_json(
                     {
                         "name": "codex-cli-monitor",

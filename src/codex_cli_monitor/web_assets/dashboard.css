@@ -1,0 +1,86 @@
+:root {
+  color-scheme: dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #e1e1e1;
+  background: #1b1d20;
+  font-synthesis: none;
+  --muted: #a1a6af;
+  --running: #2563eb;
+  --waiting: #faae00;
+  --success: #84cc16;
+  --failure: #eb5757;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 280px; }
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible { outline: 2px solid #c896ff; outline-offset: 3px; }
+[hidden] { display: none !important; }
+.monitor { width: min(100% - 40px, 760px); margin: 48px auto; }
+.heading, .brand, .toolbar, .detail-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.brand { justify-content: flex-start; gap: 12px; }
+h1 { font-size: 20px; font-weight: 600; letter-spacing: -.5px; margin: 0; }
+.brand p { color: var(--muted); font-size: 12px; margin: 5px 0 0; }
+.refresh, .detail-heading button { border: 1px solid #3a3d44; border-radius: 10px; background: #25282e; width: 44px; height: 44px; font-size: 26px; }
+.refresh:hover, .detail-heading button:hover { background: #343840; }
+.toolbar { margin-top: 25px; font-size: 12px; color: var(--muted); gap: 8px; }
+.connection { margin: 0; display: flex; align-items: center; gap: 7px; }
+.connection::before { content: ""; width: 6px; height: 6px; background: #959ba5; border-radius: 50%; }
+.connection[data-state="live"]::before, .connection[data-state="polling"]::before { background: #00d8c8; }
+.legend { display: flex; gap: 22px; list-style: none; padding: 16px 0 20px; margin: 0; font-size: 12px; flex-wrap: wrap; }
+.legend li { display: flex; align-items: center; gap: 7px; color: var(--muted); }
+.legend b { font-weight: 500; color: #e1e1e1; font-variant-numeric: tabular-nums; }
+.dot { display: inline-block; flex: 0 0 auto; width: 12px; height: 12px; background: var(--status-color, #959ba5); border-radius: 50%; }
+.running { --status-color: var(--running); }
+.waiting { --status-color: var(--waiting); }
+.success { --status-color: var(--success); }
+.failure { --status-color: var(--failure); }
+.legend .dot { width: 7px; height: 7px; }
+.servers { display: grid; gap: 14px; }
+.server { --server-color: #f7f7f2; overflow: hidden; border: 1px solid #393c42; border-left: 3px solid var(--server-color); border-radius: 8px; background: #222; }
+.server.color-1 { --server-color: #00d8c8; }
+.server.color-2 { --server-color: #f03ac8; }
+.server.color-3 { --server-color: #e696ff; }
+.server.color-4 { --server-color: #c832ff; }
+.server-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 15px; background: #292b30; border-bottom: 1px solid #35373d; }
+.server h2 { margin: 0; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.server-count { white-space: nowrap; font-size: 11px; color: var(--muted); }
+.directory-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(44px, 45%); gap: 12px; padding: 10px 12px 10px 15px; align-items: center; }
+.directory-row:nth-child(odd) { background: #272727; }
+.directory-name { margin: 0; font: 13px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.directory-path { margin: 2px 0 0; color: #969ba5; font: 10px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-dots { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 0; }
+.session { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border: 0; border-radius: 8px; background: transparent; }
+.session:hover { background: #ffffff0d; }
+.session .dot { box-shadow: 0 0 6px var(--status-color); }
+.session.running .dot { animation: breathe 2.4s ease-in-out infinite; }
+.session.waiting .dot { animation: breathe 4s ease-in-out infinite; }
+@keyframes breathe { 50% { box-shadow: 0 0 13px 3px var(--status-color); opacity: .65; } }
+.server-empty { padding: 14px 15px; color: var(--muted); font-size: 12px; margin: 0; }
+.empty { padding: 42px 16px; text-align: center; border: 1px dashed #3b3e44; border-radius: 8px; }
+.empty-symbol { font: 32px monospace; letter-spacing: 5px; color: #a1a6af; }
+.empty h2 { margin: 12px 0 8px; font-size: 15px; font-weight: 500; }
+.empty p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.8; }
+.notice { padding: 12px 14px; margin: 0 0 16px; border: 1px solid #5d5344; background: #302c26; border-radius: 8px; color: #dccab0; font-size: 12px; line-height: 1.8; }
+footer { text-align: center; margin-top: 20px; font-size: 11px; color: #969ba5; }
+dialog { background: #24262b; color: #e1e1e1; border: 1px solid #494c54; border-radius: 14px; padding: 22px; width: min(480px, calc(100% - 32px)); max-height: calc(100% - 40px); }
+dialog::backdrop { background: #0009; }
+.detail-heading { margin-bottom: 16px; }
+.detail-heading h2 { font-size: 17px; margin: 0; }
+dl { display: grid; grid-template-columns: 65px minmax(0, 1fr); gap: 14px 16px; font-size: 13px; line-height: 1.7; margin: 0; }
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }
+.access { max-width: 440px; padding: 36px 24px; border: 1px solid #393c42; border-radius: 14px; background: #222; }
+.access h1 { margin: 24px 0 16px; }
+.access p { color: var(--muted); font-size: 13px; line-height: 1.9; }
+.access code { display: block; overflow-wrap: anywhere; padding: 14px; border-radius: 6px; background: #2c2e33; font-size: 12px; }
+@media (max-width: 540px) {
+  .monitor { width: calc(100% - 24px); margin: max(24px, env(safe-area-inset-top)) auto max(24px, env(safe-area-inset-bottom)); }
+  h1 { font-size: 18px; }
+  .legend { gap: 12px; justify-content: space-between; font-size: 11px; }
+  .legend li { gap: 5px; }
+  .directory-row { padding: 8px 8px 8px 12px; gap: 6px; }
+  .directory-name { font-size: 12px; }
+  .server-heading { padding: 11px 12px; }
+  .toolbar { margin-top: 20px; font-size: 11px; }
+}
+@media (prefers-reduced-motion: reduce) { .session .dot { animation: none; } }

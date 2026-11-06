@@ -17,3 +17,6 @@ codex-monitor = "codex_cli_monitor.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+codex_cli_monitor = ["web_assets/*.html", "web_assets/*.css", "web_assets/*.js", "web_assets/*.mjs", "web_assets/*.svg"]

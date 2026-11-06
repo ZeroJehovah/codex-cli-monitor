@@ -18,6 +18,7 @@
 - 支持常驻后台 HTTP API，供桌面前端轮询当前会话状态。
 - 支持多服务器采集与聚合：每台服务器本地采集，VPS 聚合服务同时监控自身 Codex/OpenCode/Claude Code/Qoder 并合并远端状态。
 - 提供轻量原生 Win32 小型悬浮窗前端，用状态圆点展示每个进程，可区分 Codex/OpenCode/Claude Code/Qoder 并同时显示。
+- 提供兼容电脑与手机的 Web 面板，沿用悬浮窗的深色目录分组与状态圆点，通过 URL 读取 token 访问，与 Windows 共用后端接口。
 - 提供可选的同名 `codex` shim，用来记录启动元数据后再透明执行真正的 Codex CLI。
 
 ## 大概原理
@@ -341,6 +342,7 @@ API 会返回每个 Codex 进程的主状态、目录和启动时间，示例字
 连接完成后发送 `{"token":"..."}`，服务端先返回鉴权确认，再发送初始快照和后续状态
 变化。REST 与 WebSocket 响应都带有非敏感的服务进程级 `instance_id`，客户端可据此
 识别仍能响应请求但已经过期的上游。Cloudflare Tunnel 只需要继续反代原来的 HTTP 端口。
+根路径 `/` 现在是需要 URL token 的 Web 面板，原来的服务信息 JSON 改由 `/api` 返回。
 
 ```json
 {
@@ -1072,6 +1074,10 @@ Windows 悬浮窗：退出正在运行的旧程序，保留现有 `CodexMonitorW
 建的 `CodexMonitorWidget.exe` 覆盖旧文件后再次双击。只有配置字段发生变化时才需要
 同步新的 INI 模板。
 
+Web 面板随 Python 服务源码或安装包一起更新；重启聚合服务后刷新网页即可，无需独立构建、
+安装 Node.js 或部署另一套服务。现有反向代理继续转发同一端口，包含 `/`、`/web/`、
+`/api/sessions` 和 `/ws`；勿仅放行 API 路径。
+
 如果模板、服务参数、仓库位置或 Hook 配置发生变化，应重新检查实际脚本并再次运行：
 
 ```bash
@@ -1268,6 +1274,46 @@ sudo systemctl status codex-monitor-collector.service
 
 聚合结果中的每个 session 包含 `server_id`、`server_name`、`server_boot_id`、跨服务器唯一的 `session_key` 和 `server_observed_at`。不同服务器上相同的 PID 或相同目录不会被当作同一会话。
 
+## Web 面板
+
+浏览器打开聚合服务地址，并在 URL 查询参数中提供 **读取 token**：
+
+```text
+https://codex-monitor.aiof.top/?token=你的读取TOKEN
+```
+
+`/web/?token=你的读取TOKEN` 也是有效入口。token 使用聚合服务的 `API_READ_TOKEN`
+（运行时 `CODEX_MONITOR_API_TOKEN`），与 Windows INI 中的 `ApiToken` 相同，不是采集器
+的写入 token。若 token 含有 `+`、`&`、`/`、`=` 等特殊字符，请对参数值进行 URL 编码。
+必须且只能提供一个非空 `token` 参数；缺失、重复或错误时返回 HTTP 401，页面不会连接
+后端。服务未配置读取 token 时，网页返回 HTTP 503，避免将无鉴权的本地 API 意外作为
+公开网页。原有本地 API 是否开启 Bearer 鉴权的规则不变。
+
+页面直接由 Python 服务提供，不需要额外依赖或前端构建。它只请求同源资源，不加载外部
+脚本、字体或统计服务。首次页面请求由服务端校验 URL token，浏览器再使用同一 token
+调用 `/api/sessions`（`Authorization: Bearer ...`）和 `/ws`（连接后的首个 JSON 消息）。
+接口请求地址本身不带 token，不写 Cookie、localStorage 或 sessionStorage；页面和资源
+均使用 `Cache-Control: no-store` 与 `Referrer-Policy: no-referrer`。token 按访问要求保留
+在地址栏，以便刷新或保存链接；包含 token 的完整链接属于访问凭证，反向代理的访问日志
+应省略查询参数。应用自身不记录请求 URL 或 token。
+
+- 深色紧凑面板按服务器、目录分组；同目录多个会话分别显示圆点。
+- 蓝色为运行中，琥珀色为待确认，绿色为成功，红色为失败；运行中与待确认带有不同节奏
+  的柔光，遵循系统“减少动态效果”设置。
+- 电脑悬停可看摘要，点击或手机点按可打开详情，包括 CLI 类型、状态、等待原因、服务器、
+  完整目录、PID 和启动时间。详情在会话更新时同步更新，会话消失时自动关闭。
+- 桌面限制内容宽度，手机窄屏自动换行；状态圆点有 44 像素的点按区域。
+- WebSocket 提供即时变化，REST 每 5 秒校准。禁用或拦截 WebSocket 时继续自动轮询；
+  后端实例变化会替换旧连接，旧连接消息不会覆盖当前数据，连接每 60 秒主动轮换。
+- REST 连续 15 秒未成功校准时移除过期会话并显示连接提示；恢复网络或手机切回前台时
+  自动重新获取。连接状态与会话的四种状态独立，网络故障不会将会话改成“失败”。
+- 没有会话时显示“暂无会话”；token 失效后清空数据并停止请求，使用有效链接重新打开。
+
+验证时先确认无 token 的页面返回 401，再用有效链接检查服务器数量与悬浮窗是否一致。
+若页面报鉴权失败，请核对读取 token 与 URL 编码；若页面能打开却无法更新，检查浏览器
+是否允许 JavaScript、同源 `/api/sessions` 是否可访问，以及反向代理是否转发 `/ws`
+升级请求。直接刷新按钮可立即重新获取快照。
+
 ## Windows 悬浮窗
 
 Windows 前端在 `windows/CodexMonitorWidget`。它是一个轻量原生 Win32 小型矩形
@@ -1430,6 +1476,15 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```bash
 PYTHONPATH=src pytest tests/ -q
 ```
+
+Web 传输逻辑测试（需要 Node.js 18+；生产服务不需要 Node.js）：
+
+```bash
+node --test tests/web_client.test.mjs
+```
+
+Python 全套测试包含网页 URL token 鉴权、资源边界与原有 API 兼容性；JavaScript 测试
+覆盖断线恢复、过期数据清理、后端实例切换、旧消息拒收、鉴权失效和轮询回退。
 
 Windows 前端的环境无关逻辑测试（C 语言）：
 

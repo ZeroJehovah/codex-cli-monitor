@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#1b1d20">
+  <title>CLI Monitor</title>
+  <link rel="icon" href="/web/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/web/dashboard.css">
+  <script type="module" src="/web/dashboard.js"></script>
+</head>
+<body>
+  <main class="monitor">
+    <header class="heading">
+      <div class="brand"><img src="/web/icon.svg" width="32" height="32" alt=""><div><h1>CLI Monitor</h1><p id="summary">会话状态</p></div></div>
+      <button id="refresh" class="refresh" type="button" aria-label="刷新会话" title="刷新会话">↻</button>
+    </header>
+    <div class="toolbar">
+      <p id="connection" class="connection" role="status">正在连接</p>
+      <time id="updated" aria-label="最近同步时间"></time>
+    </div>
+    <ul class="legend" aria-label="会话状态统计">
+      <li><span class="dot running"></span>运行中 <b id="count-running">0</b></li>
+      <li><span class="dot waiting"></span>待确认 <b id="count-waiting">0</b></li>
+      <li><span class="dot success"></span>成功 <b id="count-success">0</b></li>
+      <li><span class="dot failure"></span>失败 <b id="count-failure">0</b></li>
+    </ul>
+    <p id="notice" class="notice" hidden></p>
+    <div id="servers" class="servers" aria-label="服务器会话"></div>
+    <div id="empty" class="empty"><span class="empty-symbol" aria-hidden="true">···</span><h2 id="empty-title">正在连接</h2><p id="empty-message">正在获取会话状态…</p></div>
+    <footer>悬停或点按状态圆点，查看会话详情</footer>
+    <noscript><p class="notice">请启用 JavaScript 以查看实时会话。</p></noscript>
+  </main>
+  <dialog id="details" aria-labelledby="detail-title">
+    <header class="detail-heading"><h2 id="detail-title">会话详情</h2><button id="close-details" type="button" aria-label="关闭详情">×</button></header>
+    <dl id="detail-fields"></dl>
+  </dialog>
+</body>
+</html>
