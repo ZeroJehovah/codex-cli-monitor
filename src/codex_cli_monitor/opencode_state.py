@@ -5,14 +5,19 @@ OpenCode stores its conversations in a local SQLite database
 strictly read-only, never writes to it, and infers a small user-facing
 lifecycle (running / success / failure) from minimal structural records:
 
-* ``session`` rows give the stable session id, working directory, and
-  creation/update times.
-* ``message`` rows carry ``role`` (user/assistant), ``time.created`` and
-  ``time.completed``, plus ``finish`` and the presence of a structured
-  ``error`` for assistant messages. Completion closes one model step;
-  ``tool-calls``, ``unknown``, and a missing finish keep the turn open.
-* ``part`` rows belonging to the latest assistant message carry tool-call
-  state. Orphaned ``running`` tools in older messages cannot reopen a turn.
+* ``session`` (legacy OpenCode 1.x) or ``session_v2`` (OpenCode 2.x) rows
+  give the stable session id, working directory, creation/update times, and
+  the v2 structured busy/idle marker with its ``idle_outcome``.
+* ``message`` (legacy) or ``session_message`` (v2) rows carry the role
+  (user/assistant), ``time.created`` and ``time.completed``, plus ``finish``
+  and the presence of a structured ``error`` for assistant messages.
+  Completion closes one model step; ``tool-calls``, ``unknown``, and a
+  missing finish keep the turn open, while a v2 idle marker
+  (``succeeded``/``failed``/``interrupted``) is the authoritative terminal
+  outcome for the submitted turn.
+* ``part`` (legacy) or inline v2 assistant ``content`` tool entries carry
+  tool-call state. Orphaned ``running`` tools in older messages cannot
+  reopen a turn.
 
 A session is displayed for a live ``opencode`` process only when that process
 holds the database open (or the directory matches and a hook marker exists).
@@ -318,6 +323,42 @@ def _read_session_states(
     return tuple(states)
 
 
+_SESSION_FIELDS = (
+    "id",
+    "directory",
+    "title",
+    "time_created",
+    "time_updated",
+    "parent_id",
+    "time_busy",
+    "time_idle",
+    "idle_outcome",
+)
+_MESSAGE_ROLES = ("user", "assistant")
+# OpenCode v2 records the structured end of each submitted turn on the session
+# row: succeeded is normal completion, while failed and interrupted are
+# terminal failures.  Unknown future values fall back to the message records.
+_IDLE_OUTCOMES = {
+    "succeeded": False,
+    "failed": True,
+    "interrupted": True,
+}
+
+
+def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_columns(connection: sqlite3.Connection, name: str) -> frozenset[str]:
+    return frozenset(
+        str(row[1]) for row in connection.execute(f"PRAGMA table_info({name})")
+    )
+
+
 def _query_sessions(
     connection: sqlite3.Connection,
     *,
@@ -325,45 +366,61 @@ def _query_sessions(
     directories: tuple[str, ...],
     directory_limit: int,
 ) -> tuple[dict, ...]:
-    columns = "id, directory, title, time_created, time_updated"
-    result: list[dict] = []
-    known: set[str] = set()
+    merged: dict[str, dict] = {}
+    for table in ("session_v2", "session"):
+        if not _table_exists(connection, table):
+            continue
+        columns = _table_columns(connection, table)
+        expressions = ", ".join(
+            field if field in columns else f"NULL AS {field}"
+            for field in _SESSION_FIELDS
+        )
 
-    def add_rows(rows: list[sqlite3.Row] | list[tuple]) -> None:
-        for row in rows:
-            session_id = str(row[0])
-            if session_id in known:
-                continue
-            known.add(session_id)
-            result.append(
-                {
-                    "id": session_id,
+        def add_rows(rows: list[sqlite3.Row] | list[tuple]) -> None:
+            for row in rows:
+                parent_id = _optional_str(row[5])
+                if table == "session_v2" and parent_id:
+                    # A v2 child session belongs to a spawned subagent, not a
+                    # turn the user submitted, so it is never displayed.
+                    continue
+                payload = {
+                    "id": str(row[0]),
                     "directory": _optional_str(row[1]),
                     "title": _optional_str(row[2]),
                     "time_created": _optional_int(row[3]),
                     "time_updated": _optional_int(row[4]),
+                    "parent_id": parent_id,
+                    "time_busy": _optional_int(row[6]),
+                    "time_idle": _optional_int(row[7]),
+                    "idle_outcome": _optional_str(row[8]),
                 }
+                current = merged.get(payload["id"])
+                if current is None or (
+                    payload["time_updated"] or 0
+                ) > (current["time_updated"] or 0):
+                    merged[payload["id"]] = payload
+
+        if directories:
+            query = (
+                f"SELECT {expressions} FROM {table} WHERE directory = ? "
+                "ORDER BY time_updated DESC, id DESC LIMIT ?"
             )
+            for directory in directories:
+                add_rows(
+                    connection.execute(query, (directory, directory_limit)).fetchall()
+                )
+        else:
+            query = (
+                f"SELECT {expressions} FROM {table} "
+                "ORDER BY time_updated DESC, id DESC LIMIT ?"
+            )
+            add_rows(connection.execute(query, (SESSION_LIMIT,)).fetchall())
 
-    if directories:
-        query = (
-            f"SELECT {columns} FROM session WHERE directory = ? "
-            "ORDER BY time_updated DESC, id DESC LIMIT ?"
-        )
-        for directory in directories:
-            add_rows(connection.execute(query, (directory, directory_limit)).fetchall())
-    else:
-        query = (
-            f"SELECT {columns} FROM session "
-            "ORDER BY time_updated DESC, id DESC LIMIT ?"
-        )
-        add_rows(connection.execute(query, (SESSION_LIMIT,)).fetchall())
-
-    if ids:
-        placeholders = ",".join("?" for _ in ids)
-        query = f"SELECT {columns} FROM session WHERE id IN ({placeholders})"
-        add_rows(connection.execute(query, ids).fetchall())
-    return tuple(result)
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            query = f"SELECT {expressions} FROM {table} WHERE id IN ({placeholders})"
+            add_rows(connection.execute(query, ids).fetchall())
+    return tuple(merged.values())
 
 
 def _query_messages(
@@ -373,8 +430,14 @@ def _query_messages(
     if not sessions:
         return {}
     result: dict[str, list[dict]] = {session["id"]: [] for session in sessions}
+    v2_columns = (
+        _table_columns(connection, "session_message")
+        if _table_exists(connection, "session_message")
+        else None
+    )
+    legacy_present = _table_exists(connection, "message")
     safe_data = "CASE WHEN json_valid(data) THEN data ELSE '{}' END"
-    query = (
+    legacy_query = (
         "SELECT json_object("
         "'id', id, "
         f"'role', json_extract({safe_data}, '$.role'), "
@@ -389,14 +452,56 @@ def _query_messages(
     )
     for session in sessions:
         session_id = session["id"]
-        for role in ("user", "assistant"):
-            row = connection.execute(query, (session_id, role)).fetchone()
-            if row is None:
-                continue
-            parsed = _parse_message_data(str(row[0]), row[1], row[2])
-            if parsed is not None:
-                result[session_id].append(parsed)
+        for role in _MESSAGE_ROLES:
+            best: dict | None = None
+            if v2_columns is not None:
+                best = _latest_v2_message(connection, session_id, role, v2_columns)
+            if legacy_present:
+                row = connection.execute(legacy_query, (session_id, role)).fetchone()
+                if row is not None:
+                    legacy = _parse_message_data(str(row[0]), row[1], row[2])
+                    if legacy is not None and (
+                        best is None
+                        or _message_recency(legacy) > _message_recency(best)
+                    ):
+                        best = legacy
+            if best is not None:
+                result[session_id].append(best)
     return {session_id: tuple(items) for session_id, items in result.items()}
+
+
+def _latest_v2_message(
+    connection: sqlite3.Connection,
+    session_id: str,
+    role: str,
+    columns: frozenset[str],
+) -> dict | None:
+    order = (
+        "time_created DESC, seq DESC"
+        if "seq" in columns
+        else "time_created DESC, id DESC"
+    )
+    row = connection.execute(
+        "SELECT id, data, time_created, time_updated FROM session_message "
+        f"WHERE session_id = ? AND type = ? ORDER BY {order} LIMIT 1",
+        (session_id, role),
+    ).fetchone()
+    if row is None:
+        return None
+    return _parse_message_data(
+        str(row[1]),
+        row[2],
+        row[3],
+        role=role,
+        message_id=str(row[0]),
+    )
+
+
+def _message_recency(item: dict) -> tuple[int, int]:
+    return (
+        item.get("created") or item.get("message_time_created") or 0,
+        item.get("message_time_updated") or 0,
+    )
 
 
 def _query_running_tools(
@@ -404,55 +509,99 @@ def _query_running_tools(
     sessions: tuple[dict, ...],
     messages: dict[str, tuple[dict, ...]],
 ) -> dict[str, tuple[int, ...]]:
+    result: dict[str, list[int]] = {session["id"]: [] for session in sessions}
+    for session_id, items in messages.items():
+        for item in items:
+            if item["role"] == "assistant":
+                result.setdefault(session_id, []).extend(
+                    item.get("running_tool_times") or ()
+                )
     assistant_ids = tuple(
         item["id"]
         for items in messages.values()
         for item in items
         if item["role"] == "assistant" and item["id"] is not None
     )
-    if not assistant_ids:
-        return {}
-    placeholders = ",".join("?" for _ in assistant_ids)
-    safe_data = "CASE WHEN json_valid(part.data) THEN part.data ELSE '{}' END"
-    query = (
-        "SELECT part.session_id, MAX(part.time_updated) FROM part "
-        "JOIN message ON message.id = part.message_id "
-        "AND message.session_id = part.session_id "
-        f"WHERE part.message_id IN ({placeholders}) AND "
-        f"json_extract({safe_data}, '$.type') = 'tool' AND "
-        f"json_extract({safe_data}, '$.state.status') = 'running' "
-        "GROUP BY part.session_id"
-    )
-    rows = connection.execute(query, assistant_ids).fetchall()
-    result: dict[str, list[int]] = {session["id"]: [] for session in sessions}
-    for session_id, time_updated in rows:
-        updated = _optional_positive_int(time_updated)
-        if updated is not None:
-            result[session_id].append(updated)
-    return {session_id: tuple(items) for session_id, items in result.items()}
+    if (
+        assistant_ids
+        and _table_exists(connection, "part")
+        and _table_exists(connection, "message")
+    ):
+        placeholders = ",".join("?" for _ in assistant_ids)
+        safe_data = "CASE WHEN json_valid(part.data) THEN part.data ELSE '{}' END"
+        query = (
+            "SELECT part.session_id, MAX(part.time_updated) FROM part "
+            "JOIN message ON message.id = part.message_id "
+            "AND message.session_id = part.session_id "
+            f"WHERE part.message_id IN ({placeholders}) AND "
+            f"json_extract({safe_data}, '$.type') = 'tool' AND "
+            f"json_extract({safe_data}, '$.state.status') = 'running' "
+            "GROUP BY part.session_id"
+        )
+        for session_id, time_updated in connection.execute(query, assistant_ids):
+            updated = _optional_positive_int(time_updated)
+            if updated is not None:
+                result.setdefault(str(session_id), []).append(updated)
+    return {
+        session_id: tuple(sorted(set(items), reverse=True))
+        for session_id, items in result.items()
+    }
 
 
-def _parse_message_data(raw: str, time_created: int, time_updated: int) -> dict | None:
+def _parse_message_data(
+    raw: str,
+    time_created: int,
+    time_updated: int,
+    *,
+    role: str | None = None,
+    message_id: str | None = None,
+) -> dict | None:
     try:
         data = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(data, dict):
         return None
-    role = data.get("role")
+    parsed_role = role if role is not None else data.get("role")
     msg_time = data.get("time")
-    if not isinstance(role, str) or not isinstance(msg_time, dict):
+    if not isinstance(parsed_role, str) or not isinstance(msg_time, dict):
         return None
     return {
-        "id": _optional_str(data.get("id")),
-        "role": role,
+        "id": message_id or _optional_str(data.get("id")),
+        "role": parsed_role,
         "created": _optional_positive_int(msg_time.get("created")),
         "completed": _optional_positive_int(msg_time.get("completed")),
         "finish": _optional_str(data.get("finish")),
-        "failed": bool(data.get("failed")),
+        "failed": bool(data.get("failed")) or data.get("error") is not None,
         "message_time_created": _optional_positive_int(time_created),
         "message_time_updated": _optional_positive_int(time_updated),
+        "running_tool_times": _running_tool_times(data, parsed_role, time_updated),
     }
+
+
+def _running_tool_times(
+    data: dict,
+    role: str,
+    time_updated: int,
+) -> tuple[int, ...]:
+    if role != "assistant":
+        return ()
+    content = data.get("content")
+    if not isinstance(content, list):
+        return ()
+    stamps: list[int] = []
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "tool":
+            continue
+        state = item.get("state")
+        if not isinstance(state, dict) or state.get("status") != "running":
+            continue
+        item_time = item.get("time")
+        stamp = item_time.get("created") if isinstance(item_time, dict) else None
+        parsed = _optional_positive_int(stamp) or _optional_positive_int(time_updated)
+        if parsed is not None:
+            stamps.append(parsed)
+    return tuple(stamps)
 
 
 def _build_state(
@@ -466,12 +615,17 @@ def _build_state(
     user_messages = [item for item in messages if item["role"] == "user"]
 
     activity_times = [value for value in (created, updated) if value is not None]
+    message_activity_times: list[float] = []
     for item in messages:
         for field in ("completed", "created", "message_time_created", "message_time_updated"):
             candidate = _ms_to_seconds(item[field])
             if candidate is not None:
-                activity_times.append(candidate)
+                message_activity_times.append(candidate)
+    activity_times.extend(message_activity_times)
     activity_times.extend(value / 1000.0 for value in running_tools)
+    idle_at = _ms_to_seconds(session.get("time_idle"))
+    if idle_at is not None:
+        activity_times.append(idle_at)
     last_activity = max(activity_times, default=None)
 
     current_user = user_messages[-1] if user_messages else None
@@ -493,10 +647,36 @@ def _build_state(
     current_failed = bool(current_assistant and current_assistant["failed"])
     last_running_tool = running_tools[0] if running_tools and current_assistant else None
 
+    busy_at = _ms_to_seconds(session.get("time_busy"))
+    idle_outcome = session.get("idle_outcome")
+    latest_turn_activity = max(
+        message_activity_times + [value / 1000.0 for value in running_tools],
+        default=None,
+    )
+    # A v2 idle marker closes exactly one submitted turn. It applies only when
+    # it is not older than that turn's prompt, messages, or tools, so a stale
+    # marker can never freeze a newer active turn.
+    idle_is_terminal = (
+        idle_at is not None
+        and (latest_turn_activity is None or idle_at >= latest_turn_activity - 0.001)
+        and (turn_started is None or idle_at >= turn_started - 0.001)
+        and (busy_at is None or idle_at >= busy_at)
+    )
+    idle_failed = (
+        _IDLE_OUTCOMES.get(idle_outcome)
+        if isinstance(idle_outcome, str)
+        else None
+    )
+
     # OpenCode completes each model step before starting the next one. There
     # need not be a running tool during that handoff, even in a healthy turn.
     step_continues = not current_finish or current_finish in ("tool-calls", "unknown")
-    if current_completed is None or (
+    if idle_is_terminal and idle_failed is not None:
+        turn_active = False
+        terminal_event = True
+        failed_event = idle_failed
+        status = STATUS_FAILURE if failed_event else STATUS_SUCCESS
+    elif current_completed is None or (
         not current_failed and (last_running_tool is not None or step_continues)
     ):
         turn_active = True

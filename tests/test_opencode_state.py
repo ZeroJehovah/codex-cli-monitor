@@ -135,6 +135,82 @@ def _build_db(
         con.close()
 
 
+def _build_v2_db(
+    path: Path,
+    sessions: list[dict],
+    messages: list[dict],
+) -> None:
+    """Create an OpenCode 2.x database with its native v2 tables only."""
+    con = sqlite3.connect(str(path))
+    try:
+        con.execute(
+            """
+            CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                project_id TEXT,
+                parent_id TEXT,
+                directory TEXT NOT NULL,
+                title TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                time_busy INTEGER,
+                time_idle INTEGER,
+                idle_outcome TEXT
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            )
+            """
+        )
+        for item in sessions:
+            con.execute(
+                "INSERT INTO session_v2 (id, project_id, parent_id, directory, "
+                "title, time_created, time_updated, time_busy, time_idle, "
+                "idle_outcome) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    item["id"],
+                    item.get("project_id", "global"),
+                    item.get("parent_id"),
+                    item["directory"],
+                    item.get("title", "t"),
+                    item["time_created"],
+                    item["time_updated"],
+                    item.get("time_busy"),
+                    item.get("time_idle"),
+                    item.get("idle_outcome"),
+                ),
+            )
+        for item in messages:
+            data = item["data"]
+            created = (data.get("time") or {}).get("created") or item["time_created"]
+            con.execute(
+                "INSERT INTO session_message (id, session_id, type, seq, "
+                "time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)",
+                (
+                    item["id"],
+                    item["session_id"],
+                    item["type"],
+                    item["seq"],
+                    created,
+                    item.get("time_updated", created),
+                    json.dumps(data, sort_keys=True),
+                ),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+
 class OpenCodeStateTests(unittest.TestCase):
     def _scan(self, sessions, messages, ids=(), parts=()):
         with tempfile.TemporaryDirectory() as tmp:
@@ -143,6 +219,14 @@ class OpenCodeStateTests(unittest.TestCase):
             db = data_dir / "opencode.db"
             _build_db(db, sessions, messages, parts)
             return scan_opencode_state(data_dir, ids=ids)
+
+    def _scan_v2(self, sessions, messages, ids=(), directories=()):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".local" / "share" / "opencode"
+            data_dir.mkdir(parents=True)
+            db = data_dir / "opencode.db"
+            _build_v2_db(db, sessions, messages)
+            return scan_opencode_state(data_dir, ids=ids, directories=directories)
 
     def test_default_prefers_env(self) -> None:
         env = {"OPENCODE_DATA": "/custom/data", "OPENCODE_HOME": "/home"}
@@ -755,6 +839,236 @@ class OpenCodeStateTests(unittest.TestCase):
         self.assertEqual(len(states), 1)
         self.assertEqual(states[0].session_id, "large-db-session")
         self.assertEqual(states[0].status, STATUS_RUNNING)
+
+    def test_v2_completed_turn_uses_the_structured_idle_outcome(self) -> None:
+        now_ms = 1786681500000
+        state, = self._scan_v2(
+            [{
+                "id": "ses_v2",
+                "directory": "/work",
+                "time_created": now_ms - 60_000,
+                "time_updated": now_ms - 1_000,
+                "time_busy": now_ms - 30_000,
+                "time_idle": now_ms - 1_000,
+                "idle_outcome": "succeeded",
+            }],
+            [
+                {
+                    "id": "u1", "session_id": "ses_v2", "type": "user", "seq": 0,
+                    "data": {"time": {"created": now_ms - 30_000}},
+                },
+                {
+                    "id": "a1", "session_id": "ses_v2", "type": "assistant", "seq": 1,
+                    "data": {
+                        "time": {"created": now_ms - 29_000, "completed": now_ms - 2_000},
+                        "finish": "stop",
+                    },
+                },
+            ],
+        )
+        self.assertEqual(state.status, STATUS_SUCCESS)
+        self.assertFalse(state.turn_active)
+        self.assertTrue(state.terminal_event)
+        self.assertFalse(state.failed_event)
+        self.assertEqual(state.turn_started_at, (now_ms - 30_000) / 1000.0)
+
+    def test_v2_interrupted_turn_overrides_a_completed_intermediate_step(self) -> None:
+        now_ms = 1786681500000
+        state, = self._scan_v2(
+            [{
+                "id": "ses_v2",
+                "directory": "/work",
+                "time_created": now_ms - 60_000,
+                "time_updated": now_ms - 1_000,
+                "time_busy": now_ms - 30_000,
+                "time_idle": now_ms - 1_000,
+                "idle_outcome": "interrupted",
+            }],
+            [
+                {
+                    "id": "u1", "session_id": "ses_v2", "type": "user", "seq": 0,
+                    "data": {"time": {"created": now_ms - 30_000}},
+                },
+                {
+                    "id": "a1", "session_id": "ses_v2", "type": "assistant", "seq": 1,
+                    "data": {
+                        "time": {"created": now_ms - 29_000, "completed": now_ms - 2_000},
+                        "finish": "tool-calls",
+                    },
+                },
+            ],
+        )
+        self.assertEqual(state.status, STATUS_FAILURE)
+        self.assertFalse(state.turn_active)
+        self.assertTrue(state.failed_event)
+
+    def test_v2_running_inline_tool_keeps_the_turn_open(self) -> None:
+        now_ms = 1786681500000
+        state, = self._scan_v2(
+            [{
+                "id": "ses_v2",
+                "directory": "/work",
+                "time_created": now_ms - 60_000,
+                "time_updated": now_ms - 8_000,
+                "time_busy": now_ms - 10_000,
+            }],
+            [
+                {
+                    "id": "u1", "session_id": "ses_v2", "type": "user", "seq": 0,
+                    "data": {"time": {"created": now_ms - 10_000}},
+                },
+                {
+                    "id": "a1", "session_id": "ses_v2", "type": "assistant", "seq": 1,
+                    "data": {
+                        "time": {"created": now_ms - 9_000, "completed": now_ms - 8_000},
+                        "finish": "tool-calls",
+                        "content": [{
+                            "type": "tool",
+                            "state": {"status": "running"},
+                            "time": {"created": now_ms - 7_000},
+                        }],
+                    },
+                },
+            ],
+        )
+        self.assertEqual(state.status, STATUS_RUNNING)
+        self.assertTrue(state.turn_active)
+        self.assertEqual(state.last_activity_at, (now_ms - 7_000) / 1000.0)
+
+    def test_v2_stale_idle_marker_cannot_freeze_a_new_prompt(self) -> None:
+        now_ms = 1786681500000
+        state, = self._scan_v2(
+            [{
+                "id": "ses_v2",
+                "directory": "/work",
+                "time_created": now_ms - 60_000,
+                "time_updated": now_ms - 2_000,
+                "time_idle": now_ms - 10_000,
+                "idle_outcome": "succeeded",
+            }],
+            [
+                {
+                    "id": "u1", "session_id": "ses_v2", "type": "user", "seq": 0,
+                    "data": {"time": {"created": now_ms - 5_000}},
+                },
+            ],
+        )
+        self.assertEqual(state.status, STATUS_RUNNING)
+        self.assertTrue(state.turn_active)
+
+    def test_v2_subagent_child_session_is_not_displayed(self) -> None:
+        now_ms = 1786681500000
+        states = self._scan_v2(
+            [
+                {
+                    "id": "ses_parent",
+                    "directory": "/work",
+                    "time_created": now_ms - 60_000,
+                    "time_updated": now_ms - 30_000,
+                    "time_busy": now_ms - 20_000,
+                    "time_idle": now_ms - 30_000,
+                    "idle_outcome": "succeeded",
+                },
+                {
+                    "id": "ses_child",
+                    "directory": "/work",
+                    "parent_id": "ses_parent",
+                    "time_created": now_ms - 20_000,
+                    "time_updated": now_ms - 1_000,
+                    "time_busy": now_ms - 10_000,
+                },
+            ],
+            [
+                {
+                    "id": "u1", "session_id": "ses_parent", "type": "user", "seq": 0,
+                    "data": {"time": {"created": now_ms - 40_000}},
+                },
+                {
+                    "id": "a1", "session_id": "ses_parent", "type": "assistant", "seq": 1,
+                    "data": {
+                        "time": {"created": now_ms - 39_000, "completed": now_ms - 30_000},
+                        "finish": "stop",
+                    },
+                },
+                {
+                    "id": "cu1", "session_id": "ses_child", "type": "user", "seq": 0,
+                    "data": {"time": {"created": now_ms - 20_000}},
+                },
+            ],
+            directories=("/work",),
+        )
+        self.assertEqual([item.session_id for item in states], ["ses_parent"])
+
+    def test_v2_and_legacy_tables_are_merged_for_migrated_databases(self) -> None:
+        now_ms = 1786681500000
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            db = data_dir / "opencode.db"
+            _build_v2_db(
+                db,
+                [{
+                    "id": "ses_v2",
+                    "directory": "/work",
+                    "time_created": now_ms - 60_000,
+                    "time_updated": now_ms - 1_000,
+                    "time_busy": now_ms - 20_000,
+                    "time_idle": now_ms - 1_000,
+                    "idle_outcome": "succeeded",
+                }],
+                [
+                    {
+                        "id": "u1", "session_id": "ses_v2", "type": "user", "seq": 0,
+                        "data": {"time": {"created": now_ms - 20_000}},
+                    },
+                    {
+                        "id": "a1", "session_id": "ses_v2", "type": "assistant",
+                        "seq": 1,
+                        "data": {
+                            "time": {
+                                "created": now_ms - 19_000,
+                                "completed": now_ms - 2_000,
+                            },
+                            "finish": "stop",
+                        },
+                    },
+                ],
+            )
+            connection = sqlite3.connect(str(db))
+            try:
+                connection.execute(
+                    "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, "
+                    "title TEXT, time_created INTEGER, time_updated INTEGER)"
+                )
+                connection.execute(
+                    "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, "
+                    "time_created INTEGER, time_updated INTEGER, data TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO session VALUES ('ses_legacy','/work','t',?,?)",
+                    (now_ms - 50_000, now_ms - 40_000),
+                )
+                connection.execute(
+                    "INSERT INTO message VALUES ('lu','ses_legacy',?,?,?)",
+                    (
+                        now_ms - 50_000,
+                        now_ms - 50_000,
+                        json.dumps(
+                            {
+                                "role": "user",
+                                "time": {"created": now_ms - 50_000},
+                            }
+                        ),
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            states = scan_opencode_state(data_dir, directories=("/work",))
+
+        by_id = {item.session_id: item for item in states}
+        self.assertEqual(set(by_id), {"ses_v2", "ses_legacy"})
+        self.assertEqual(by_id["ses_v2"].status, STATUS_SUCCESS)
+        self.assertEqual(by_id["ses_legacy"].status, STATUS_RUNNING)
 
 
 class OpenCodeHookStateTests(unittest.TestCase):

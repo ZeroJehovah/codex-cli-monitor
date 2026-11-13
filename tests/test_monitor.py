@@ -1403,6 +1403,17 @@ class WaitingDecisionTests(unittest.TestCase):
         self.assertEqual(sessions[0].display_status, "运行中")
         self.assertEqual(sessions[0].inference.status, "running_terminal")
 
+    def test_opencode_v2_completed_session_is_visible(self) -> None:
+        # OpenCode 2.x writes session_v2/session_message instead of the legacy
+        # session/message tables; a finished turn must still be displayed.
+        with _opencode_v2_runtime() as proc:
+            sessions = discover_sessions(proc)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].cli_type, "opencode")
+        self.assertEqual(sessions[0].display_status, "成功")
+        self.assertEqual(sessions[0].binding_method, "opencode_sqlite_cwd")
+
     def test_opencode_resumed_existing_session_older_than_process_is_visible(self) -> None:
         # A process can resume an existing conversation without exposing a
         # session id in argv.  The cwd fallback must not hide that row merely
@@ -1662,6 +1673,28 @@ def _opencode_runtime(status: str):
 
 
 @contextmanager
+def _opencode_v2_runtime():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        proc = root / "proc"
+        data_dir = root / "opencode-data"
+        decision_log = root / "decisions.jsonl"
+        proc.mkdir()
+        data_dir.mkdir()
+        _write_common_proc(proc)
+        _write_process(proc, 400, "opencode", "S", 1, ["opencode"], OPENCODE_CWD)
+        _write_v2_opencode_db(data_dir / "opencode.db")
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCODE_DATA": str(data_dir),
+                "OPENCODE_MONITOR_DECISION_LOG": str(decision_log),
+            },
+        ):
+            yield proc
+
+
+@contextmanager
 def _opencode_two_session_runtime():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1782,6 +1815,75 @@ def _write_opencode_db(path: Path, status: str) -> None:
                 now_ms - 50_000,
                 now_ms - 1_000,
                 json.dumps(assistant),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _write_v2_opencode_db(path: Path) -> None:
+    import sqlite3
+
+    now_ms = int(time.time() * 1000)
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.execute(
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, project_id TEXT, "
+            "parent_id TEXT, directory TEXT, title TEXT, time_created INTEGER, "
+            "time_updated INTEGER, time_busy INTEGER, time_idle INTEGER, "
+            "idle_outcome TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, "
+            "type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, "
+            "data TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO session_v2 VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                OPENCODE_SESSION_ID,
+                "global",
+                None,
+                OPENCODE_CWD,
+                "t",
+                now_ms - 120_000,
+                now_ms - 1_000,
+                now_ms - 60_000,
+                now_ms - 1_000,
+                "succeeded",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO session_message VALUES (?,?,?,?,?,?,?)",
+            (
+                "m1",
+                OPENCODE_SESSION_ID,
+                "user",
+                0,
+                now_ms - 120_000,
+                now_ms - 120_000,
+                json.dumps({"time": {"created": now_ms - 120_000}}),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO session_message VALUES (?,?,?,?,?,?,?)",
+            (
+                "m2",
+                OPENCODE_SESSION_ID,
+                "assistant",
+                1,
+                now_ms - 60_000,
+                now_ms - 1_000,
+                json.dumps(
+                    {
+                        "time": {
+                            "created": now_ms - 60_000,
+                            "completed": now_ms - 1_000,
+                        },
+                        "finish": "stop",
+                    }
+                ),
             ),
         )
         connection.commit()
