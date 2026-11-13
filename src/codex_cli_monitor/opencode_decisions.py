@@ -43,9 +43,16 @@ DEFAULT_MAX_AGE_SECONDS = 6 * 3600
 ASK_EVENTS = {
     "permission.asked": "permission",
     "question.asked": "question",
+    "form.created": "question",
 }
 REPLY_EVENTS = frozenset(
-    {"permission.replied", "question.replied", "question.rejected"}
+    {
+        "permission.replied",
+        "question.replied",
+        "question.rejected",
+        "form.replied",
+        "form.cancelled",
+    }
 )
 
 # Fallback labels used when the plugin could not read a permission category.

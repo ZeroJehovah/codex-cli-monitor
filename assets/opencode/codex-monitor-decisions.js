@@ -9,9 +9,9 @@
 //
 // It is deliberately observation-only:
 //
-//   * it subscribes to the `event` hook, which is a notification stream, and
-//     never to `permission.ask` or any other decision hook, so it cannot
-//     approve, reject, or otherwise steer OpenCode;
+//   * it subscribes to OpenCode's public event notification stream, and never
+//     to a permission decision hook, so it cannot approve, reject, or
+//     otherwise steer OpenCode;
 //   * it records only structural identifiers (session id, request id) plus the
 //     short permission category (for example `bash` or `edit`); prompt text,
 //     command patterns, tool inputs, tool outputs, and metadata are never read;
@@ -25,6 +25,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { Plugin } from "@opencode/plugin"
 
 const SCHEMA_VERSION = 1
 const MAX_LOG_BYTES = 1024 * 1024
@@ -34,6 +35,7 @@ const MAX_FIELD_LENGTH = 128
 const ASK_EVENTS = {
   "permission.asked": "permission",
   "question.asked": "question",
+  "form.created": "question",
 }
 
 // Events that answer one, whichever way the user went.
@@ -41,6 +43,8 @@ const REPLY_EVENTS = new Set([
   "permission.replied",
   "question.replied",
   "question.rejected",
+  "form.replied",
+  "form.cancelled",
 ])
 
 function clean(value) {
@@ -97,28 +101,47 @@ function append(record) {
   fs.appendFileSync(file, line, { mode: 0o600 })
 }
 
-// The ask payload has been shaped both as the request itself and as a wrapper
-// carrying it, so both are accepted and anything unrecognized is dropped.
-function askFields(properties) {
+function eventData(event) {
+  if (event?.data && typeof event.data === "object") {
+    return event.data
+  }
+  if (event?.properties && typeof event.properties === "object") {
+    return event.properties
+  }
+  return {}
+}
+
+// V1 shaped some asks as a wrapper; V2 exposes the structural request directly
+// in event.data. Both forms are accepted and anything unrecognized is dropped.
+function askFields(type, data) {
+  if (type === "form.created") {
+    const form = data.form && typeof data.form === "object" ? data.form : {}
+    return {
+      request_id: clean(form.id) || clean(data.requestID) || clean(data.id),
+      session_id: clean(form.sessionID) || clean(data.sessionID),
+      category: "question",
+    }
+  }
   const nested =
-    properties.permission && typeof properties.permission === "object"
-      ? properties.permission
-      : properties
+    data.permission && typeof data.permission === "object"
+      ? data.permission
+      : data
   const category =
-    clean(typeof properties.permission === "string" ? properties.permission : null) ||
+    clean(data.action) ||
+    clean(typeof data.permission === "string" ? data.permission : null) ||
     clean(typeof nested.permission === "string" ? nested.permission : null) ||
     clean(nested.type)
   return {
-    request_id: clean(nested.id) || clean(properties.requestID) || clean(properties.id),
-    session_id: clean(nested.sessionID) || clean(properties.sessionID),
+    request_id: clean(nested.id) || clean(data.requestID) || clean(data.id),
+    session_id: clean(nested.sessionID) || clean(data.sessionID),
     category,
   }
 }
 
-function replyFields(properties) {
+function replyFields(data) {
   return {
-    request_id: clean(properties.requestID) || clean(properties.id),
-    session_id: clean(properties.sessionID),
+    request_id: clean(data.requestID) || clean(data.id),
+    session_id: clean(data.sessionID),
     category: null,
   }
 }
@@ -132,9 +155,8 @@ function record(directory, event) {
   if (!asked && !REPLY_EVENTS.has(type)) {
     return
   }
-  const properties =
-    event.properties && typeof event.properties === "object" ? event.properties : {}
-  const fields = asked ? askFields(properties) : replyFields(properties)
+  const data = eventData(event)
+  const fields = asked ? askFields(type, data) : replyFields(data)
   if (!fields.request_id && !fields.session_id) {
     // Without an identifier the marker could never be paired with a reply, and
     // an unpairable ask would pin a row to "waiting" forever.
@@ -153,7 +175,45 @@ function record(directory, event) {
   })
 }
 
-export const CodexMonitorDecisions = async ({ directory, worktree }) => {
+const subscriptionTypes = [
+  "permission.asked",
+  "permission.replied",
+  "form.created",
+  "form.replied",
+  "form.cancelled",
+]
+
+function subscribe(ctx, root) {
+  const controller = new AbortController()
+  void (async () => {
+    try {
+      for await (const event of ctx.event.subscribe({
+        types: subscriptionTypes,
+        signal: controller.signal,
+      })) {
+        try {
+          record(root, event)
+        } catch {
+          // Monitoring must never change or interrupt an OpenCode session.
+        }
+      }
+    } catch {
+      // Plugin unload and event-stream failures are best-effort only.
+    }
+  })()
+  return () => controller.abort()
+}
+
+const v2Definition = Plugin.define({
+  id: "codex-cli-monitor.decisions",
+  setup(ctx) {
+    const root = clean(ctx?.location?.directory) || process.cwd()
+    return subscribe(ctx, root)
+  },
+})
+
+// The server entrypoint keeps one compatibility path for OpenCode 1 releases.
+async function server({ directory, worktree } = {}) {
   const root = clean(directory) || clean(worktree) || process.cwd()
   return {
     event: async ({ event }) => {
@@ -165,3 +225,5 @@ export const CodexMonitorDecisions = async ({ directory, worktree }) => {
     },
   }
 }
+
+export default { ...v2Definition, server }

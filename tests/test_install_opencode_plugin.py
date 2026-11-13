@@ -36,6 +36,14 @@ class PluginAssetTests(unittest.TestCase):
         self.assertNotIn("patterns:", payload)
         self.assertNotIn("metadata:", payload)
 
+    def test_shipped_asset_uses_the_v2_plugin_definition(self) -> None:
+        payload = plugin_source(REPO_ROOT).read_text(encoding="utf-8")
+        self.assertIn('from "@opencode/plugin"', payload)
+        self.assertIn("Plugin.define({", payload)
+        self.assertIn('id: "codex-cli-monitor.decisions"', payload)
+        self.assertIn("ctx.event.subscribe({", payload)
+        self.assertIn("export default { ...v2Definition, server }", payload)
+
 
 class InstallPluginTests(unittest.TestCase):
     def test_install_creates_the_plugin_and_is_idempotent(self) -> None:

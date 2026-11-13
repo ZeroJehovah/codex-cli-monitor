@@ -160,6 +160,10 @@ OpenCode 会自动发现 `~/.config/opencode/plugin/*.js`。安装器只放进�
 `codex-monitor-decisions.js`，它订阅 OpenCode 的观察性 `event` 事件流，在提示打开和被回
 答时各追加一条极小的 JSONL 标记：
 
+插件同时提供 OpenCode v2 的默认 `Plugin.define({ id, setup })` 入口和 v1 的兼容
+`server` 入口。OpenCode v2 会把待确认事件作为 `permission.*`、`form.*` 结构事件投递；
+安装后运行 `opencode plugin list` 应能看到 `codex-cli-monitor.decisions`。
+
 ```bash
 ./bin/opencode-monitor-install-plugin            # 安装或更新
 ./bin/opencode-monitor-install-plugin --check    # 只检查状态

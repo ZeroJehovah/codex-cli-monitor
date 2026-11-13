@@ -162,6 +162,42 @@ class PendingDecisionTests(unittest.TestCase):
 
         self.assertEqual(decisions[0].reason, "question prompt")
 
+    def test_v2_form_is_a_question(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            _write(
+                path,
+                [
+                    _asked(
+                        event="form.created",
+                        kind="question",
+                        request_id="frm_1",
+                        category="question",
+                    )
+                ],
+            )
+            decisions = pending_decisions(path)
+
+        self.assertEqual(decisions[0].kind, "question")
+        self.assertEqual(decisions[0].reason, "question")
+
+    def test_v2_form_reply_or_cancel_answers_the_question(self) -> None:
+        for reply_event in ("form.replied", "form.cancelled"):
+            with self.subTest(reply_event=reply_event), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "decisions.jsonl"
+                _write(
+                    path,
+                    [
+                        _asked(
+                            event="form.created",
+                            kind="question",
+                            request_id="frm_1",
+                        ),
+                        _replied(event=reply_event, request_id="frm_1"),
+                    ],
+                )
+                self.assertEqual(pending_decisions(path), ())
+
     def test_stale_asks_expire_so_a_killed_session_never_sticks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
