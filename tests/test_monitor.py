@@ -16,6 +16,7 @@ from codex_cli_monitor.claude_state import (
 from codex_cli_monitor.qoder_state import reset_caches as reset_qoder_caches
 from codex_cli_monitor.hook_state import append_hook_event
 from codex_cli_monitor.monitor import discover_sessions, inspect_runtime
+from codex_cli_monitor.paseo_state import reset_paseo_cache
 from codex_cli_monitor.terminal_state import MAX_INITIAL_TAIL_BYTES
 
 
@@ -42,6 +43,96 @@ QODER_CWD = "/work/qoder"
 
 
 class MonitorTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        reset_paseo_cache()
+
+    def test_paseo_task_replaces_app_server_as_user_facing_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "paseo-home"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 200, "Paseo Daemon", "S", 1, ["Paseo Daemon"], "/home/test")
+            _write_process(
+                proc,
+                201,
+                "codex",
+                "S",
+                200,
+                ["/opt/codex/bin/codex", "app-server", "--enable", "goals"],
+                "/home/test",
+                environment={
+                    "PASEO_AGENT_ID": "agent-123",
+                    "PASEO_AGENT_CWD": "/work/paseo-task",
+                },
+            )
+            agent_dir = home / "agents" / "work-paseo-task"
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "agent-123.json").write_text(
+                json.dumps(
+                    {
+                        "id": "agent-123",
+                        "cwd": "/work/paseo-task",
+                        "createdAt": "2026-11-24T12:19:10.117Z",
+                        "lastStatus": "running",
+                        "title": "do not expose task text",
+                        "metadata": {"prompt": "do not parse prompt bodies"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"PASEO_HOME": str(home)}):
+                sessions = discover_sessions(proc, codex_home=root / "codex-home")
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].root.pid, 201)
+        self.assertEqual(sessions[0].root.cwd, "/work/paseo-task")
+        self.assertEqual(sessions[0].cli_type, "paseo")
+        self.assertEqual(sessions[0].display_status, "运行中")
+        self.assertEqual(sessions[0].binding_method, "paseo_agent_id")
+        self.assertNotIn("do not expose task text", json.dumps(sessions[0].to_dict()))
+        self.assertNotIn("do not parse prompt bodies", json.dumps(sessions[0].to_dict()))
+
+    def test_paseo_task_requires_exact_process_environment_and_record_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc"
+            home = root / "paseo-home"
+            proc.mkdir()
+            home.mkdir()
+            _write_common_proc(proc)
+            _write_process(proc, 200, "Paseo Daemon", "S", 1, ["Paseo Daemon"], "/home/test")
+            _write_process(
+                proc,
+                201,
+                "codex",
+                "S",
+                200,
+                ["/opt/codex/bin/codex", "app-server", "--enable", "goals"],
+                "/home/test",
+            )
+            agent_dir = home / "agents" / "work-paseo-task"
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "agent-123.json").write_text(
+                json.dumps(
+                    {
+                        "id": "agent-123",
+                        "cwd": "/work/paseo-task",
+                        "createdAt": "2026-11-24T12:19:10.117Z",
+                        "lastStatus": "running",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"PASEO_HOME": str(home)}):
+                sessions = discover_sessions(proc, codex_home=root / "codex-home")
+
+        self.assertEqual(sessions, ())
+
     def test_new_process_is_monitored_but_not_displayed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc = Path(tmp) / "proc"
@@ -2567,6 +2658,7 @@ def _write_process(
     cwd: str,
     *,
     age_seconds: float = 199.0,
+    environment: dict[str, str] | None = None,
 ) -> None:
     pid_dir = proc / str(pid)
     (pid_dir / "fd").mkdir(parents=True, exist_ok=True)
@@ -2575,6 +2667,13 @@ def _write_process(
         encoding="utf-8",
     )
     (pid_dir / "cmdline").write_bytes(b"\0".join(item.encode() for item in cmdline) + b"\0")
+    (pid_dir / "environ").write_bytes(
+        b"\0".join(
+            f"{key}={value}".encode()
+            for key, value in (environment or {}).items()
+        )
+        + (b"\0" if environment else b"")
+    )
     (pid_dir / "cwd").symlink_to(cwd)
     (pid_dir / "exe").symlink_to(f"/usr/bin/{cmdline[0]}")
     (pid_dir / "fd" / "0").symlink_to("/dev/pts/3")

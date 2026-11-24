@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from contextlib import redirect_stderr
+from dataclasses import replace
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +54,7 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual(
             set(snapshot["sessions"][0]),
             {
+                "instance_id",
                 "pid",
                 "status",
                 "waiting_reason",
@@ -77,15 +79,35 @@ class AggregationTests(unittest.TestCase):
 
     def test_remote_snapshot_preserves_known_cli_types(self) -> None:
         identity = ServerIdentity("server-a", "Server A", "boot-a")
-        for cli_type in ("codex", "opencode", "claude", "qoder"):
+        for cli_type in ("codex", "opencode", "claude", "qoder", "paseo"):
             with self.subTest(cli_type=cli_type):
+                session = _session(100, cli_type=cli_type)
+                if cli_type == "paseo":
+                    session = replace(session, instance_id="paseo-agent-one")
                 snapshot = build_collector_snapshot(
-                    (_session(100, cli_type=cli_type),),
+                    (session,),
                     identity,
                     observed_at=10.0,
                 )
                 ingested = RemoteSnapshotStore().ingest(snapshot, received_at=11.0)
                 self.assertEqual(ingested.sessions[0]["cli_type"], cli_type)
+                self.assertTrue(ingested.sessions[0]["instance_id"])
+
+    def test_paseo_snapshot_identity_does_not_depend_on_shared_daemon_pid(self) -> None:
+        identity = ServerIdentity("server-a", "Server A", "boot-a")
+        one = _session(500, cli_type="paseo")
+        two = _session(500, cli_type="paseo")
+        one = replace(one, instance_id="paseo-agent-one")
+        two = replace(two, instance_id="paseo-agent-two")
+        snapshot = build_collector_snapshot((one, two), identity, observed_at=10.0)
+
+        ingested = RemoteSnapshotStore().ingest(snapshot, received_at=11.0)
+
+        self.assertEqual(len({row["session_key"] for row in ingested.sessions}), 2)
+        self.assertEqual(
+            {row["instance_id"] for row in ingested.sessions},
+            {"paseo-agent-one", "paseo-agent-two"},
+        )
 
     def test_remote_snapshot_falls_back_to_codex_for_unknown_cli_types(self) -> None:
         identity = ServerIdentity("server-a", "Server A", "boot-a")

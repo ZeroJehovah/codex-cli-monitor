@@ -1,10 +1,10 @@
 # codex-cli-monitor
 
-`codex-cli-monitor` 是一个用于观察本机 Codex CLI、OpenCode CLI、Claude Code CLI 和 Qoder CLI 运行状态的小工具。它的目标是低侵入地显示当前打开了多少个会话，并把每个会话归类为少量可直接使用的状态。
+`codex-cli-monitor` 是一个用于观察本机 Codex CLI、OpenCode CLI、Claude Code CLI、Qoder CLI 和 Paseo 任务运行状态的小工具。它的目标是低侵入地显示当前打开了多少个会话，并把每个会话归类为少量可直接使用的状态。
 
 ## 功能
 
-- 扫描当前系统里的 Codex CLI、OpenCode CLI、Claude Code CLI 和 Qoder CLI 进程，显示会话数量、PID、TTY、工作目录、运行时长等信息。
+- 扫描当前系统里的 Codex CLI、OpenCode CLI、Claude Code CLI、Qoder CLI 和 Paseo 管理的任务，显示会话数量、PID、TTY、工作目录、运行时长等信息。
 - 使用 Codex 低频 hooks 驱动状态流转，并用最小化结构化终端事件补足失败结果。
 - 把「回合已停下、必须由人回答才能继续」（方案选择、权限授权、确认提示）单独显示为
   `待确认`，而不是继续显示 `运行中`，避免漏掉需要手动操作的会话。
@@ -13,17 +13,20 @@
   transcript 推理状态（运行中/待确认/成功/失败），零配置、不安装任何 hook。
 - 对 Qoder CLI 会话通过只读读取由确切 PID 以写方式持有的 run segment JSONL，从结构化
   `turn`/`permission` 事件推理状态（运行中/待确认/成功/失败），零配置、不安装任何 hook。
+- 对 Paseo 任务，只读匹配确切 Codex app-server 进程环境中的 agent ID/工作目录与
+  `~/.paseo/agents/<workspace>/<agent-id>.json` 的结构字段；只显示确认仍为 running 的任务，
+  并单独标为 Paseo，避免显示成 `/home/ubuntu` 下的普通 Codex 会话。
 - 保留轻量进程存活检查，用于清理未触发 Hook 就意外退出的会话。
 - 支持 JSON 输出，方便接入脚本或面板。
 - 支持常驻后台 HTTP API，供桌面前端轮询当前会话状态。
-- 支持多服务器采集与聚合：每台服务器本地采集，VPS 聚合服务同时监控自身 Codex/OpenCode/Claude Code/Qoder 并合并远端状态。
-- 提供轻量原生 Win32 小型悬浮窗前端，用状态圆点展示每个进程，可区分 Codex/OpenCode/Claude Code/Qoder 并同时显示。
+- 支持多服务器采集与聚合：每台服务器本地采集，VPS 聚合服务同时监控自身 Codex/OpenCode/Claude Code/Qoder/Paseo 并合并远端状态。
+- 提供轻量原生 Win32 小型悬浮窗前端，用状态圆点展示每个进程，可区分 Codex/OpenCode/Claude Code/Qoder/Paseo 并同时显示。
 - 提供兼容电脑与手机的 Web 面板，沿用悬浮窗的深色目录分组与状态圆点，通过 URL 读取 token 访问，与 Windows 共用后端接口。
 - 提供可选的同名 `codex` shim，用来记录启动元数据后再透明执行真正的 Codex CLI。
 
 ## 大概原理
 
-默认方式是 Hook 状态机加轻量 sidecar：工具独立运行，不修改 Codex/OpenCode/Claude Code/Qoder，也不要求改变正常使用习惯。它只读取这些必要信号：
+默认方式是 Hook 状态机加轻量 sidecar：工具独立运行，不修改 Codex/OpenCode/Claude Code/Qoder/Paseo，也不要求改变正常使用习惯。它只读取这些必要信号：
 
 - `/proc` 里的进程、父子关系、命令行、TTY、当前工作目录、进程启动时间，以及由准确
   Codex PID 持有的 session JSONL 文件描述符。
@@ -64,12 +67,17 @@
   只接受由确切 Qoder PID 以写方式持有的 segment 文件，并只识别 `turn.started`、
   `turn.finished`、`permission.requested`/`permission.resolved`、`AskUserQuestion`/
   `ExitPlanMode` 工具请求等生命周期字段；Qoder 的 transcript 与消息正文完全不读取。
+- Paseo 引擎 Codex app-server 的进程环境中的 `PASEO_AGENT_ID`/`PASEO_AGENT_CWD`，
+  以及 Paseo 自己写出的 `~/.paseo/agents/<workspace>/<agent-id>.json`。监控只抽取
+  顶层 `id`、`cwd`、`createdAt`、`lastStatus` 字段，跳过其他字段而不解码；
+  app-server 本身不作为普通 Codex 会话显示。只有精确 ID、工作目录相同且
+  `lastStatus=running` 的 Paseo Codex 任务才显示；任务停止后移除。
 - 可选 shim 写入的启动记录。
 
 常驻扫描不做 CPU 差值采样，不读取进程网络连接，不扫描运行时诊断数据库，也不根据
 assistant 文本、工具输出或错误关键词推断状态。监控不会输出 session JSONL 的消息正文，
-不会输出 OpenCode 的对话/工具内容，也不会读取或输出 Claude Code transcript 或 Qoder
-segment 里的提示词、回复、工具输入输出和错误正文。
+不会输出 OpenCode 的对话/工具内容，也不会读取或输出 Claude Code transcript、Qoder
+segment 或 Paseo 记录里的提示词、回复、工具输入输出和错误正文。
 
 监控还会读取 Linux 进程的会话 ID、进程组和终端前台进程组。若 Codex 仍残留在
 `/proc` 中，但其 TTY 已删除、终端前台进程组已失效，或者原终端会话 leader 已经不存
@@ -551,6 +559,25 @@ curl -s http://127.0.0.1:8765/healthz | python3 -m json.tool | grep -A 7 qoder_s
 > Qoder 自己写出的 segment 生命周期事件；`qoder -p` 一次性调用和无 TTY 的后台 worker
 > 按设计排除。进程退出后 segment 不再被持有，对应状态行随之消失。
 
+### 监测 Paseo 任务
+
+Paseo 任务由正在运行的 Codex app-server 提供准确的 `PASEO_AGENT_ID` 和
+`PASEO_AGENT_CWD`。监控用这两个值匹配 `~/.paseo/agents/<workspace>/<agent-id>.json`
+里的 `id`、`cwd`、`createdAt`、`lastStatus`；只显示匹配且
+`lastStatus=running` 的任务，类型为 `paseo`。显示项沿用承载它的精确 engine PID，
+任务身份由 engine PID、启动标识和 agent ID 共同生成哈希，各引擎的任务保持独立。
+
+无需安装 hook、Paseo 插件、shim 或数据库工具。监控不调用 Paseo CLI 或 daemon API，
+不读取任务标题、提示词、回复、工具内容，也不因 `requiresAttention` 等未读提醒字段
+推断 `待确认`。Codex app-server 不会同时再被显示成普通 Codex 行；没有活动且精确匹配
+的 Paseo 记录时不显示 Paseo 行。
+
+核对 Paseo 是否仍将任务报告为运行中，可在同一 Linux 用户下运行
+`paseo agent ls --global --background`，查看活动任务的工作目录。再确认其引擎进程带有
+`PASEO_AGENT_ID`/`PASEO_AGENT_CWD`，并确认监控进程与 Paseo daemon 使用同一个用户和
+`PASEO_HOME`（默认 `~/.paseo`）。若目录自定义，将 `PASEO_HOME` 加入监控 daemon
+环境并重启本地采集器或相应 systemd 服务。
+
 ## 多服务器部署
 
 Windows 悬浮窗自动记录诊断日志，位置为
@@ -571,8 +598,8 @@ Linux 采集服务器 ─┼─ HTTP(S)/Tailscale ─ VPS 聚合服务 ─ Windo
 VPS 本机 Codex  ──┘                     （同时采集 VPS 本机）
 ```
 
-- VPS 聚合服务接收远端快照，并使用相同的本地采集逻辑显示 VPS 自己的 Codex/OpenCode/Claude Code/Qoder。
-- 每台 Linux 采集服务器只读取本机 `/proc`、Hook 日志、Hook 精确绑定的 Codex session 文件尾、OpenCode 只读 SQLite、Claude Code 的 PID 注册文件与 transcript 尾部，以及 Qoder PID 写持有的 segment 事件流，然后异步推送最小状态快照。
+- VPS 聚合服务接收远端快照，并使用相同的本地采集逻辑显示 VPS 自己的 Codex/OpenCode/Claude Code/Qoder/Paseo。
+- 每台 Linux 采集服务器只读取本机 `/proc`、Hook 日志、Hook 精确绑定的 Codex session 文件尾、OpenCode 只读 SQLite、Claude Code 的 PID 注册文件与 transcript 尾部、Qoder PID 写持有的 segment 事件流，以及精确匹配的 Paseo 记录字段，然后异步推送最小状态快照。
 - Hook 始终只写本地文件，不直接访问 VPS；VPS 离线不会阻塞 Codex。
 - Windows 悬浮窗只访问聚合服务，不直接连接每台采集服务器。
 
@@ -1207,6 +1234,13 @@ Qoder 这条路径同样不涉及 hook，排查顺序如下：
   `--config-dir` 启动的 Qoder 无需额外配置。
 - `qoder -p`/`--print` 一次性调用、没有 TTY 的 headless/remote worker 按设计排除。
 
+#### Paseo 任务不显示
+
+- 在 Paseo daemon 的同一用户下执行 `paseo agent ls --global --background`，确认任务状态为 running，并检查其工作目录。
+- 确认 Codex app-server 的 `/proc/<pid>/environ` 含有与该任务一致的 `PASEO_AGENT_ID` 和 `PASEO_AGENT_CWD`；监控只按这两个值精确绑定，不按 `/home/ubuntu` 等 app-server cwd 猜测。
+- 确认 Paseo 任务记录在监控用户的 `$PASEO_HOME/agents/<workspace>/<agent-id>.json`（默认 `~/.paseo/agents/`）中，且顶层 `lastStatus` 为 `running`、`id`/ `cwd` 相同。
+- 若 Paseo 使用自定义 home，把相同的 `PASEO_HOME` 配置给监控 daemon 并重启。当前接入范围为直接由 Paseo Daemon 启动的 Codex 引擎任务；其他 provider 尚未接入。
+
 #### 会话卡在提示上，但仍显示 `运行中`
 
 `待确认` 只来自明确的结构化信号，缺信号时按设计退回 `运行中`。按 CLI 分别检查：
@@ -1327,9 +1361,9 @@ exe 会直接退出，不会打开第二个悬浮窗。它通过 WebSocket 接�
 后端实例的消息会被丢弃。它按目录分组显示
 无表头表格：每行第一列是
 目录名，第二列是该目录下一个或多个带柔化边缘的进程状态圆点。Codex、OpenCode、
-Claude Code 与 Qoder 会话会并列显示在同一张表里，圆点颜色语义相同（蓝色运行中 /
+Claude Code、Qoder 与 Paseo 任务会并列显示在同一张表里，圆点颜色语义相同（蓝色运行中 /
 琥珀色待确认 / 绿色成功 / 红色失败），悬停详情的 `CLI` 行（`codex`、`opencode`、
-`claude` 或 `qoder`）用于区分。前端按
+`claude`、`qoder` 或 `paseo`）用于区分。前端按
 `cli_type` 字段透传显示，新增 CLI 类型无需重新编译 exe。它不依赖
 .NET Runtime 或 Electron。
 
@@ -1468,7 +1502,8 @@ ${XDG_STATE_HOME:-~/.local/state}/codex-cli-monitor/launches.jsonl
 
 运行后端单元测试（包含 OpenCode SQLite 解析、OpenCode hook 日志与安装器测试、OpenCode
 决策日志与插件安装器测试、Codex `PermissionRequest` 待确认判定、Claude Code 注册绑定
-与 transcript 结局判定测试，以及 Qoder segment 增量解析、待确认判定与同目录进程独立绑定
+与 transcript 结局判定测试、Qoder segment 增量解析与同目录进程独立绑定，以及 Paseo
+精确 agent ID/工作目录绑定和 app-server 去重
 测试）：
 
 ```bash

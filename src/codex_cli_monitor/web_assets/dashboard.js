@@ -1,7 +1,7 @@
 import { MonitorClient, STATUSES } from "/web/client.mjs";
 
 const byId = id => document.getElementById(id);
-const clientNames = { codex: "Codex", opencode: "OpenCode", claude: "Claude Code", qoder: "Qoder" };
+const clientNames = { codex: "Codex", opencode: "OpenCode", claude: "Claude Code", qoder: "Qoder", paseo: "Paseo" };
 const connectionLabels = {
   connecting: "正在连接", live: "实时同步", polling: "自动刷新",
   reconnecting: "正在重连", stale: "连接中断", unauthorized: "鉴权失败",

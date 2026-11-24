@@ -41,6 +41,7 @@ from .opencode_state import (
     opencode_hook_events,
     scan_opencode_state,
 )
+from .paseo_state import clear_paseo_cache, has_paseo_daemon, paseo_sessions
 from .procfs import read_processes
 from .shim import default_log_path, load_launch_records
 from .terminal_state import (
@@ -149,10 +150,21 @@ def discover_sessions(
     opencode_roots = _find_opencode_roots(processes)
     claude_roots = _find_claude_roots(processes)
     qoder_roots = _find_qoder_roots(processes)
-    if not codex_roots and not opencode_roots and not claude_roots and not qoder_roots:
+    paseo_running = has_paseo_daemon(processes)
+    if not paseo_running:
+        clear_paseo_cache()
+    if (
+        not codex_roots
+        and not opencode_roots
+        and not claude_roots
+        and not qoder_roots
+        and not paseo_running
+    ):
         return ()
 
     sessions: list[CodexSession] = []
+    if paseo_running:
+        sessions.extend(paseo_sessions(processes, proc_root=proc_root))
     if codex_roots:
         state_home = (codex_home or default_codex_home()).expanduser()
         grouped_hook_states = summarize_hook_events(load_hook_events(hook_log))
@@ -233,7 +245,15 @@ def discover_sessions(
         sessions.extend(
             _discover_qoder_sessions(qoder_roots, processes, proc_root=proc_root)
         )
-    return tuple(sorted(sessions, key=lambda session: session.root.pid))
+    return tuple(
+        sorted(
+            sessions,
+            key=lambda session: (
+                session.root.pid,
+                session.instance_id or "",
+            ),
+        )
+    )
 
 
 def _discover_claude_sessions(
@@ -1333,17 +1353,10 @@ def _is_managed_codex_app_server(process: ProcessInfo) -> bool:
 
 
 def _is_codex_app_server_daemon(process: ProcessInfo) -> bool:
-    """Return true for Codex's non-interactive app-server daemon processes."""
+    """Hide app-server commands, which speak the protocol rather than a TUI."""
     if not is_native_codex_process(process):
         return False
-    try:
-        app_server_index = process.cmdline.index("app-server")
-    except ValueError:
-        return False
-    arguments = process.cmdline[app_server_index + 1 :]
-    return "--managed-daemon" in arguments or (
-        bool(arguments) and arguments[0] == "daemon"
-    )
+    return "app-server" in process.cmdline
 
 
 def _is_tmux_hosted(

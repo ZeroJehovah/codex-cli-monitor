@@ -287,9 +287,11 @@ class CodexSession:
     binding_evidence: tuple[str, ...] = field(default_factory=tuple)
     cli_type: str = "codex"
     waiting_reason: str | None = None
+    instance_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "instance_id": self.instance_id,
             "status": self.display_status,
             "cli_type": self.cli_type,
             "waiting_reason": self.waiting_reason,

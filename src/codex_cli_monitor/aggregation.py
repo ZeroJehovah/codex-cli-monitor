@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import socket
@@ -90,7 +91,10 @@ def build_collector_snapshot(
         "observed_at": observed_at,
         "observed_at_iso": _timestamp_iso(observed_at),
         "session_count": len(sessions),
-        "sessions": [_collector_session_payload(session) for session in sessions],
+        "sessions": [
+            _collector_session_payload(session, identity)
+            for session in sessions
+        ],
     }
 
 
@@ -244,12 +248,23 @@ def _local_session_payload(
     observed_at: float,
 ) -> dict:
     root = session.root
+    instance_id = session.instance_id or _process_instance_id(
+        identity,
+        root.pid,
+        root.started_at,
+    )
     result = {
         "server_id": identity.server_id,
         "server_name": identity.server_name,
         "server_boot_id": identity.boot_id,
         "server_observed_at": observed_at,
-        "session_key": _session_key(identity, root.pid, root.started_at),
+        "session_key": _session_key(
+            identity,
+            root.pid,
+            root.started_at,
+            instance_id=session.instance_id,
+        ),
+        "instance_id": instance_id,
         "pid": root.pid,
         "ppid": root.ppid,
         "status": session.display_status,
@@ -276,9 +291,18 @@ def _local_session_payload(
     return result
 
 
-def _collector_session_payload(session: CodexSession) -> dict:
+def _collector_session_payload(
+    session: CodexSession,
+    identity: ServerIdentity,
+) -> dict:
     root = session.root
+    instance_id = session.instance_id or _process_instance_id(
+        identity,
+        root.pid,
+        root.started_at,
+    )
     return {
+        "instance_id": instance_id,
         "pid": root.pid,
         "status": session.display_status,
         "waiting_reason": getattr(session, "waiting_reason", None),
@@ -295,9 +319,6 @@ def _remote_session_payload(
 ) -> dict:
     if not isinstance(item, Mapping):
         raise SnapshotValidationError("snapshot session must be an object")
-    pid = _required_int(item.get("pid"), "session pid")
-    if pid <= 0 or pid > 2_147_483_647:
-        raise SnapshotValidationError("session pid must be positive")
     status = item.get("status")
     if status not in VALID_DISPLAY_STATUSES:
         raise SnapshotValidationError("session status is invalid")
@@ -308,8 +329,23 @@ def _remote_session_payload(
     )
     started_at = _optional_float(item.get("started_at"))
     cli_type = _optional_limited_str(item.get("cli_type"), "session cli_type", 32)
-    if cli_type not in {"codex", "opencode", "claude", "qoder"}:
+    if cli_type not in {"codex", "opencode", "claude", "qoder", "paseo"}:
         cli_type = "codex"
+    instance_id = _optional_limited_str(
+        item.get("instance_id"),
+        "session instance_id",
+        128,
+    )
+    pid = _required_int(item.get("pid"), "session pid")
+    if pid <= 0 or pid > 2_147_483_647:
+        raise SnapshotValidationError("session pid must be positive")
+    if cli_type == "paseo" and (
+        instance_id is None
+        or not re.fullmatch(r"paseo-[A-Za-z0-9._-]{1,122}", instance_id)
+    ):
+        raise SnapshotValidationError("Paseo session instance_id is invalid")
+    if instance_id is None:
+        instance_id = _process_instance_id(identity, pid, started_at)
     # The waiting reason is a short CLI-authored label, so it is clamped at the
     # source: an oversized one is rejected here rather than silently truncated,
     # and what remains is stripped again instead of being trusted from the wire.
@@ -325,7 +361,13 @@ def _remote_session_payload(
         "server_name": identity.server_name,
         "server_boot_id": identity.boot_id,
         "server_observed_at": observed_at,
-        "session_key": _session_key(identity, pid, started_at),
+        "session_key": _session_key(
+            identity,
+            pid,
+            started_at,
+            instance_id=instance_id if cli_type == "paseo" else None,
+        ),
+        "instance_id": instance_id,
         "pid": pid,
         "ppid": _optional_int(item.get("ppid")),
         "status": status,
@@ -347,10 +389,25 @@ def _session_key(
     identity: ServerIdentity,
     pid: int,
     started_at: float | None,
+    *,
+    instance_id: str | None = None,
+) -> str:
+    boot_id = identity.boot_id or "unknown-boot"
+    if instance_id:
+        return f"{identity.server_id}:{boot_id}:{instance_id}"
+    start = "unknown-start" if started_at is None else f"{started_at:.6f}"
+    return f"{identity.server_id}:{boot_id}:{pid}:{start}"
+
+
+def _process_instance_id(
+    identity: ServerIdentity,
+    pid: int,
+    started_at: float | None,
 ) -> str:
     boot_id = identity.boot_id or "unknown-boot"
     start = "unknown-start" if started_at is None else f"{started_at:.6f}"
-    return f"{identity.server_id}:{boot_id}:{pid}:{start}"
+    material = f"{identity.server_id}:{boot_id}:{pid}:{start}"
+    return "process-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
 
 def _read_optional_text(path: Path) -> str | None:

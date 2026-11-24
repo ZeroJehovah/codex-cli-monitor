@@ -268,7 +268,7 @@ class WebSocketBroadcaster:
     ) -> int:
         local_sig = tuple(sorted(
             (s.root.pid, s.root.started_at, s.display_status, s.root.cwd,
-             s.waiting_reason, getattr(s, "cli_type", "codex"))
+             s.waiting_reason, getattr(s, "cli_type", "codex"), s.instance_id)
             for s in sessions
         ))
         remote_sig = tuple(sorted(
